@@ -1,0 +1,15 @@
+# Architecture Description Context
+
+This file preserves the original high-level model vision. The current
+normative software architecture lives in `doc/architecture/system_architecture.md`
+and `doc/architecture/software/`.
+
+We get frames (64x64 pixel images) as observation in each step, and we can interact with the game with a few actions (e.g. arrow keys, and clicks, etc.).
+
+We have 3 main models which are all implemented as VLM (or VLM + image generator for models that need to return images like the world (S) and goal (G) models. We want the framework to be flexible enough so that we can also swap these for more custom neural networks if needed. The game loop describes on step of the game environment and what we do with the various models:
+1. The agent (X) (VLM) can do reasoning and tool calling (world and goal models) and it can chain these as many times it wants (fully flexible). For calling the models as tools it has to provide an action and a reference to an observation which we store in either the state or experimental memory. The experimental memory is used only during the agent's tool calling to store the output of the world and goal model simulations. So this is reset each step, while the state memory contains all the observation list (and model predictions) for the entire game. The agent always immediately receives the output of the tool call in its context window and then progresses with more tool calls, etc. The final output of the agent is a single action prediction which we will apply to the game state.
+
+Once this is outputted by the agent, we run the game 1 step forward, record the observation(s) and update all models using an updater VLM. This is because initially we will do all updates in text in context, but later we would like to switch to loss-based updates with LoRA on the actual models. The updater VLM uses a system prompt and gets the inputs in the image and updates the context used for each model. This context really corresponds to the "world model" as in we envision it few-page text document that contains information about how the game works and is updated based on new observations. Similarly for the goal model it provides context of how and why the goal was updated as the game progressed. Finally the updater for the agent is a bit more complex as it uses the rewards scores in R_t plus the full trace of the agent at the current timestep, plut current and prior observations and produced a new context document which corresponds loosely to how the agent should use the tools, take actions, etc. The point of all of this is to provide a way for these models to "learn" online even before implementing LoRA. Each model's context is made up of a game-agnostic (K) and game-specific doc (L). The game-agnostic part only gets updated after finishing a game, so it's fixed while playing a single game. 
+
+
+Each model will obviously have some system prompt that is fixed telling it what the inputs mean, what the aim is (e.g. world model to predict next state), basically instructions.

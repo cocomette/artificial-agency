@@ -1,0 +1,7 @@
+openai>=2.34.0
+pandas>=2.3.3
+pyarrow>=22.0.0
+python-dotenv>=1.2.1
+pyyaml>=6.0.3
+rich>=13.9.4
+vllm==0.19.1

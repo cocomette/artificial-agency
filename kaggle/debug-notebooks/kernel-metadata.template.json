@@ -1,0 +1,22 @@
+{
+  "id": "kaggle-owner/face-of-agi-arc-agi-3-rtx6000-debug",
+  "title": "FACE-OF-AGI ARC-AGI-3 RTX6000 Debug",
+  "code_file": "debug.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "enable_internet": false,
+  "keywords": [],
+  "dataset_sources": [
+    "kaggle-owner/face-of-agi-wheelhouse",
+    "kaggle-owner/face-of-agi-public-games",
+    "kaggle-owner/face-of-agi-qwen36-35b-fp8-weights"
+  ],
+  "kernel_sources": [],
+  "competition_sources": [
+    "arc-prize-2026-arc-agi-3"
+  ],
+  "model_sources": []
+}
