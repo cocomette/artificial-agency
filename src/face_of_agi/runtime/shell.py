@@ -18,40 +18,50 @@ from face_of_agi.debug.sinks import LiveTurnMonitor
 from face_of_agi.environment import ArcEnvironmentAdapter, load_environment_config
 from face_of_agi.environment.config import (
     ModelRoleConfig,
-    UpdaterRuntimeConfig,
     load_game_catalog,
     write_game_catalog,
 )
 from face_of_agi.memory import ExperimentalMemory, SQLiteDatabase, StateMemory
 from face_of_agi.models import (
     ChangeSummaryAdapter,
+    HFChangeSummaryConfig,
+    HFGoalAdapter,
+    HFGoalConfig,
+    HFInterestAdapter,
+    HFInterestConfig,
+    HFMemoryAdapter,
+    HFMemoryConfig,
+    HFOrchestratorAgentAdapter,
+    HFOrchestratorAgentConfig,
+    HFRewardJudgeAdapter,
+    HFRewardJudgeConfig,
+    HFWorldAdapter,
+    HFWorldConfig,
     ModelRegistry,
-    OrchestratorAgentConfig,
-    UpdaterTaskRegistry,
     VLLMChangeSummaryConfig,
-    VLLMHistorizerConfig,
+    VLLMGoalAdapter,
+    VLLMGoalConfig,
+    VLLMInterestAdapter,
+    VLLMInterestConfig,
+    VLLMMemoryAdapter,
+    VLLMMemoryConfig,
     VLLMOrchestratorAgentConfig,
-    VLLMUpdaterConfig,
+    VLLMRewardJudgeAdapter,
+    VLLMRewardJudgeConfig,
+    VLLMWorldAdapter,
+    VLLMWorldConfig,
 )
-from face_of_agi.models.orchestrator_agent.providers import (
-    VLLMOrchestratorAgentAdapter,
+from face_of_agi.models.orchestrator_agent.providers import VLLMOrchestratorAgentAdapter
+from face_of_agi.models.providers.hf_transformers import (
+    HFVLMEngine,
+    shared_hf_vlm_engine,
 )
-from face_of_agi.models.historizer.providers import (
-    VLLMHistorizerAdapter,
-)
-from face_of_agi.models.updater.providers import VLLMUpdaterAdapter
 from face_of_agi.orchestration import Orchestrator
+from face_of_agi.orchestration.online_lora import OnlineLoRAManager
 from face_of_agi.runtime.loop import RuntimeLoop
 from face_of_agi.runtime.parallel import ParallelGameRunSpec, ParallelRuntimeLoop
 
 DEFAULT_DATABASE_PATH = Path("runs/memory.sqlite")
-_ROLE_CONFIG_KEYS_NOT_PROVIDER_OPTIONS = {
-    "input_image_detail",
-    "input_image_size",
-    "input_image_resample",
-    "image_mime_type",
-    "frame_scale",
-}
 
 
 def main() -> None:
@@ -118,10 +128,12 @@ def main() -> None:
     model_registry = _build_model_registry(
         agent_config=environment_config.models.agent,
         change_config=environment_config.models.change,
-        historizer_config=environment_config.models.historizer,
+        memory_config=environment_config.models.memory,
+        world_config=environment_config.models.world,
+        goal_config=environment_config.models.goal,
+        interest_config=environment_config.models.interest,
+        reward_judge_config=environment_config.models.reward_judge,
         shared_vlm_config=environment_config.models.shared_vlm,
-        observation_text_config=environment_config.models.observation_text,
-        updater_config=environment_config.models.updater,
     )
     contexts = None
     if playback_request is not None:
@@ -142,18 +154,22 @@ def main() -> None:
             f" replay_turns={playback.replay_turn_count}"
         )
 
-    runtime = RuntimeLoop(
-        _build_orchestrator(
-            database_path,
-            experimental_memory_turn_buffer=(
-                environment_config.experimental_memory_turn_buffer
-            ),
-            models=model_registry,
-            contexts=contexts,
-        )
+    online_lora_manager = _build_online_lora_manager(
+        environment_config,
+        hf_engine=_hf_engine_from_registry(model_registry),
     )
-
     try:
+        runtime = RuntimeLoop(
+            _build_orchestrator(
+                database_path,
+                experimental_memory_turn_buffer=(
+                    environment_config.experimental_memory_turn_buffer
+                ),
+                models=model_registry,
+                contexts=contexts,
+                online_lora_manager=online_lora_manager,
+            )
+        )
         result = runtime.run(
             config=runtime_config,
             environment=environment,
@@ -162,6 +178,9 @@ def main() -> None:
     except Exception as exc:
         print(f"starter shell failed: {exc}")
         raise SystemExit(1) from exc
+    finally:
+        if online_lora_manager is not None:
+            online_lora_manager.shutdown()
 
     if not isinstance(result, GameRunResult):
         raise RuntimeError("starter shell expected a single-game runtime result")
@@ -193,6 +212,10 @@ def _run_parallel_config(
         if base_environment_config.live_turn_monitor
         else None
     )
+    online_lora_manager = _build_online_lora_manager(
+        base_environment_config,
+        hf_engine=_build_hf_engine_for_environment_config(base_environment_config),
+    )
     specs = tuple(
         ParallelGameRunSpec(
             game_index=game_index,
@@ -208,18 +231,23 @@ def _run_parallel_config(
                 game_id=game_id,
             ),
             live_turn_monitor=live_turn_monitor,
+            online_lora_manager=online_lora_manager,
         )
         for game_index, game_id in selected_games
     )
-    return ParallelRuntimeLoop(
-        _run_parallel_game,
-        trace_output=trace_output,
-    ).run(
-        batch_run_id=batch_run_id,
-        specs=specs,
-        max_parallel_games=base_environment_config.max_parallel_games,
-        max_game_retries=base_environment_config.max_game_retries,
-    )
+    try:
+        return ParallelRuntimeLoop(
+            _run_parallel_game,
+            trace_output=trace_output,
+        ).run(
+            batch_run_id=batch_run_id,
+            specs=specs,
+            max_parallel_games=base_environment_config.max_parallel_games,
+            max_game_retries=base_environment_config.max_game_retries,
+        )
+    finally:
+        if online_lora_manager is not None:
+            online_lora_manager.shutdown()
 
 
 def _is_parallel_selection(environment_config: Any) -> bool:
@@ -247,10 +275,12 @@ def _run_parallel_game(
     model_registry = _build_model_registry(
         agent_config=environment_config.models.agent,
         change_config=environment_config.models.change,
-        historizer_config=environment_config.models.historizer,
+        memory_config=environment_config.models.memory,
+        world_config=environment_config.models.world,
+        goal_config=environment_config.models.goal,
+        interest_config=environment_config.models.interest,
+        reward_judge_config=environment_config.models.reward_judge,
         shared_vlm_config=environment_config.models.shared_vlm,
-        observation_text_config=environment_config.models.observation_text,
-        updater_config=environment_config.models.updater,
     )
     runtime = RuntimeLoop(
         _build_orchestrator(
@@ -260,6 +290,7 @@ def _run_parallel_game(
             ),
             models=model_registry,
             contexts=ContextDocuments(),
+            online_lora_manager=spec.online_lora_manager,
         ),
         trace_output=trace_output,
         live_turn_monitor=spec.live_turn_monitor,
@@ -419,12 +450,15 @@ def _build_orchestrator(
     experimental_memory_turn_buffer: int = 2,
     agent_config: ModelRoleConfig | None = None,
     change_config: ModelRoleConfig | None = None,
-    historizer_config: ModelRoleConfig | None = None,
+    memory_config: ModelRoleConfig | None = None,
+    world_config: ModelRoleConfig | None = None,
+    goal_config: ModelRoleConfig | None = None,
+    interest_config: ModelRoleConfig | None = None,
+    reward_judge_config: ModelRoleConfig | None = None,
     shared_vlm_config: ModelRoleConfig | None = None,
-    observation_text_config: dict[str, Any] | None = None,
-    updater_config: UpdaterRuntimeConfig | None = None,
     contexts: ContextDocuments | None = None,
     models: ModelRegistry | None = None,
+    online_lora_manager: OnlineLoRAManager | None = None,
 ) -> Orchestrator:
     """Assemble orchestration with persistent SQLite-backed memory."""
 
@@ -436,110 +470,236 @@ def _build_orchestrator(
         or _build_model_registry(
             agent_config=agent_config or ModelRoleConfig(),
             change_config=change_config or ModelRoleConfig(),
-            historizer_config=historizer_config or ModelRoleConfig(),
+            memory_config=memory_config or ModelRoleConfig(),
+            world_config=world_config or ModelRoleConfig(),
+            goal_config=goal_config or ModelRoleConfig(),
+            interest_config=interest_config or ModelRoleConfig(),
+            reward_judge_config=reward_judge_config or ModelRoleConfig(),
             shared_vlm_config=shared_vlm_config or ModelRoleConfig(),
-            observation_text_config=observation_text_config,
-            updater_config=updater_config,
         ),
         contexts=contexts,
         experimental_memory_turn_buffer=experimental_memory_turn_buffer,
+        online_lora_manager=online_lora_manager,
     )
+
+
+def _build_online_lora_manager(
+    environment_config: Any,
+    *,
+    hf_engine: HFVLMEngine | None = None,
+) -> OnlineLoRAManager | None:
+    if not environment_config.online_lora.enabled:
+        return None
+    return OnlineLoRAManager(
+        config=environment_config.online_lora,
+        vllm_base_url=_vllm_base_url(environment_config),
+        hf_engine=hf_engine,
+    )
+
+
+def _vllm_base_url(environment_config: Any) -> str:
+    for role in (
+        environment_config.models.shared_vlm,
+        environment_config.models.world,
+        environment_config.models.interest,
+        environment_config.models.agent,
+    ):
+        base_url = role.options.get("base_url")
+        if base_url:
+            return str(base_url).rstrip("/")
+    return "http://127.0.0.1:8000/v1"
 
 
 def _build_model_registry(
     *,
     agent_config: ModelRoleConfig,
     change_config: ModelRoleConfig,
-    historizer_config: ModelRoleConfig | None = None,
+    memory_config: ModelRoleConfig,
+    world_config: ModelRoleConfig,
+    goal_config: ModelRoleConfig,
+    interest_config: ModelRoleConfig,
+    reward_judge_config: ModelRoleConfig,
     shared_vlm_config: ModelRoleConfig | None = None,
-    observation_text_config: dict[str, Any] | None = None,
-    updater_config: UpdaterRuntimeConfig | None = None,
 ) -> ModelRegistry:
     """Build model role adapters from starter YAML config."""
 
     shared_vlm_config = shared_vlm_config or ModelRoleConfig()
-    change_role_config = _with_shared_vlm_role_config(
-        change_config,
-        shared_vlm_config,
-    )
-    historizer_role_config = _with_shared_vlm_role_config(
-        historizer_config or ModelRoleConfig(),
-        shared_vlm_config,
-    )
-    observation_text_config = observation_text_config or {}
+    role_configs = {
+        "agent": _with_shared_vlm_role_config(agent_config, shared_vlm_config),
+        "change": _with_shared_vlm_role_config(change_config, shared_vlm_config),
+        "memory": _with_shared_vlm_role_config(memory_config, shared_vlm_config),
+        "world": _with_shared_vlm_role_config(world_config, shared_vlm_config),
+        "goal": _with_shared_vlm_role_config(goal_config, shared_vlm_config),
+        "interest": _with_shared_vlm_role_config(interest_config, shared_vlm_config),
+        "reward_judge": _with_shared_vlm_role_config(
+            reward_judge_config,
+            shared_vlm_config,
+        ),
+    }
+    hf_engine = _build_hf_engine_for_roles(role_configs)
     return ModelRegistry(
         orchestrator_agent=_build_agent(
-            _with_observation_text_config(
-                _with_shared_vlm_role_config(agent_config, shared_vlm_config),
-                observation_text_config,
-            ),
+            role_configs["agent"],
+            hf_engine=hf_engine,
         ),
         change_summary_model=_build_change_summary_model(
-            _with_observation_text_config(change_role_config, observation_text_config),
+            role_configs["change"],
+            hf_engine=hf_engine,
         ),
-        agent_context_historizer_model=_build_historizer_model(
-            historizer_role_config,
+        memory_model=_build_memory_model(
+            role_configs["memory"],
+            hf_engine=hf_engine,
         ),
-        updater_tasks=_build_updater_tasks(
-            _with_observation_text_updater_config(
-                _with_shared_vlm_updater_config(updater_config, shared_vlm_config),
-                observation_text_config,
-            ),
+        world_model=_build_world_model(
+            role_configs["world"],
+            hf_engine=hf_engine,
+        ),
+        goal_model=_build_goal_model(
+            role_configs["goal"],
+            hf_engine=hf_engine,
+        ),
+        interest_model=_build_interest_model(
+            role_configs["interest"],
+            hf_engine=hf_engine,
+        ),
+        reward_judge_model=_build_reward_judge_model(
+            role_configs["reward_judge"],
+            hf_engine=hf_engine,
         ),
     )
 
 
 def _build_change_summary_model(
     config: ModelRoleConfig,
+    *,
+    hf_engine: HFVLMEngine | None = None,
 ) -> object | None:
-    """Build the selected transition change summary adapter."""
+    """Build the transition change summary adapter."""
 
-    if config.backend is None or config.backend == "":
-        raise ValueError("models.change.backend is required")
-    backend = config.backend.lower()
-    if backend == "vllm":
-        _require_role_model("models.change", backend, config)
-        _reject_removed_role_options(
-            config,
-            role_path="models.change",
-            removed={
-                "max_evidence_frames": "max_frames_per_call",
-            },
+    backend = _backend_name(config)
+    if backend == "hf_transformers":
+        from face_of_agi.models.change.providers.hf_transformers import (
+            HFChangeSummaryProvider,
+        )
+
+        hf_config = HFChangeSummaryConfig(
+            **_config_kwargs(config, HFChangeSummaryConfig)
         )
         return ChangeSummaryAdapter(
-            VLLMChangeSummaryConfig(
-                **_config_kwargs(config, VLLMChangeSummaryConfig)
-            )
+            hf_config,
+            provider=HFChangeSummaryProvider(hf_config, engine=hf_engine),
         )
-    raise ValueError(f"unsupported change backend: {config.backend}; use vllm")
+    _require_vllm_role("models.change", config)
+    return ChangeSummaryAdapter(
+        VLLMChangeSummaryConfig(**_config_kwargs(config, VLLMChangeSummaryConfig))
+    )
 
 
-def _build_historizer_model(
+def _build_memory_model(
     config: ModelRoleConfig,
-) -> object | None:
-    """Build the selected agent context historizer adapter."""
+    *,
+    hf_engine: HFVLMEngine | None = None,
+) -> object:
+    """Build the Memory role adapter."""
 
-    if config.backend is None or config.backend == "":
-        return None
-    backend = config.backend.lower()
-    if backend == "vllm":
-        _require_role_model("models.historizer", backend, config)
-        return VLLMHistorizerAdapter(
-            VLLMHistorizerConfig(
-                **_config_kwargs(config, VLLMHistorizerConfig)
-            )
+    backend = _backend_name(config)
+    if backend == "hf_transformers":
+        return HFMemoryAdapter(
+            HFMemoryConfig(**_config_kwargs(config, HFMemoryConfig)),
+            engine=hf_engine,
         )
-    raise ValueError(f"unsupported historizer backend: {config.backend}; use vllm")
+    _require_vllm_role("models.memory", config)
+    return VLLMMemoryAdapter(
+        VLLMMemoryConfig(**_config_kwargs(config, VLLMMemoryConfig))
+    )
+
+
+def _build_world_model(
+    config: ModelRoleConfig,
+    *,
+    hf_engine: HFVLMEngine | None = None,
+) -> object:
+    """Build the World role adapter."""
+
+    backend = _backend_name(config)
+    if backend == "hf_transformers":
+        return HFWorldAdapter(
+            HFWorldConfig(**_config_kwargs(config, HFWorldConfig)),
+            engine=hf_engine,
+        )
+    _require_vllm_role("models.world", config)
+    return VLLMWorldAdapter(
+        VLLMWorldConfig(**_config_kwargs(config, VLLMWorldConfig))
+    )
+
+
+def _build_goal_model(
+    config: ModelRoleConfig,
+    *,
+    hf_engine: HFVLMEngine | None = None,
+) -> object:
+    """Build the Goal role adapter."""
+
+    backend = _backend_name(config)
+    if backend == "hf_transformers":
+        return HFGoalAdapter(
+            HFGoalConfig(**_config_kwargs(config, HFGoalConfig)),
+            engine=hf_engine,
+        )
+    _require_vllm_role("models.goal", config)
+    return VLLMGoalAdapter(
+        VLLMGoalConfig(**_config_kwargs(config, VLLMGoalConfig))
+    )
+
+
+def _build_interest_model(
+    config: ModelRoleConfig,
+    *,
+    hf_engine: HFVLMEngine | None = None,
+) -> object:
+    """Build the Interest role adapter."""
+
+    backend = _backend_name(config)
+    if backend == "hf_transformers":
+        return HFInterestAdapter(
+            HFInterestConfig(**_config_kwargs(config, HFInterestConfig)),
+            engine=hf_engine,
+        )
+    _require_vllm_role("models.interest", config)
+    return VLLMInterestAdapter(
+        VLLMInterestConfig(**_config_kwargs(config, VLLMInterestConfig))
+    )
+
+
+def _build_reward_judge_model(
+    config: ModelRoleConfig,
+    *,
+    hf_engine: HFVLMEngine | None = None,
+) -> object:
+    """Build the Reward Judge role adapter."""
+
+    backend = _backend_name(config)
+    if backend == "hf_transformers":
+        return HFRewardJudgeAdapter(
+            HFRewardJudgeConfig(**_config_kwargs(config, HFRewardJudgeConfig)),
+            engine=hf_engine,
+        )
+    _require_vllm_role("models.reward_judge", config)
+    return VLLMRewardJudgeAdapter(
+        VLLMRewardJudgeConfig(**_config_kwargs(config, VLLMRewardJudgeConfig))
+    )
 
 
 def _build_agent(
     config: ModelRoleConfig,
+    *,
+    hf_engine: HFVLMEngine | None = None,
 ) -> object | None:
     """Build the selected X agent adapter."""
 
     if config.backend is None or config.backend == "":
         raise ValueError("models.agent.backend is required")
-    backend = config.backend.lower()
+    backend = _backend_name(config)
     if backend == "vllm":
         _require_role_model("models.agent", backend, config)
         return VLLMOrchestratorAgentAdapter(
@@ -547,80 +707,15 @@ def _build_agent(
                 **_config_kwargs(config, VLLMOrchestratorAgentConfig)
             )
         )
-    raise ValueError(f"unsupported agent backend: {config.backend}; use vllm")
-
-
-def _build_updater_tasks(
-    config: UpdaterRuntimeConfig | None,
-) -> UpdaterTaskRegistry:
-    """Build configured updater P task adapters."""
-
-    if config is None:
-        raise ValueError("models.updater config is required")
-    return UpdaterTaskRegistry(
-        agent_game_updater=_build_updater_task(
-            "agent",
-            config.agent,
-        ),
-        general_updater=_build_updater_task(
-            "general",
-            config.general,
-        ),
-    )
-
-
-def _build_updater_task(
-    task_name: str,
-    config: ModelRoleConfig,
-) -> object | None:
-    """Build one selected updater P task adapter."""
-
-    if config.backend is None or config.backend == "":
-        raise ValueError(f"models.updater.{task_name}.backend is required")
-    backend = config.backend.lower()
-    if backend == "vllm":
-        _require_prompt_updater_task(task_name, backend)
-        _require_updater_model(task_name, backend, config)
-        return VLLMUpdaterAdapter(
-            VLLMUpdaterConfig(**_config_kwargs(config, VLLMUpdaterConfig))
+    if backend == "hf_transformers":
+        _require_hf_role_model("models.agent", config)
+        return HFOrchestratorAgentAdapter(
+            HFOrchestratorAgentConfig(
+                **_config_kwargs(config, HFOrchestratorAgentConfig)
+            ),
+            engine=hf_engine,
         )
-    raise ValueError(
-        f"unsupported updater.{task_name} backend: {config.backend}; use vllm"
-    )
-
-
-def _require_updater_task_config(
-    config: ModelRoleConfig | None,
-    task_name: str,
-) -> ModelRoleConfig:
-    """Return an active updater task config, failing if it is missing."""
-
-    if config is None:
-        raise ValueError(f"models.updater.{task_name} config is required")
-    return config
-
-
-def _require_prompt_updater_task(task_name: str, backend: str) -> None:
-    """Fail clearly for real updater slots that are not implemented yet."""
-
-    if task_name not in {"agent", "general"}:
-        raise NotImplementedError(
-            f"{backend} updater is implemented only for agent and general "
-            "prompt tasks"
-        )
-
-
-def _require_updater_model(
-    task_name: str,
-    backend: str,
-    config: ModelRoleConfig,
-) -> None:
-    """Require explicit model names for real updater providers."""
-
-    if not config.model:
-        raise ValueError(
-            f"models.updater.{task_name}.model is required for backend {backend}"
-        )
+    raise ValueError("models.agent.backend must be vllm or hf_transformers")
 
 
 def _require_role_model(role_path: str, backend: str, config: ModelRoleConfig) -> None:
@@ -630,31 +725,41 @@ def _require_role_model(role_path: str, backend: str, config: ModelRoleConfig) -
         raise ValueError(f"{role_path}.model is required for backend {backend}")
 
 
-def _reject_removed_role_options(
-    config: ModelRoleConfig,
-    *,
-    role_path: str,
-    removed: dict[str, str],
-) -> None:
-    """Fail clearly when a role uses renamed runtime option keys."""
+def _require_hf_role_model(role_path: str, config: ModelRoleConfig) -> None:
+    """Require an explicit HF model id or model_path."""
 
-    for old_key, new_key in removed.items():
-        if old_key in config.options:
-            raise ValueError(f"{role_path}.{old_key} has been removed; use {new_key}")
+    if config.model or config.options.get("model_path"):
+        return
+    raise ValueError(
+        f"{role_path}.model or {role_path}.model_path is required for "
+        "backend hf_transformers"
+    )
+
+
+def _require_vllm_role(role_path: str, config: ModelRoleConfig) -> None:
+    """Require vLLM for a new v1 role."""
+
+    backend = (config.backend or "").lower()
+    if backend != "vllm":
+        raise ValueError(f"{role_path}.backend must be vllm")
+    _require_role_model(role_path, backend, config)
+
+
+def _backend_name(config: ModelRoleConfig) -> str:
+    return (config.backend or "").lower()
 
 
 def _with_shared_vlm_role_config(
     config: ModelRoleConfig,
     shared: ModelRoleConfig,
 ) -> ModelRoleConfig:
-    """Apply shared local VLM defaults to matching local role configs."""
+    """Apply shared VLM defaults to matching role configs."""
 
     backend = (config.backend or "").lower()
-    if backend != "vllm":
+    if backend not in {"vllm", "hf_transformers"}:
         return config
     if backend != (shared.backend or "").lower():
         return config
-    shared_options = _shared_vllm_runtime_options(shared)
 
     return ModelRoleConfig(
         backend=config.backend,
@@ -670,77 +775,21 @@ def _with_shared_vlm_role_config(
             else shared.repair_attempts
         ),
         options=_deep_merge_dicts(
-            shared_options,
+            _shared_vlm_runtime_options(shared),
             config.options,
         ),
     )
 
 
-def _with_shared_vlm_updater_config(
-    config: UpdaterRuntimeConfig | None,
-    shared: ModelRoleConfig,
-) -> UpdaterRuntimeConfig | None:
-    """Apply shared local VLM defaults to matching updater task configs."""
+def _shared_vlm_runtime_options(config: ModelRoleConfig) -> dict[str, Any]:
+    """Return shared VLM behavior options without changing role prompts."""
 
-    if config is None:
-        return None
-    return UpdaterRuntimeConfig(
-        agent=_with_shared_vlm_role_config(config.agent, shared),
-        general=_with_shared_vlm_role_config(config.general, shared),
-    )
-
-
-def _shared_vllm_runtime_options(config: ModelRoleConfig) -> dict[str, Any]:
-    """Return shared vLLM behavior options without changing role prompts."""
-
-    server_keys = {"server", "server_args"}
-    options = {
+    modal_server_keys = {"server", "server_args"}
+    return {
         key: value
         for key, value in config.options.items()
-        if key not in server_keys
+        if key not in modal_server_keys
     }
-    server_options = config.options.get("server")
-    if (
-        "max_context_tokens" not in options
-        and isinstance(server_options, dict)
-        and server_options.get("max_model_len") is not None
-    ):
-        options["max_context_tokens"] = server_options["max_model_len"]
-    return options
-
-
-def _with_observation_text_config(
-    config: ModelRoleConfig,
-    observation_text_config: dict[str, Any],
-) -> ModelRoleConfig:
-    """Apply shared observation text options unless the role overrides them."""
-
-    if not observation_text_config or "observation_text" in config.options:
-        return config
-    return ModelRoleConfig(
-        backend=config.backend,
-        model=config.model,
-        max_tool_calls=config.max_tool_calls,
-        repair_attempts=config.repair_attempts,
-        options={
-            **config.options,
-            "observation_text": dict(observation_text_config),
-        },
-    )
-
-
-def _with_observation_text_updater_config(
-    config: UpdaterRuntimeConfig | None,
-    observation_text_config: dict[str, Any],
-) -> UpdaterRuntimeConfig | None:
-    """Apply shared observation text options to updater task configs."""
-
-    if config is None:
-        return None
-    return UpdaterRuntimeConfig(
-        agent=_with_observation_text_config(config.agent, observation_text_config),
-        general=_with_observation_text_config(config.general, observation_text_config),
-    )
 
 
 def _deep_merge_dicts(
@@ -776,7 +825,7 @@ def _config_kwargs(config: ModelRoleConfig, config_type: type) -> dict[str, Any]
             continue
         if key in allowed:
             kwargs[key] = value
-        elif "options" in allowed and key not in _ROLE_CONFIG_KEYS_NOT_PROVIDER_OPTIONS:
+        elif "options" in allowed:
             provider_options[key] = value
 
     if "options" in allowed and provider_options:
@@ -794,6 +843,80 @@ def _config_kwargs(config: ModelRoleConfig, config_type: type) -> dict[str, Any]
     if config.repair_attempts is not None:
         kwargs["repair_attempts"] = config.repair_attempts
     return {key: value for key, value in kwargs.items() if key in allowed}
+
+
+def _build_hf_engine_for_roles(
+    role_configs: dict[str, ModelRoleConfig],
+) -> HFVLMEngine | None:
+    """Return the shared HF engine when any active v1 role uses HF."""
+
+    hf_configs = [
+        config
+        for config in role_configs.values()
+        if _backend_name(config) == "hf_transformers"
+    ]
+    if not hf_configs:
+        return None
+    first = hf_configs[0]
+    _require_hf_role_model("models.shared_vlm", first)
+    hf_config = HFWorldConfig(**_config_kwargs(first, HFWorldConfig))
+    return shared_hf_vlm_engine(hf_config)
+
+
+def _build_hf_engine_for_environment_config(environment_config: Any) -> HFVLMEngine | None:
+    """Build/reuse the shared HF engine from an environment config."""
+
+    role_configs = {
+        "agent": _with_shared_vlm_role_config(
+            environment_config.models.agent,
+            environment_config.models.shared_vlm,
+        ),
+        "change": _with_shared_vlm_role_config(
+            environment_config.models.change,
+            environment_config.models.shared_vlm,
+        ),
+        "memory": _with_shared_vlm_role_config(
+            environment_config.models.memory,
+            environment_config.models.shared_vlm,
+        ),
+        "world": _with_shared_vlm_role_config(
+            environment_config.models.world,
+            environment_config.models.shared_vlm,
+        ),
+        "goal": _with_shared_vlm_role_config(
+            environment_config.models.goal,
+            environment_config.models.shared_vlm,
+        ),
+        "interest": _with_shared_vlm_role_config(
+            environment_config.models.interest,
+            environment_config.models.shared_vlm,
+        ),
+        "reward_judge": _with_shared_vlm_role_config(
+            environment_config.models.reward_judge,
+            environment_config.models.shared_vlm,
+        ),
+    }
+    return _build_hf_engine_for_roles(role_configs)
+
+
+def _hf_engine_from_registry(registry: ModelRegistry) -> HFVLMEngine | None:
+    """Return the HF engine captured by any HF-backed role in a registry."""
+
+    for model in (
+        registry.world_model,
+        registry.interest_model,
+        registry.orchestrator_agent,
+        registry.memory_model,
+        registry.goal_model,
+        registry.change_summary_model,
+        registry.reward_judge_model,
+    ):
+        provider = getattr(model, "provider", None)
+        client = getattr(provider, "_client", None)
+        engine = getattr(client, "engine", None)
+        if isinstance(engine, HFVLMEngine):
+            return engine
+    return None
 
 
 def _build_run_id(config: object) -> str:

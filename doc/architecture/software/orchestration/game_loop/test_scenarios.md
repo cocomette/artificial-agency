@@ -1,24 +1,20 @@
 # Game Loop Test Scenarios
 
-These scenarios define the observable behavior of the game-loop state machine.
+Runtime tests should cover framework mechanics:
 
-- Initial reset returns one frame: `X` receives real action space and the
-  chosen action is sent to the environment.
-- Initial reset returns three frames: first two frames synthesize `NONE`
-  without calling `X`; the third `X` call receives real actions.
-- Non-final frame turns persist orchestration-generated `NONE` decisions with
-  no agent-requested tool calls or results.
-- Final frame returns `NONE`: orchestration rejects it unless ARC explicitly
-  exposes a separate real no-op action.
-- Updater receives `current_frame -> next_buffer_frame` during unrolling.
-- Updater receives `last_buffer_frame -> first_new_environment_frame` after a
-  real step.
-- Change summary receives text-only previous/current observations and component
-  deltas before updater input is built.
-- Updater-returned agent context is injected into later `X` model calls.
-- Updater-returned agent context is persisted into `M` with the frame-turn
-  state.
-- Memory `M` stores all real observed frames, including animation frames.
-- Environment is never called during non-final unrolled frames.
-- Agent tool policy is present but has no available tools in the current
-  vLLM-only runtime.
+- active vLLM config files load
+- old `models.historizer` and `models.updater` keys fail fast
+- fake Agent X decisions advance controllable frame turns
+- initial Memory/Goal bootstrap occurs after reset
+- two-stage candidate selection includes simple actions and coordinate
+  proposals
+- World predictions are persisted for candidates
+- change summaries become action-history entries
+- Reward Judge scores and separated reward components are persisted
+- reward finalizes before Memory regeneration, using a reward-only Goal call
+- LoRA micro-batch scheduling plus trainer/load/evaluation failure persistence
+  and hard-crash cleanup are explicit
+- state memory persists agent context and Agent X trace
+- parallel runtime specs isolate per-game state
+
+Tests should not assert deleted behavior or prompt wording.

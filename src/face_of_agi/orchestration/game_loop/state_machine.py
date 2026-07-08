@@ -13,23 +13,28 @@ from face_of_agi.environment.adapter import EnvironmentAdapter
 from face_of_agi.environment.config import EnvironmentConfig
 from face_of_agi.memory import StateMemory
 from face_of_agi.models.change import ChangeSummaryModel, ChangeSummaryResult
-from face_of_agi.models.historizer import AgentContextHistorySummary
 from face_of_agi.models.adapters import (
-    AgentContextHistorizerModel,
+    GoalModel,
+    InterestModel,
+    MemoryModel,
     OrchestratorAgentModel,
+    RewardJudgeModel,
+    WorldModel,
 )
 from face_of_agi.models.orchestrator_agent import AgentToolRuntime
-from face_of_agi.models.updater import UpdaterTaskRegistry
 from face_of_agi.debug.bus import DebugBus
-from face_of_agi.debug.events import FrameTurnCompleted, RunStopped
+from face_of_agi.debug.events import FrameTurnCompleted
 from face_of_agi.orchestration.game_loop.actions import steps
 from face_of_agi.orchestration.game_loop.lifecycle import (
     check_lifecycle,
     check_runtime_deadline,
     finish_run,
     start_run,
-    startup_error_result,
-    stop_for_framework_error,
+)
+from face_of_agi.orchestration.game_loop import v1_roles
+from face_of_agi.orchestration.online_lora import (
+    OnlineLoRAGameHandle,
+    OnlineLoRAManager,
 )
 from face_of_agi.runtime import timing as runtime_timing
 
@@ -54,19 +59,27 @@ class GameLoopStateMachine:
         contexts: ContextDocuments,
         agent: OrchestratorAgentModel,
         change_summary_model: ChangeSummaryModel,
-        agent_context_historizer: AgentContextHistorizerModel | None,
-        updater_tasks: UpdaterTaskRegistry,
+        memory_model: MemoryModel,
+        world_model: WorldModel,
+        goal_model: GoalModel,
+        interest_model: InterestModel,
+        reward_judge_model: RewardJudgeModel,
         tool_runtime_factory: AgentToolRuntimeFactory | None = None,
         debug: DebugBus,
+        online_lora_manager: OnlineLoRAManager | None = None,
     ) -> None:
         self.state_memory = state_memory
         self.contexts = contexts
         self.agent = agent
         self.change_summary_model = change_summary_model
-        self.agent_context_historizer = agent_context_historizer
-        self.updater_tasks = updater_tasks
+        self.memory_model = memory_model
+        self.world_model = world_model
+        self.goal_model = goal_model
+        self.interest_model = interest_model
+        self.reward_judge_model = reward_judge_model
         self.tool_runtime_factory = tool_runtime_factory
         self.debug = debug
+        self.online_lora_manager = online_lora_manager
 
     def run(
         self,
@@ -77,185 +90,187 @@ class GameLoopStateMachine:
     ) -> GameRunResult:
         """Run one selected ARC game until a terminal loop condition."""
 
+        session = start_run(
+            config=config,
+            environment=environment,
+            environment_config=environment_config,
+            contexts=self.contexts,
+            state_memory=self.state_memory,
+            debug=self.debug,
+        )
+        v1_roles.bootstrap_memory_goal(
+            session,
+            memory_model=self.memory_model,
+            goal_model=self.goal_model,
+            state_memory=self.state_memory,
+            debug=self.debug,
+        )
+        bootstrapped_restart_count = session.game_restart_count
+        owned_lora_manager = None
+        lora_manager = self.online_lora_manager
+        if environment_config.online_lora.enabled and lora_manager is None:
+            owned_lora_manager = OnlineLoRAManager(
+                config=environment_config.online_lora,
+                vllm_base_url=_vllm_base_url(environment_config),
+            )
+            lora_manager = owned_lora_manager
+        lora_coordinator = _online_lora_coordinator(
+            session,
+            state_memory=self.state_memory,
+            environment_config=environment_config,
+            lora_manager=lora_manager,
+            world_model=self.world_model,
+            interest_model=self.interest_model,
+            agent=self.agent,
+            reward_judge_model=self.reward_judge_model,
+        )
+
         try:
-            session = start_run(
-                config=config,
-                environment=environment,
-                environment_config=environment_config,
-                contexts=self.contexts,
-                state_memory=self.state_memory,
-                debug=self.debug,
-            )
-        except Exception as exc:
-            result = startup_error_result(
-                config=config,
-                environment_config=environment_config,
-                error=exc,
-            )
-            self.debug.emit(RunStopped(result))
-            return result
+            with ThreadPoolExecutor(max_workers=1) as turn_executor:
+                while session.running:
+                    if lora_coordinator is not None:
+                        lora_coordinator.poll()
+                    change_future: Future[ChangeSummaryResult] | None = None
 
-        with ThreadPoolExecutor(max_workers=2) as turn_executor:
-            while session.running:
-                context_history_future: Future[AgentContextHistorySummary] | None = None
-                change_future: Future[ChangeSummaryResult] | None = None
-
-                try:
                     session.process_turn = True
                     if check_runtime_deadline(session):
                         continue
                     check_lifecycle(session)
-                except Exception as exc:
-                    stop_for_framework_error(session, error=exc)
-                    continue
-                if not session.process_turn:
-                    continue
-
-                turn_started_at = perf_counter()
-                try:
-                    steps.load_frame_buffer_if_needed(session)
-                    steps.enter_frame_turn(
-                        session,
-                        contexts=self.contexts,
-                        state_memory=self.state_memory,
-                        tool_runtime_factory=self.tool_runtime_factory,
-                        debug=self.debug,
-                    )
-                    current = steps.require_current(session)
-                    if current.control_mode is None:
-                        raise RuntimeError(
-                            "current frame snapshot is missing control mode"
-                        )
-                    run_context_updates = True
-                    if check_runtime_deadline(session):
+                    if not session.process_turn:
+                        if (
+                            session.running
+                            and session.game_restart_count
+                            != bootstrapped_restart_count
+                        ):
+                            v1_roles.reset_memory_goal_after_game_over(
+                                session,
+                                memory_model=self.memory_model,
+                                goal_model=self.goal_model,
+                                state_memory=self.state_memory,
+                                debug=self.debug,
+                            )
+                            bootstrapped_restart_count = session.game_restart_count
                         continue
 
-                    if run_context_updates:
-                        context_history_future = turn_executor.submit(
-                            steps.summarize_agent_context_history,
+                    turn_started_at = perf_counter()
+                    try:
+                        steps.load_frame_buffer_if_needed(session)
+                        steps.enter_frame_turn(
                             session,
+                            contexts=self.contexts,
                             state_memory=self.state_memory,
-                            agent_context_historizer=self.agent_context_historizer,
+                            tool_runtime_factory=self.tool_runtime_factory,
                             debug=self.debug,
                         )
-                    steps.decide(
-                        session,
-                        agent=self.agent,
-                        contexts=self.contexts,
-                        debug=self.debug,
-                    )
-                    if check_runtime_deadline(session):
-                        continue
-                    steps.resolve_next_snapshot(session, debug=self.debug)
-                    if check_runtime_deadline(session):
-                        continue
+                        current = steps.require_current(session)
+                        if current.control_mode is None:
+                            raise RuntimeError(
+                                "current frame snapshot is missing control mode"
+                            )
+                        if check_runtime_deadline(session):
+                            continue
 
-                    current = steps.require_current(session)
-                    change_future = turn_executor.submit(
-                        steps.summarize_change_model,
-                        session,
-                        change_model=self.change_summary_model,
-                        debug=self.debug,
-                    )
-                    try:
-                        change_result = _wait_for_future(
-                            change_future,
-                            span_name="game_loop.change_summary.wait",
-                            turn_id=current.turn_id,
-                            step=current.observation.step,
+                        v1_roles.decide_with_world_candidates(
+                            session,
+                            agent=self.agent,
+                            world_model=self.world_model,
+                            interest_model=self.interest_model,
+                            debug=self.debug,
                         )
-                    finally:
-                        steps.capture_change_summary_inputs(
+                        if check_runtime_deadline(session):
+                            continue
+                        steps.resolve_next_snapshot(session, debug=self.debug)
+                        if check_runtime_deadline(session):
+                            continue
+
+                        current = steps.require_current(session)
+                        change_future = turn_executor.submit(
+                            steps.summarize_change_model,
                             session,
                             change_model=self.change_summary_model,
                             debug=self.debug,
                         )
-                        change_future = None
-                    steps.attach_change_summary(session, result=change_result)
-                    if check_runtime_deadline(session):
-                        continue
-
-                    if run_context_updates:
-                        if context_history_future is None:
-                            raise RuntimeError(
-                                "frame turn is missing agent context history work"
-                            )
                         try:
-                            agent_context_history = _wait_for_future(
-                                context_history_future,
-                                span_name="historizer.agent_context_history.wait",
+                            change_result = _wait_for_future(
+                                change_future,
+                                span_name="game_loop.change_summary.wait",
                                 turn_id=current.turn_id,
                                 step=current.observation.step,
                             )
                         finally:
-                            self.debug.capture_model_inputs(
-                                current.to_frame_context(),
-                                current.turn_id,
-                                self.agent_context_historizer,
+                            steps.capture_change_summary_inputs(
+                                session,
+                                change_model=self.change_summary_model,
+                                debug=self.debug,
                             )
-                            context_history_future = None
+                            change_future = None
+                        steps.attach_change_summary(session, result=change_result)
                         if check_runtime_deadline(session):
                             continue
 
-                        steps.run_updaters(
+                        v1_roles.evaluate_observed_transition(
                             session,
-                            contexts=self.contexts,
-                            agent_context_history=agent_context_history,
-                            updater_tasks=self.updater_tasks,
+                            reward_judge_model=self.reward_judge_model,
+                            memory_model=self.memory_model,
+                            goal_model=self.goal_model,
                             state_memory=self.state_memory,
                             debug=self.debug,
                         )
-                    steps.persist(
-                        session,
-                        contexts=self.contexts,
-                        state_memory=self.state_memory,
-                        debug=self.debug,
-                    )
-                    current = steps.require_current(session)
-                    decision = steps.require_decision(session)
-                    if current.control_mode is None:
-                        raise RuntimeError("completed frame turn is missing control mode")
-                    self.debug.emit(
-                        FrameTurnCompleted(
-                            run_id=session.config.run_id,
-                            game_id=session.game_id,
-                            game_index=session.environment_config.game_index,
-                            turn_id=current.turn_id,
-                            env_step=current.observation.step,
-                            frame_index=current.frame_index,
-                            frame_count=current.frame_count,
-                            controllable=current.control_mode.controllable,
-                            action=decision.final_action,
-                            turn_duration_seconds=perf_counter() - turn_started_at,
-                            completed_levels=_completed_levels_after_turn(session),
-                            remaining_actions=session.remaining_actions,
+                        steps.persist(
+                            session,
+                            contexts=self.contexts,
+                            state_memory=self.state_memory,
+                            debug=self.debug,
                         )
-                    )
-                    steps.advance(session)
-                except Exception as exc:
-                    stop_for_framework_error(session, error=exc)
-                finally:
-                    _settle_abandoned_turn_future(
-                        change_future,
-                        capture=lambda: steps.capture_change_summary_inputs(
-                            session,
-                            change_model=self.change_summary_model,
-                            debug=self.debug,
-                        ),
-                    )
-                    _settle_abandoned_turn_future(
-                        context_history_future,
-                        capture=lambda: _capture_agent_context_history_inputs(
-                            session,
-                            historizer=self.agent_context_historizer,
-                            debug=self.debug,
-                        ),
-                    )
+                        current = steps.require_current(session)
+                        decision = steps.require_decision(session)
+                        if current.control_mode is None:
+                            raise RuntimeError(
+                                "completed frame turn is missing control mode"
+                            )
+                        self.debug.emit(
+                            FrameTurnCompleted(
+                                run_id=session.config.run_id,
+                                game_id=session.game_id,
+                                game_index=session.environment_config.game_index,
+                                turn_id=current.turn_id,
+                                env_step=current.observation.step,
+                                frame_index=current.frame_index,
+                                frame_count=current.frame_count,
+                                controllable=current.control_mode.controllable,
+                                action=decision.final_action,
+                                turn_duration_seconds=(
+                                    perf_counter() - turn_started_at
+                                ),
+                                completed_levels=_completed_levels_after_turn(
+                                    session
+                                ),
+                                remaining_actions=session.remaining_actions,
+                            )
+                        )
+                        if lora_coordinator is not None:
+                            lora_coordinator.maybe_schedule(
+                                real_turn_count=session.real_step_count
+                            )
+                        steps.advance(session)
+                    finally:
+                        _settle_abandoned_turn_future(
+                            change_future,
+                            capture=lambda: steps.capture_change_summary_inputs(
+                                session,
+                                change_model=self.change_summary_model,
+                                debug=self.debug,
+                            ),
+                        )
+        finally:
+            if lora_coordinator is not None:
+                lora_coordinator.shutdown()
+            if owned_lora_manager is not None:
+                owned_lora_manager.shutdown()
 
         return finish_run(
             session,
             contexts=self.contexts,
-            updater_tasks=self.updater_tasks,
             state_memory=self.state_memory,
             debug=self.debug,
         )
@@ -290,26 +305,52 @@ def _settle_abandoned_turn_future(
     except Exception:
         pass
     finally:
-        try:
-            capture()
-        except Exception:
-            pass
+        capture()
 
 
-def _capture_agent_context_history_inputs(
+def _online_lora_coordinator(
     session,
     *,
-    historizer: AgentContextHistorizerModel | None,
-    debug: DebugBus,
-) -> None:
-    current = session.current
-    if current is None:
-        return
-    debug.capture_model_inputs(
-        current.to_frame_context(),
-        current.turn_id,
-        historizer,
+    state_memory: StateMemory | None,
+    environment_config: EnvironmentConfig,
+    lora_manager: OnlineLoRAManager | None,
+    world_model: WorldModel,
+    interest_model: InterestModel,
+    agent: OrchestratorAgentModel,
+    reward_judge_model: RewardJudgeModel,
+) -> OnlineLoRAGameHandle | None:
+    """Return the optional online LoRA coordinator for this game run."""
+
+    if not environment_config.online_lora.enabled:
+        return None
+    if lora_manager is None:
+        raise RuntimeError("online LoRA manager is required when LoRA is enabled")
+    return lora_manager.register_game(
+        state_memory=state_memory,
+        run_id=session.config.run_id,
+        game_id=session.game_id,
+        reward_judge_model=reward_judge_model,
+        activation_targets={
+            "world": world_model,
+            "interest": interest_model,
+            "agent": agent,
+        },
     )
+
+
+def _vllm_base_url(environment_config: EnvironmentConfig) -> str:
+    """Return the first configured vLLM OpenAI-compatible base URL."""
+
+    for role in (
+        environment_config.models.shared_vlm,
+        environment_config.models.world,
+        environment_config.models.interest,
+        environment_config.models.agent,
+    ):
+        base_url = role.options.get("base_url")
+        if base_url:
+            return str(base_url).rstrip("/")
+    return "http://127.0.0.1:8000/v1"
 
 
 def _completed_levels_after_turn(session) -> int:

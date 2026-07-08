@@ -1,108 +1,86 @@
 # Model Roles
 
-## Orchestrator Agent `X`
+## Agent X
 
-`X` is the decision-making agent. It receives the current agent context,
-serialized observation text plus a cropped observation image, transition
-evidence, recent action history, and current ARC action space. It returns one
-final `ActionSpec` and an
-`AgentTrace`.
+Agent X owns action choice. The v1 loop calls it in two stages:
 
-The vLLM adapter sends OpenAI-compatible multimodal Chat Completions messages.
-Observation payloads contain an `ObservationText` string generated from native
-ARC grids plus a PNG data-URL image cropped to the same configured bounds.
-Role instructions include the canonical ARC symbol color glossary.
+1. propose distinct coordinate candidates for `ACTION6` up to the candidate cap
+2. select one final candidate after World has predicted each candidate outcome
+   and Interest has scored the candidate set
 
-ACTION6 history data uses original ARC grid coordinates. Model-facing guidance
-and validation require new ACTION6 decisions to use visible cropped
-coordinates, matching the active serialized crop in `ObservationText`
-(`x/y=3..60` for the default `crop_cells=3`), plus a non-empty target
-description.
+Orchestration always includes all valid simple non-coordinate actions before
+asking for coordinate proposals. Agent X remains the final action owner; the
+runtime does not argmax over Interest scores. Prompt guidance asks Agent X to
+prefer reversible, low-risk probes early when uncertainty is high; no separate
+reversibility reward bonus is added.
 
-### Tool Runtime Framework
+Repeated zero-change `ACTION6` attempts suppress only the exact coordinate in
+prompt evidence. `ACTION6` remains available as an action class, including when
+simple actions are also available; `ACTION6` without coordinates is not
+class-suppressed.
 
-The provider-neutral agent contract still has a controlled tool runtime shape,
-but the current vLLM-only runtime does not wire real world or goal providers.
-The starter configs keep `max_tool_calls: 0`.
+## Change Summary
 
-`X` does not read memory, write SQLite, or call model adapters directly.
-Orchestration builds the frame-turn input, calls `X`, validates the returned
-action, and owns persistence.
+The change summary role receives the previous observation, current observation,
+chosen action, action glossary, and the deterministic changed-pixel percentage
+for the model-visible cropped transition. It returns the observed-transition
+ground truth text used by World and Reward Judge.
 
-Output:
+## Memory
 
-- final `ActionSpec`
-- full `AgentTrace`
+Memory regenerates a fresh free-form run document every turn from the original
+first frame, current frame, and a sanitized action/change ledger. Memory is not
+appended incrementally; the model receives only `turn_id`, prompt-facing
+`action`, and `change_summary` for each ledger row and rewrites one
+comprehensive but compressed document that preserves mechanics, current state,
+tried actions, dead ends, reset history, and hypotheses across game-over
+resets. Candidate predictions, judge scores, rewards, goals, and ledger
+metadata are kept out of the Memory role input. A reset adds an explicit ledger
+marker instead of clearing the prior run knowledge.
 
-## Transition Change Summary
+## World
 
-The change model receives previous and current observations as `ObservationText`
-strings plus cropped images for every serialized evidence frame in the current
-call. It summarizes visible changes, returns structured change fields, and uses
-cropped ARC-grid changed-cell counts for authoritative evidence.
+World predicts change-summary-style text for one candidate action from the
+current frame, candidate action, and current Memory document. The observed
+Change Summary is the target for online World LoRA updates. World trains by
+image-aware supervised SFT from replay request images to
+`{"predicted_change": ...}` completions. Delayed learning progress is measured
+after training by comparing old and newly loaded World scores on the same
+executed replay rows; heldout aggregate LP is kept as update-health metadata.
 
-For frame bundles and transition prompts, component-level deltas are generated
-directly from adjacent serialized frames. Large retained animation bundles are
-budgeted at the adapter boundary with balanced overlapping text chunks. There
-is no object matching heuristic;
-component IDs are frame-local labels, and omitted component sections suppress
-component-ID delta lines.
+## Interest
 
-When chunking produces multiple change-summary calls, a final reducer may
-reconcile ordered partial summaries. The reducer sees deterministic
-changed-cell metrics, action context, selected row-only keyframes drawn from
-first/final/chunk-boundary frames, and cropped images for those selected
-keyframes, then returns the same `summary` plus `change_detected` schema.
-Reducer `change_detected` is validated against the full deterministic evidence,
-and repair exhaustion falls back to the chronological deterministic merge.
+Interest is a vLLM-only candidate-value role. It receives the current frame,
+Memory, Goal, candidate actions, World predictions, and recent action history.
+It returns one value row per candidate:
 
-Output:
+- `candidate_index`
+- expected World learning progress
+- expected Goal delta
+- confidence
+- short notes
 
-- transition summary text
-- changed-cell evidence and structured fields used by orchestration/updaters
+Orchestration computes the live blended score as:
 
-## Agent Context Historizer
+`lp_weight * confidence * expected_learning_progress + goal_weight * expected_goal_delta`
 
-The historizer summarizes recent agent context revisions before the updater
-builds the next context. It is a text-only vLLM role and does not receive
-frames directly.
+The resulting value table is added to the Agent final-selection prompt and
+persisted in candidate and Agent replay metadata. Interest is trained online
+with GRPO from executed-candidate labels only after delayed per-sample World
+learning progress is known; unexecuted candidates do not receive pseudo-labels
+in v1.
 
-Output:
+## Goal
 
-- structured summary of recent agent context evolution
+Goal reads Memory and returns structured `goal`, `subgoals`,
+`steps_remaining`, and `confidence`. Agent X uses the latest stored Goal
+prediction. Orchestration also calls Goal once after observing the next frame
+and before Memory regeneration to compute reward-only Goal delta. Goal is
+inference-only in v1.
 
-## Updater `P`
+## Reward Judge
 
-`P` runs after observed transitions. In the frame-unrolled game loop, animation
-frame transitions compare the current frame to the next buffered frame, while
-controllable final-frame transitions compare the selected action against the
-first frame returned by the next real environment step.
-
-The implemented updater slots are:
-
-| Slot | Updates |
-| --- | --- |
-| `agent` | Agent game context `L^X`. |
-| `general` | Agent general context `K^X` at end of run. |
-
-Agent game updater prompts include observation serialization plus a cropped
-current-frame image where frame context is needed. Agent game updater
-instructions use the active visible crop for future ACTION6 policy guidance.
-The updater does not own persistence. Its
-outputs return to orchestration, which applies them to live working context
-documents and persists the resulting state into `M`.
-
-Output:
-
-- updated `L^X` during frame/game-loop updates
-- updated `K^X` at end of run through the shared general updater task
-
-## Model Adapter Rule
-
-Adapters translate between role contracts and vLLM Chat Completions calls.
-They do not own the runtime loop, environment stepping, or SQLite persistence.
-They also do not read memory directly; memory access is mediated by
-orchestration.
-
-Provider-specific adapters live in `providers/` folders under each model role.
-Shared vLLM transport utilities live in `models/providers/vllm.py`.
+Reward Judge compares a World prediction with the observed Change Summary and
+returns `score: 0..1`, short notes, and error tags. It is inference-only and is
+used for current-turn World quality, heldout World learning-progress deltas,
+replay quality estimates, and dashboard inspection.

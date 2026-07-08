@@ -1,35 +1,60 @@
-# Update Outputs
+# Online LoRA Outputs
 
-Updater `P` returns revised context documents for the task selected by
-orchestration.
+Online update attempts are persisted as `LoRAUpdateRecord` rows.
 
-## Output Contexts
+## Attempt States
 
-- During the frame/game loop, role-specific updater tasks return
-  `L^S_i,t+1`, `L^G_i,t+1`, and `L^X_i,t+1`.
-- At end-of-run, the shared general updater task returns `K^S`, `K^G`, and
-  `K^X` through three role-specific invocations.
+- `queued`
+- `running`
+- `succeeded`
+- `failed`
 
-## Persistence Rule
+Successful attempts record the versioned adapter name, adapter path, trained
+replay sample ids, rolling eval sample ids, maximum trained replay sample id,
+and sample count. World success rows also record old/new train and heldout
+Reward Judge scores, per-sample delayed LP for executed train rows, aggregate
+heldout LP for update health, clipping bounds, worker load status, and local
+activation status. In parallel runs, contributor games each receive per-game
+status rows for the shared update; metadata includes shared batch/sample
+references because SQLite replay sample ids are only unique inside one game
+database. vLLM load happens in the background worker under unique shared
+versioned names. The next game-boundary poll locally switches World, Interest,
+and Agent together only after every role has staged successfully.
 
-Updater outputs go back to orchestration. Orchestration applies them to the
-live working `ContextDocuments`, persists the resulting contexts into `M`, and
-uses them when composing the next model calls.
+Failed trainer, load, evaluation, backfill, rescore, or activation attempts
+record the error for contributor games, unload any newly staged vLLM adapters,
+delete partial staged adapter directories, restore previous local adapter
+names, and raise. Failed shared online updates are fatal for all registered
+games by design.
 
-Game-specific `L` contexts are selected from the latest state for the current
-game. Game-agnostic `K` contexts are selected from the latest persisted state
-across all games, then recombined with the current game's `L` before model
-calls.
+## Quality Signal
 
-The updater does not own a separate memory store and does not write directly
-to SQLite.
+World SFT trains image-aware supervised completions that target
+`{"predicted_change": "<observed Change Summary>"}`. Before a staged World
+adapter is loaded, the coordinator scores old World predictions on the train
+and heldout World replay rows. After load, it scores new predictions by
+explicitly requesting the staged versioned adapter name. Missing or failing
+Reward Judge fails the World update.
 
-Reward/update quantities are persisted by orchestration with the committed
-frame-turn state. They remain inputs to updater `P`; updater backends do not
-compute or mutate the reward packet.
+Interest rewards compare the generated executed-candidate value row against
+that turn's delayed per-sample LP and Goal-delta labels, with a small
+confidence calibration term.
+Agent rewards parse the generated action, match it against the candidate score
+table in replay metadata, and return the within-prompt advantage-normalized
+blended score. Invalid JSON, malformed actions, and non-candidate actions
+receive `min(valid_candidate_rewards) - 1e-6`, or `-1.0` when the candidate
+table is missing.
 
-## Scope Rule
+World learning progress is measured separately from the immediate turn reward.
+For each executed World train row, the coordinator computes clipped signed LP
+as `new_score - old_score` and backfills the paired Interest and Agent replay
+rows for that same source turn. Heldout aggregate LP remains update-health
+metadata; it is not broadcast as the label for every action. Agent replay
+rewards are recomputed as:
 
-Game-specific contexts may be updated during a game. Game-agnostic contexts
-`K^m` are updated only after finishing a game. Updater backends do not choose
-`K` versus `L` timing themselves.
+`lp_weight * learning_progress + goal_weight * goal_delta + progress_bonus - resource_cost`
+
+That recomputed scalar remains persisted for diagnostics. Agent GRPO policy
+improvement uses candidate-table advantages from the latest Interest rescore,
+so the Agent can be rewarded for choosing a high-value candidate even when it
+differs from the action historically executed in the turn.

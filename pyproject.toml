@@ -3,18 +3,34 @@ name = "face-of-agi"
 version = "0.1.0"
 description = "Minimal ARC-AGI-3 agent framework skeleton."
 readme = "README.md"
-license = "Apache-2.0"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "arc-agi>=0.9.8",
     "matplotlib>=3.10.9",
-    "openai>=2.34.0",
     "pyyaml>=6.0.3",
     "rich>=13.9.4",
 ]
 
 [project.optional-dependencies]
-ml = []
+ml = [
+    "accelerate>=1.12.0",
+    "bitsandbytes>=0.48.0",
+    "datasets>=4.4.0",
+    "diffusers @ git+https://github.com/huggingface/diffusers.git",
+    "hf-xet>=1.4.3",
+    "ollama>=0.6.1",
+    "openai>=2.34.0",
+    "optimum-quanto>=0.2.7",
+    "peft>=0.18.0",
+    "protobuf>=6.33.0",
+    "safetensors>=0.7.0",
+    "sentencepiece>=0.2.1",
+    "torchao>=0.14.1",
+    "torch>=2.9.0",
+    "torchvision>=0.24.0",
+    "transformers>=4.57.0,<5",
+    "trl>=0.25.0",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -35,10 +51,27 @@ test = [
     "pytest>=9.0.3",
 ]
 dev = [
+    "accelerate>=1.12.0",
+    "bitsandbytes>=0.48.0",
+    "datasets>=4.4.0",
+    "diffusers @ git+https://github.com/huggingface/diffusers.git",
+    "hf-xet>=1.4.3",
     "ipykernel>=6.29.5",
     "notebook>=7.4.2",
+    "ollama>=0.6.1",
+    "openai>=2.34.0",
+    "optimum-quanto>=0.2.7",
+    "peft>=0.18.0",
+    "protobuf>=6.33.0",
     "pytest>=9.0.3",
+    "safetensors>=0.7.0",
+    "sentencepiece>=0.2.1",
+    "torchao>=0.14.1",
+    "torch>=2.9.0",
+    "torchvision>=0.24.0",
+    "transformers>=4.57.0,<5",
+    "trl>=0.25.0",
 ]
 
 [tool.pytest.ini_options]
-pythonpath = [".", "src"]
+pythonpath = ["."]

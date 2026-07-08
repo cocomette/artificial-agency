@@ -29,6 +29,7 @@ from face_of_agi.models.orchestrator_agent.tooling import (
     parse_action,
     parse_final_action,
 )
+from face_of_agi.models.providers.vision import resolve_model_vision_profile
 
 
 @dataclass(slots=True)
@@ -125,6 +126,11 @@ class OrchestratorAgentAdapter:
         self.config = config or OrchestratorAgentConfig()
         self.provider = provider
         self.last_provider_requests: list[Any] = []
+        self.vision_profile = resolve_model_vision_profile(
+            backend=self.provider.backend,
+            model=self.provider.model,
+        )
+        self.coordinate_space = self.vision_profile.coordinate_space
 
     def decide(
         self,
@@ -225,9 +231,10 @@ class OrchestratorAgentAdapter:
                     final_action = parse_final_action(
                         response.final_output,
                         action_space,
-                        observation_text_config=getattr(
+                        coordinate_space=self.coordinate_space,
+                        crop_edges=getattr(
                             self.config,
-                            "observation_text",
+                            "input_image_crop_arc_grid_edges",
                             None,
                         ),
                     )
@@ -341,9 +348,10 @@ class OrchestratorAgentAdapter:
             action = parse_action(
                 args.get("action"),
                 action_space,
-                observation_text_config=getattr(
+                coordinate_space=self.coordinate_space,
+                crop_edges=getattr(
                     self.config,
-                    "observation_text",
+                    "input_image_crop_arc_grid_edges",
                     None,
                 ),
             )

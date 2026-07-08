@@ -31,6 +31,7 @@ class ParallelGameRunSpec:
     environment_config: EnvironmentConfig
     arc_environment: Any | None = None
     live_turn_monitor: Any | None = None
+    online_lora_manager: Any | None = None
     attempt_index: int = 0
     deadline_monotonic: float | None = None
 

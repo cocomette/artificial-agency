@@ -22,13 +22,13 @@ from face_of_agi.models.adapters import (
 )
 from face_of_agi.models.change import ChangeSummaryModel, ChangeSummaryResult
 from face_of_agi.models.historizer import AgentContextHistorySummary
+from face_of_agi.models.image_inputs import frame_bundle_image_size
 from face_of_agi.models.orchestrator_agent import AgentToolRuntime
 from face_of_agi.models.updater import UpdaterTaskRegistry
 from face_of_agi.debug.bus import DebugBus
 from face_of_agi.debug.events import (
     EnvironmentStepRecorded,
     FrameTurnStarted,
-    ModelCallCompleted,
 )
 from face_of_agi.orchestration.game_loop.actions.context_updates import (
     apply_context_updates,
@@ -43,13 +43,12 @@ from face_of_agi.orchestration.game_loop.helpers import (
     bounded_agent_action_history,
     decide_frame_turn,
     frame_control_mode,
+    average_observation_transition_changed_pixel_percent,
+    max_observation_transition_changed_pixel_percent,
+    model_input_crop_edges,
+    observation_visible_changed_pixel_percent,
     unroll_observation,
     validate_decision,
-)
-from face_of_agi.orchestration.game_loop.fallbacks import (
-    fallback_change_summary_result,
-    fallback_decision_result,
-    model_observation_text_config,
 )
 from face_of_agi.orchestration.game_loop.persistence import (
     persist_turn,
@@ -60,6 +59,11 @@ from face_of_agi.orchestration.game_loop.session import (
     GameLoopSession,
 )
 from face_of_agi.runtime import timing as runtime_timing
+
+NO_CHANGE_SUMMARY = "no changes"
+UNCERTAIN_CHANGE_SUMMARY = (
+    "visible pixels changed, but the specific change is uncertain."
+)
 
 AgentToolRuntimeFactory = Callable[
     [str, str, int, FrameTurnContext],
@@ -100,21 +104,20 @@ def enter_frame_turn(
     )
     current_ref = session.current_ref_for(current_observation)
     turn_id = session.frame_turn_count + 1
-    source_state = None
-    if state_memory is not None:
-        try:
-            source_state = state_memory.prewrite_frame_turn_source(
-                run_id=session.config.run_id,
-                game_id=session.game_id,
-                turn_id=turn_id,
-                current_observation=current_observation,
-                frame_index=session.frame_index,
-                frame_count=frame_count,
-                control_mode=control_mode,
-                contexts=contexts,
-            )
-        except Exception:
-            source_state = None
+    source_state = (
+        state_memory.prewrite_frame_turn_source(
+            run_id=session.config.run_id,
+            game_id=session.game_id,
+            turn_id=turn_id,
+            current_observation=current_observation,
+            frame_index=session.frame_index,
+            frame_count=frame_count,
+            control_mode=control_mode,
+            contexts=contexts,
+        )
+        if state_memory is not None
+        else None
+    )
 
     if session.first_observation is None:
         session.first_observation = current_observation
@@ -209,23 +212,7 @@ def decide(
 
     if current.control_mode is None:
         raise RuntimeError("current frame snapshot is missing control mode")
-    try:
-        validate_decision(decision.final_action, control_mode=current.control_mode)
-    except Exception as exc:
-        decision = fallback_decision_result(
-            frame_context=frame_context,
-            turn_id=current.turn_id,
-            action_space=current.control_mode.allowed_actions,
-            error=exc,
-            observation_text_config=model_observation_text_config(agent),
-        )
-        session.decision = decision
-        session.trace_cost_seconds = effective_trace_cost_seconds(
-            decision=decision,
-            wall_clock_seconds=decision_duration_seconds,
-        )
-        session.last_decision = decision
-        validate_decision(decision.final_action, control_mode=current.control_mode)
+    validate_decision(decision.final_action, control_mode=current.control_mode)
     write_frame_trace(
         debug=debug,
         frame_turn=session.frame_turn_count,
@@ -373,34 +360,100 @@ def summarize_change_model(
     decision = require_decision(session)
     frame_context = current.to_frame_context()
     frame_observations = transition_frame_observations(session)
+    view_kwargs = change_model_view_kwargs(
+        change_model,
+        frame_count=len(frame_observations),
+    )
+    changed_pixel_percent = observation_visible_changed_pixel_percent(
+        frame_observations[0],
+        frame_observations[-1],
+        **view_kwargs,
+    )
+    max_transition_changed_pixel_percent = (
+        max_observation_transition_changed_pixel_percent(
+            frame_observations,
+            **view_kwargs,
+        )
+    )
+    animation_avg_changed_pixel_percent = None
+    if len(frame_observations) > 2:
+        animation_avg_changed_pixel_percent = (
+            average_observation_transition_changed_pixel_percent(
+                frame_observations,
+                **view_kwargs,
+            )
+        )
+    if max_transition_changed_pixel_percent == 0.0:
+        return ChangeSummaryResult(
+            summary=NO_CHANGE_SUMMARY,
+            changed_pixel_percent=changed_pixel_percent,
+            change_detected=False,
+            metadata={
+                "skipped": True,
+                "skip_reason": "identical_model_visible_evidence",
+                "frame_count": len(frame_observations),
+                "max_transition_changed_pixel_percent": (
+                    max_transition_changed_pixel_percent
+                ),
+                "animation_avg_changed_pixel_percent": (
+                    animation_avg_changed_pixel_percent
+                ),
+            },
+        )
+
     started_at = perf_counter()
     with runtime_timing.span(
         "game_loop.change_summary",
         turn_id=current.turn_id,
         step=current.observation.step,
     ):
-        try:
-            return change_model.summarize(
-                frame_observations[0],
-                frame_observations[-1],
-                decision.final_action,
-                glossary_actions=frame_context.control_mode.allowed_actions,
-                frame_observations=frame_observations,
-            )
-        except Exception as exc:
-            return fallback_change_summary_result(
-                observations=frame_observations,
-                error=exc,
-                observation_text_config=model_observation_text_config(change_model),
-            )
-        finally:
-            if debug is not None:
-                debug.emit(
-                    ModelCallCompleted(
-                        role="change",
-                        duration_seconds=perf_counter() - started_at,
-                    )
-                )
+        result = change_model.summarize(
+            current.observation,
+            next_snapshot.observation,
+            decision.final_action,
+            glossary_actions=frame_context.control_mode.allowed_actions,
+            changed_pixel_percent=changed_pixel_percent,
+            frame_observations=frame_observations,
+            max_transition_changed_pixel_percent=(
+                max_transition_changed_pixel_percent
+            ),
+        )
+    if debug is not None:
+        emit_model_call_completed(
+            debug,
+            role="change",
+            duration_seconds=perf_counter() - started_at,
+        )
+    result = ChangeSummaryResult(
+        summary=result.summary,
+        changed_pixel_percent=result.changed_pixel_percent,
+        change_detected=result.change_detected,
+        metadata={
+            **result.metadata,
+            "frame_count": len(frame_observations),
+            "max_transition_changed_pixel_percent": (
+                max_transition_changed_pixel_percent
+            ),
+            "animation_avg_changed_pixel_percent": (
+                animation_avg_changed_pixel_percent
+            ),
+        },
+    )
+    if (
+        not result.change_detected
+        and max_transition_changed_pixel_percent > 0.0
+    ):
+        return ChangeSummaryResult(
+            summary=UNCERTAIN_CHANGE_SUMMARY,
+            changed_pixel_percent=result.changed_pixel_percent,
+            change_detected=False,
+            metadata={
+                **result.metadata,
+                "summary_overridden": True,
+                "override_reason": "pixel_change_without_model_detected_change",
+            },
+        )
+    return result
 
 
 def capture_change_summary_inputs(
@@ -428,29 +481,29 @@ def attach_change_summary(
     decision = require_decision(session)
     update_input = require_update_input(session)
     frame_context = current.to_frame_context()
+    frame_observations = transition_frame_observations(session)
+    retained_animation_frame_count = 0
+    skipped_animation_frame_count = None
+    animation_avg_changed_pixel_percent = None
+    if frame_context.control_mode.controllable:
+        retained_animation_frame_count = max(0, len(frame_observations) - 1)
+        skipped_animation_frame_count = sum(
+            _observation_skipped_animation_frame_count(observation)
+            for observation in frame_observations[1:]
+        )
+        if retained_animation_frame_count > 1:
+            animation_avg_changed_pixel_percent = _optional_float_metadata(
+                result.metadata.get("animation_avg_changed_pixel_percent")
+            )
     update_input.action_history_entry = build_action_history_entry(
         frame_context=frame_context,
         final_action=decision.final_action,
         next_observation=next_snapshot.observation,
-        changed_pixel_count=result.changed_pixel_count,
+        changed_pixel_percent=result.changed_pixel_percent,
         change_summary=result.summary,
-        changed_cell_percent=result.changed_cell_percent,
-        completed_levels=_completed_levels_after_transition(session),
-        action_count=_current_level_action_count(session),
-    )
-
-
-def _completed_levels_after_transition(session: GameLoopSession) -> int:
-    metrics = session.turn_metrics
-    if metrics is not None and metrics.cumulative_score is not None:
-        return int(metrics.cumulative_score)
-    return int(session.completed_levels)
-
-
-def _current_level_action_count(session: GameLoopSession) -> int:
-    return max(
-        0,
-        session.environment_config.max_actions_per_level - session.remaining_actions,
+        retained_animation_frame_count=retained_animation_frame_count,
+        skipped_animation_frame_count=skipped_animation_frame_count,
+        animation_avg_changed_pixel_percent=animation_avg_changed_pixel_percent,
     )
 
 
@@ -589,6 +642,10 @@ def clear_turn_outputs(session: GameLoopSession) -> None:
     session.trace_cost_seconds = None
     session.turn_metrics = None
     session.update_input = None
+    session.candidate_actions = ()
+    session.world_predictions = ()
+    session.latest_judge_score = None
+    session.latest_reward = None
     session.next_environment_observation = None
     session.next_frame_buffer = ()
     session.transition_frame_observations = ()
@@ -673,16 +730,32 @@ def transition_frame_observations(
     return (current.observation, next_snapshot.observation)
 
 
+def change_model_view_kwargs(
+    change_model: ChangeSummaryModel,
+    *,
+    frame_count: int = 2,
+) -> dict[str, Any]:
+    """Return image-transform kwargs for deterministic model-visible diffs."""
+
+    config = getattr(change_model, "config", None)
+    size = frame_bundle_image_size(
+        getattr(config, "input_image_size", None),
+        frame_count=frame_count,
+    )
+    return {
+        "frame_scale": getattr(config, "frame_scale", 4),
+        "size": size,
+        "resample": getattr(config, "input_image_resample", "nearest"),
+        "crop_edges": model_input_crop_edges(change_model),
+    }
+
+
 def snapshot_observation(observation: Observation) -> Observation:
     """Return an observation copy insulated from environment frame mutation."""
 
     if observation.frames:
         frames = tuple(_copy_frame(frame) for frame in observation.frames)
-        frame = (
-            _copy_frame(observation.frame)
-            if observation.frame is not None
-            else frames[-1]
-        )
+        frame = _copy_frame(observation.frame) if observation.frame is not None else frames[-1]
     else:
         frame = _copy_frame(observation.frame)
         frames = (frame,) if frame is not None else ()
@@ -696,7 +769,7 @@ def snapshot_observation(observation: Observation) -> Observation:
     )
 
 
-def _copy_frame(frame: Any) -> Any:
+def _copy_frame(frame):
     if frame is None:
         return None
     copy_method = getattr(frame, "copy", None)
@@ -706,3 +779,39 @@ def _copy_frame(frame: Any) -> Any:
         except TypeError:
             pass
     return copy.deepcopy(frame)
+
+
+def _observation_skipped_animation_frame_count(observation: Observation) -> int:
+    value = observation.metadata.get("skipped_intermediate_animation_frame_count", 0)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return max(0, value)
+
+
+def _optional_float_metadata(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    numeric = float(value)
+    if not 0 <= numeric <= 100:
+        return None
+    return numeric
+
+
+def emit_model_call_completed(
+    debug: DebugBus,
+    *,
+    role: str,
+    duration_seconds: float,
+) -> None:
+    """Emit model timing telemetry when the debug event is available."""
+
+    from face_of_agi.debug.events import ModelCallCompleted
+
+    debug.emit(
+        ModelCallCompleted(
+            role=role,
+            duration_seconds=max(0.0, duration_seconds),
+        )
+    )

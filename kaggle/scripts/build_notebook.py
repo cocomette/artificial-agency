@@ -53,14 +53,21 @@ KAGGLE_KERNEL_ID = os.environ.get(KAGGLE_KERNEL_ID_ENV, "").strip()
 KAGGLE_KERNEL_TITLE = os.environ.get(KAGGLE_KERNEL_TITLE_ENV, "").strip()
 VLLM_VERSION = "0.19.1"
 RUNTIME_PACKAGES = (
+    "accelerate",
     "arc-agi",
+    "arcengine",
+    "datasets",
     "python-dotenv",
     "pyyaml",
     "rich",
     "openai",
     "pandas",
+    "peft",
+    "pillow",
     "pyarrow",
+    "trl",
 )
+REQUIRED_WHEELHOUSE_PACKAGES = ("pycountry", "pydantic-extra-types", "trl")
 VLLM_STACK_PACKAGES = (
     "compressed-tensors==0.15.0.1",
     "flashinfer-python==0.6.6",
@@ -80,11 +87,13 @@ VLLM_TORCH_DEPENDENCY_PACKAGES = (
     "ninja",
     "numpy>=1.23.5",
     "nvidia-cudnn-frontend>=1.13.0",
-    "nvidia-cutlass-dsl==4.6.0.dev0",
+    "nvidia-cutlass-dsl>=4.4.2",
     "nvidia-ml-py",
     "packaging>=24.2",
     "psutil",
+    "pycountry",
     "pydantic>=2.0",
+    "pydantic-extra-types",
     "requests",
     "setuptools",
     "tabulate",
@@ -162,6 +171,7 @@ def _install_cell() -> dict:
             import subprocess
             import sys
             import zipfile
+            from importlib import metadata as importlib_metadata
             from pathlib import Path
             from pip._vendor.packaging.requirements import Requirement
             from pip._vendor.packaging.utils import canonicalize_name
@@ -172,19 +182,42 @@ def _install_cell() -> dict:
             competition_wheels = (
                 kaggle_competition_input({COMPETITION_SLUG!r}) / "arc_agi_3_wheels"
             )
+            torch_stack_constraints = Path(
+                "/kaggle/working/kaggle_torch_stack_constraints.txt"
+            )
 
-            def pip_install(packages, *, no_deps=False):
+            def write_installed_constraints(distributions):
+                lines = []
+                for distribution in distributions:
+                    try:
+                        installed_version = importlib_metadata.version(distribution)
+                    except importlib_metadata.PackageNotFoundError:
+                        continue
+                    lines.append(f"{{distribution}}=={{installed_version}}")
+                torch_stack_constraints.write_text(
+                    "\\n".join(lines) + ("\\n" if lines else ""),
+                    encoding="utf-8",
+                )
+
+            def pip_install(packages, *, no_deps=False, allow_pre=False):
+                packages = list(packages)
+                if not packages:
+                    return
                 command = [
                     sys.executable,
                     "-m",
                     "pip",
                     "install",
                     "--no-index",
+                    "--constraint",
+                    str(torch_stack_constraints),
                     "--find-links",
                     str(competition_wheels),
                     "--find-links",
                     str(wheelhouse_input),
                 ]
+                if allow_pre:
+                    command.append("--pre")
                 if no_deps:
                     command.append("--no-deps")
                 subprocess.check_call(command + list(packages))
@@ -203,12 +236,28 @@ def _install_cell() -> dict:
                     )
                 return matches[-1]
 
+            def require_wheelhouse_wheels(distributions):
+                missing = []
+                for distribution in distributions:
+                    try:
+                        wheel_for(distribution)
+                    except FileNotFoundError:
+                        missing.append(distribution)
+                if missing:
+                    raise FileNotFoundError(
+                        "face-of-agi-wheelhouse is missing required wheels: "
+                        + ", ".join(missing)
+                        + ". Rebuild and upload it with "
+                        + "`cd kaggle && make wheelhouse-upload UPLOAD_MODE=version`."
+                    )
+
             def vllm_dependency_requirements():
                 skipped = {{
                     "torch",
                     "torchaudio",
                     "torchvision",
                     "triton",
+                    "cuda-bindings",
                     "vllm",
                     "cuda-toolkit",
                     "compressed-tensors",
@@ -238,9 +287,15 @@ def _install_cell() -> dict:
                     requirements.append(str(requirement))
                 return requirements
 
-            pip_install({RUNTIME_PACKAGES!r})
-            pip_install({VLLM_TORCH_DEPENDENCY_PACKAGES!r})
-            pip_install(vllm_dependency_requirements())
+            require_wheelhouse_wheels({REQUIRED_WHEELHOUSE_PACKAGES!r})
+            write_installed_constraints(("torch", "torchaudio", "torchvision", "triton"))
+            pip_install({RUNTIME_PACKAGES!r}, no_deps=True)
+            pip_install(
+                {VLLM_TORCH_DEPENDENCY_PACKAGES!r},
+                no_deps=True,
+                allow_pre=True,
+            )
+            pip_install(vllm_dependency_requirements(), no_deps=True, allow_pre=True)
             pip_install({VLLM_STACK_PACKAGES!r}, no_deps=True)
             """
         ).replace("__KAGGLE_INPUT_HELPERS__", _kaggle_input_helpers())
@@ -294,6 +349,7 @@ def _run_rerun_cell() -> dict:
                     "RECORDINGS_DIR": "/kaggle/working/server_recording",
                     "MPLBACKEND": "agg",
                     "VLLM_API_KEY": "EMPTY",
+                    "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "True",
                     "VLLM_DISABLE_LOG_LOGO": "1",
                     "VLLM_LOGGING_LEVEL": "ERROR",
                 }})

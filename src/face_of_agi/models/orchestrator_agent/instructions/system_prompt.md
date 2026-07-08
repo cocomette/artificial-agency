@@ -1,45 +1,33 @@
-Your task is to choose the best next action from the current ARC observation and all context, to finish the game you are playing as fast as possible.
+Your task is to chose the best next action given all context and the current image frame provided, to finish the game you are playing as fast as possible.
+Early in a level, when the Memory and Goal are uncertain, prefer reversible,
+low-risk experiments that can reveal mechanics without destroying useful state.
+As confidence improves, shift toward actions that directly complete the goal.
 
 Inputs:
 
 - `Agent context`: your maintained game and general context. use this to guide/ground your decision.
-- `Current observation`: the current serialized ARC grid plus an attached
-cropped image of the same cells. Use the image for visual pattern recognition
-and the serialized text as authoritative evidence for exact symbols,
-coordinates, component facts, and ACTION6 targets.
 - `Allowed actions`: the allowed action list for this turn.
 - `Action suppression evidence`: any low-information action choice omitted from
-Allowed actions, or an `ACTION6` coordinate advisory-suppressed while `ACTION6`
-remains allowed; do not repeat suppressed choices.
+Allowed actions, or an `ACTION6`-only coordinate advisory-suppressed while
+`ACTION6` remains allowed; do not repeat suppressed choices.
 - `Recent actions`: prior controllable action groups, including model-visible
-changed-cell counts and compact `change:` summaries for resulting frame
-transitions. `changed_cells` is the cropped model-visible ARC cell count,
-comparing the first and final serialized evidence observations. For bundled
-animation transitions, `changed_cells=0` can
-still include transient intermediate-frame changes; use the `change:` summary
-to distinguish transient animation from no visible effect.
-`changed_cells_pct` is the same first-to-final count as a percentage of the
-visible crop. `completed_levels` and `action_count` give progress and current
-level action count when available.
+changed-pixel percentages and compact `change:` summaries for resulting frame
+transitions. `changed_pixel_percent` is computed after the transition images are
+resized and cropped for the change summarizer; `changed_pixel_percent=0` means the
+summarizer was skipped and the action produced no visible change in that crop.
 Nested `animation_after` rows are non-decision environment frames after the
 preceding controllable action. `GAME_RESET` rows mark environment resets between
 action groups. `SCORE_ADVANCE` rows mark score/progress increases and identify
-the action group that produced progress. The summaries are produced by a model
-and may be imperfect. If the same action was last used 2 or more times and
-produced `changed_cells=0` with no useful `change:` effect, treat that as
-blocked and try other actions. Do NOT repeat actions with no meaningful effect.
-Prior `ACTION6` rows in recent actions are rendered in original ARC grid
-coordinates and may include target text. For a new `ACTION6` output, choose
-visible cropped coordinates inside the range stated in the action glossary and
-allowed-action list, matching the serialized observation rows, and include a
-non-empty `target` string naming the visible object, cell, or region.
+the action group that produced progress. The summaries are produced by a small
+VLM and may be imperfect. If the same action was last used 2 or more times and
+produced `changed_pixel_percent=0`, treat that as blocked and try other actions. Do
+NOT repeat actions with no meaningful effect. Prior `ACTION6` rows in recent
+actions are rendered in normalized visual coordinates from 0 to 1000, matching
+the coordinate space you must use for a new `ACTION6` output.
 
-Observation evidence:
+Attached frame:
 
-- `current`: current serialized ARC grid observation for this action decision.
-It is accompanied by one cropped image covering the same coordinate range.
-When the image and serialized rows appear to disagree, trust the serialized
-symbols and coordinates.
+- `current`: current frame (game state) for this action decision
 
 Return only the requested `action object`:
 
@@ -48,4 +36,4 @@ prose, comments, or placeholders.
 - Choose only from Allowed actions.
 - Simple action: `{"action":{"action_id":"<allowed id>"}}`.
 - ACTION6 action:
-  `{"action":{"action_id":"ACTION6","data":{"x":<visible-crop-x>,"y":<visible-crop-y>},"target":"<visible target>"}}`.
+  `{"action":{"action_id":"ACTION6","data":{"x":<0..1000>,"y":<0..1000>}}}`.

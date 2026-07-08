@@ -15,99 +15,203 @@ debug_trace: off
 debug_color: never
 live_turn_monitor: true
 
-max_actions_per_level: 1000
-max_parallel_games: 25
-max_game_retries: 0
+# Explicitly run all games concurrently.
+max_parallel_games: null
 game_selection: all_available
 
-agent_action_history_window: 10
-agent_updater_action_history_window: 20
-agent_context_history_window: 10
+# Avoid retry collisions with per-game LoRA adapter dirs.
+max_game_retries: 0
 
-animation_keyframe_pixel_threshold: 40
+# Give LoRA enough post-update runway, but keep an upper bound.
+max_actions_per_level: 100
+
+agent_action_history_window: 8
+
+# Lower than 30; small animations can matter.
+animation_keyframe_pixel_threshold: 20
+
+# Now acceptable after coordinate-sensitive ACTION6 suppression.
 action_suppression_zero_changed_pixel_turns: 3
 updater_stagnation_warning_zero_changed_pixel_turns: 3
 
+# Throughput-critical. Full action games get ~6 simple actions + 2 coordinate clicks.
+# Raise to 10 only if ACTION6 exploration is visibly too weak.
+candidate_action_count: 8
+
+# Delayed LP should matter, but task completion must dominate when it appears.
+reward_lp_weight_start: 0.60
+reward_lp_weight_end: 0.15
+reward_progress_bonus: 8.0
+
+# Small costs: enough to shape LoRA replay, not enough to suppress exploration.
+reward_action_penalty: 0.015
+reward_trace_seconds_penalty: 0.0
+reward_input_token_penalty_per_1k: 0.0001
+reward_output_token_penalty_per_1k: 0.0007
 
 models:
-  observation_text:
-    crop_cells: 3
-    overflow_chars_per_frame: 12000
-    include_rows: true
-    include_components: true
-    include_component_runs: true
-    compact_components: true
   shared_vlm:
     backend: vllm
     model: Qwen/Qwen3.6-35B-A3B-FP8
-    input_image_size: 1024x1024
+
+    # 512 gives 8 px per ARC cell. This is the right speed/visibility tradeoff
+    # for 25 games in parallel. Use 640 only if coordinate targeting fails.
+    input_image_size: 512x512
+    input_image_resample: nearest
+    input_image_crop_arc_grid_edges: 3
+
     timeout: 600
     max_retries: 0
     max_tool_calls: 0
-    repair_attempts: 3
+    repair_attempts: 1
     temperature: 0.0
+    top_p: 1.0
+
+    options:
+      chat_template_kwargs:
+        enable_thinking: false
+
     server:
       host: 127.0.0.1
       port: 8000
       model_path: /kaggle/input/face-of-agi-qwen36-35b-fp8-weights
-      max_model_len: 65536
+      max_model_len: 16384
       reasoning_parser: qwen3
+
+      enable_lora: true
+
+      # vLLM preallocates GPU memory for these LoRA slots at startup. Keep the
+      # GPU slot count small enough for the 35B FP8 model on a 95 GiB RTX 6000;
+      # loaded adapters can still spill through --max-cpu-loras below.
+      max_loras: 8
+      max_lora_rank: 8
+      allow_runtime_lora_updating: true
+
       extra_args:
+        # Leave GPU headroom for the warm HF LoRA trainer that co-resides with
+        # vLLM during shared online updates.
         - --gpu-memory-utilization
-        - "0.95"
+        - "0.65"
+
+        # Conservative first-pass KV/concurrency budget for trainer coexistence.
         - --max-num-seqs
-        - "32"
+        - "16"
         - --max-num-batched-tokens
-        - "65536"
+        - "8192"
+
+        # Useful when many role prompts share instruction prefixes.
+        - --enable-prefix-caching
+
+        # Helps avoid hard failures when many adapters accumulate.
+        # Remove only if your vLLM version rejects this flag.
+        - --max-cpu-loras
+        - "512"
+
+        - --chat-template-content-format
+        - openai
         - --disable-log-stats
         - --disable-uvicorn-access-log
         - --default-chat-template-kwargs
         - '{"enable_thinking": false}'
         - --reasoning-config
         - "{}"
+
   agent:
     backend: vllm
-    include_output_schema_in_instructions: false
+    include_output_schema_in_instructions: true
+    max_completion_tokens: 2048
+    temperature: 0.15
     options:
-      temperature: 0.2
-      thinking_token_budget: 512
       chat_template_kwargs:
-        enable_thinking: true
+        enable_thinking: false
+
   change:
     backend: vllm
-    include_output_schema_in_instructions: false
-    summary_max_chars: 8000
-    repair_invalid_output_preview_chars: 8000
-    max_frames_per_call: 8
-    reduce_chunk_summaries: true
-    reducer_keyframe_limit: 8
+    include_output_schema_in_instructions: true
+    max_completion_tokens: 2048
     options:
-      thinking_token_budget: 1024
       chat_template_kwargs:
-        enable_thinking: true
-  historizer:
+        enable_thinking: false
+
+  memory:
     backend: vllm
-    include_output_schema_in_instructions: false
-    field_evolution_max_chars: 8000
-    repair_invalid_output_preview_chars: 8000
+    include_output_schema_in_instructions: true
+    max_completion_tokens: 3072
     options:
-      thinking_token_budget: 256
       chat_template_kwargs:
-        enable_thinking: true
-  updater:
-    general:
-      backend: vllm
-      include_output_schema_in_instructions: false
-      general_context_max_chars: 20000
-      repair_invalid_output_preview_chars: 8000
-    agent:
-      backend: vllm
-      include_output_schema_in_instructions: false
-      agent_game_context_max_chars: 12000
-      agent_game_context_field_max_chars: 6000
-      repair_invalid_output_preview_chars: 12000
-      options:
-        temperature: 0.2
-        thinking_token_budget: 2048
-        chat_template_kwargs:
-          enable_thinking: true
+        enable_thinking: false
+
+  world:
+    backend: vllm
+    include_output_schema_in_instructions: true
+    max_completion_tokens: 3072
+    options:
+      chat_template_kwargs:
+        enable_thinking: false
+
+  goal:
+    backend: vllm
+    include_output_schema_in_instructions: true
+    max_completion_tokens: 2048
+    options:
+      chat_template_kwargs:
+        enable_thinking: false
+
+  interest:
+    backend: vllm
+    include_output_schema_in_instructions: true
+    max_completion_tokens: 2048
+    options:
+      chat_template_kwargs:
+        enable_thinking: false
+
+  reward_judge:
+    backend: vllm
+    include_output_schema_in_instructions: true
+    max_completion_tokens: 1024
+    options:
+      chat_template_kwargs:
+        enable_thinking: false
+
+online_lora:
+  enabled: true
+
+  # Use the local offline model path.
+  base_model: Qwen/Qwen3.6-35B-A3B-FP8
+  base_model_path: /kaggle/input/face-of-agi-qwen36-35b-fp8-weights
+  trainer_base_model_path: /kaggle/input/face-of-agi-qwen36-35b-trainable-weights
+  trainer_local_files_only: true
+  trainer_quantization: bnb_4bit
+  adapter_root: /kaggle/working/runs/lora
+
+  # Shared update batch across games: train on up to 8 turn bundles, with a
+  # small rolling evaluation reserve per contributor.
+  update_interval_turns: 4
+  min_new_samples_per_update: 8
+  max_update_wait_seconds: 30.0
+  max_train_samples: 8
+  held_out_recent_samples: 2
+  trainer_cache_enabled: false
+  trainer_device_map: cuda:0
+  trainer_torch_dtype: auto
+  lora_target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+  # Tiny updates only. The goal is online steering, not full convergence.
+  train_batch_size: 2
+  train_epochs: 1
+  max_update_steps: 2
+
+  # Interest/Agent GRPO only. World is SFT in your new code.
+  grpo_num_generations: 2
+  max_completion_tokens: 256
+
+  learning_rate: 1.0e-5
+  learning_progress_min: -0.25
+  learning_progress_max: 0.25

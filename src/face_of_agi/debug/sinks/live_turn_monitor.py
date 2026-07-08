@@ -9,13 +9,14 @@ from typing import TextIO
 
 from face_of_agi.debug.events import DebugEvent, FrameTurnCompleted, ModelCallCompleted
 
-_MODEL_AVG_FIELDS = {
-    "agent": "avg_model_sec_agent",
-    "change": "avg_model_sec_change",
-    "historizer": "avg_model_sec_historizer",
-    "updater.agent": "avg_model_sec_updater_agent",
-    "updater.general": "avg_model_sec_updater_general",
-}
+_MODEL_TIMING_ROLES = (
+    "agent",
+    "change",
+    "memory",
+    "world",
+    "goal",
+    "reward_judge",
+)
 
 
 class LiveTurnMonitor:
@@ -37,8 +38,8 @@ class LiveTurnMonitor:
         self._total_turn_seconds = 0.0
         self._min_turn_seconds: float | None = None
         self._max_turn_seconds: float | None = None
-        self._model_call_totals = {role: 0.0 for role in _MODEL_AVG_FIELDS}
-        self._model_call_counts = {role: 0 for role in _MODEL_AVG_FIELDS}
+        self._model_call_totals = {role: 0.0 for role in _MODEL_TIMING_ROLES}
+        self._model_call_counts = {role: 0 for role in _MODEL_TIMING_ROLES}
         self._started_at: float | None = None
         self._completed_levels_by_game: dict[tuple[int | None, str], int] = {}
 
@@ -82,14 +83,15 @@ class LiveTurnMonitor:
             self.output.flush()
 
     def _record_model_call(self, event: ModelCallCompleted) -> None:
-        if event.role not in _MODEL_AVG_FIELDS:
+        role = event.role
+        if role not in self._model_call_totals:
             return
         with self._lock:
-            self._model_call_totals[event.role] += max(
+            self._model_call_totals[role] += max(
                 0.0,
                 float(event.duration_seconds),
             )
-            self._model_call_counts[event.role] += 1
+            self._model_call_counts[role] += 1
 
     def _summary_line(self, now: float) -> str:
         avg_turn_seconds = self._total_turn_seconds / self._turn_count
@@ -107,27 +109,23 @@ class LiveTurnMonitor:
         avg_controllable_turns_per_game = (
             self._controllable_turn_count / self.selected_game_count
         )
-        return (
+        line = (
             "throughput:"
             f" turns={self._turn_count}"
             f" games={self.selected_game_count}"
+            f" avg_controllable_turns_per_game={avg_controllable_turns_per_game:.2f}"
             f" avg_turn_sec={avg_turn_seconds:.3f}"
             f" min_turn_sec={(self._min_turn_seconds or 0.0):.3f}"
             f" max_turn_sec={(self._max_turn_seconds or 0.0):.3f}"
-            f"{self._model_averages_text()}"
             f" turns_per_min={turns_per_minute:.2f}"
-            f" avg_controllable_turns_per_game={avg_controllable_turns_per_game:.2f}"
             f" total_completed_levels={total_completed_levels}"
         )
-
-    def _model_averages_text(self) -> str:
-        fields = []
-        for role, field in _MODEL_AVG_FIELDS.items():
+        for role in _MODEL_TIMING_ROLES:
             count = self._model_call_counts[role]
             average = (
                 self._model_call_totals[role] / count
                 if count
                 else 0.0
             )
-            fields.append(f" {field}={average:.3f}")
-        return "".join(fields)
+            line += f" avg_model_sec_{role}={average:.3f}"
+        return line

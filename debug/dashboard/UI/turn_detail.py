@@ -54,18 +54,23 @@ def select_turn(states: list[dict[str, Any]], *, key: str) -> dict[str, Any]:
 def render_selected_turn(
     state: dict[str, Any],
     model_input_records: list[dict[str, Any]] | None = None,
+    v1_artifacts: dict[str, list[dict[str, Any]]] | None = None,
 ) -> None:
     """Render detail tabs for one selected M state."""
 
     _render_turn_heading(state)
 
-    overview, model_inputs, raw = st.tabs(["Overview", "Models I/O", "Raw Data"])
+    overview, v1, model_inputs, raw = st.tabs(
+        ["Overview", "V1 Roles", "Models I/O", "Raw Data"]
+    )
     with overview:
         _render_overview(state)
+    with v1:
+        _render_v1_artifacts(v1_artifacts or {})
     with model_inputs:
         render_model_inputs(model_input_records or [])
     with raw:
-        _render_raw(state, model_input_records or [])
+        _render_raw(state, model_input_records or [], v1_artifacts or {})
 
 
 def render_turn_overview(state: dict[str, Any]) -> None:
@@ -119,15 +124,158 @@ def _render_overview(state: dict[str, Any]) -> None:
 def _render_raw(
     state: dict[str, Any],
     model_input_records: list[dict[str, Any]],
+    v1_artifacts: dict[str, list[dict[str, Any]]],
 ) -> None:
     st.json(
         redacted_for_json(
             {
                 "m_state": state,
                 "matching_model_input_debug_records": model_input_records,
+                "v1_artifacts": v1_artifacts,
             }
         )
     )
+
+
+def _render_v1_artifacts(artifacts: dict[str, list[dict[str, Any]]]) -> None:
+    if not any(artifacts.values()):
+        st.info("No v1 role artifacts are available for this turn.")
+        return
+
+    _render_candidate_predictions(artifacts.get("candidate_predictions") or [])
+    _render_judge_scores(artifacts.get("judge_scores") or [])
+    _render_rewards(artifacts.get("rewards") or [])
+    _render_goal_memory(
+        artifacts.get("goal_predictions") or [],
+        artifacts.get("turn_ledgers") or [],
+    )
+    _render_lora_updates(artifacts.get("lora_updates") or [])
+
+
+def _render_candidate_predictions(rows: list[dict[str, Any]]) -> None:
+    st.write("Candidate World Predictions")
+    if not rows:
+        st.caption("No candidate predictions.")
+        return
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "candidate": row["candidate_index"],
+                    "action": action_label(row.get("action")),
+                    "source": row["source"],
+                    "prediction": row["prediction"],
+                }
+                for row in rows
+            ]
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+
+
+def _render_judge_scores(rows: list[dict[str, Any]]) -> None:
+    st.write("Reward Judge")
+    if not rows:
+        st.caption("No judge scores.")
+        return
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "candidate_prediction_id": row["candidate_prediction_id"],
+                    "score": row["score"],
+                    "error_tags": ", ".join(row.get("error_tags") or []),
+                    "notes": row["notes"],
+                }
+                for row in rows
+            ]
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+
+
+def _render_rewards(rows: list[dict[str, Any]]) -> None:
+    st.write("Rewards")
+    if not rows:
+        st.caption("No reward row.")
+        return
+    reward = _dict(rows[-1].get("reward"))
+    cols = st.columns(5)
+    cols[0].metric("Total", _metric_value(reward.get("total")))
+    cols[1].metric("World", _metric_value(reward.get("world_score")))
+    cols[2].metric("LP", _metric_value(reward.get("learning_progress")))
+    cols[3].metric("Goal Delta", _metric_value(reward.get("goal_delta")))
+    cols[4].metric("Bonus", _metric_value(reward.get("progress_bonus")))
+    st.json(redacted_for_json(rows[-1]))
+
+
+def _render_goal_memory(
+    goal_rows: list[dict[str, Any]],
+    ledger_rows: list[dict[str, Any]],
+) -> None:
+    st.write("Goal And Memory")
+    if goal_rows:
+        goal = _dict(goal_rows[-1].get("goal_prediction"))
+        cols = st.columns(3)
+        cols[0].metric("Steps", _metric_value(goal.get("steps_remaining")))
+        cols[1].metric("Confidence", _metric_value(goal.get("confidence")))
+        cols[2].metric("Subgoals", str(len(goal.get("subgoals") or [])))
+        st.text_area(
+            "Goal",
+            value=str(goal.get("goal") or ""),
+            height=90,
+            disabled=True,
+        )
+        st.text_area(
+            "Memory",
+            value=str(goal_rows[-1].get("memory_document") or ""),
+            height=240,
+            disabled=True,
+        )
+    elif ledger_rows:
+        st.text_area(
+            "Memory",
+            value=str(ledger_rows[-1].get("memory_document") or ""),
+            height=240,
+            disabled=True,
+        )
+    else:
+        st.caption("No Goal or Memory rows.")
+
+
+def _render_lora_updates(rows: list[dict[str, Any]]) -> None:
+    st.write("Adapter Updates")
+    if not rows:
+        st.caption("No LoRA update attempts.")
+        return
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "update": row["update_index"],
+                    "role": row["role"],
+                    "status": row["status"],
+                    "adapter": row["adapter_name"],
+                    "path": row["adapter_path"],
+                    "error": row["error"],
+                    "created_at": row["created_at"],
+                }
+                for row in rows
+            ]
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+
+
+def _metric_value(value: Any) -> str:
+    if isinstance(value, float):
+        return f"{value:.3f}"
+    if value is None:
+        return "-"
+    return str(value)
 
 
 def _dict(value: Any) -> dict[str, Any]:

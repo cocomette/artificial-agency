@@ -12,13 +12,20 @@ from face_of_agi.contracts import (
     ActionHistoryScoreAdvanceMarker,
     AgentTrace,
     ActionSpec,
+    CandidatePredictionRecord,
     ContextDocuments,
     FrameControlMode,
+    GoalPredictionRecord,
+    JudgeScoreRecord,
+    LoRAUpdateStateRecord,
     MStateRecord,
     Observation,
     ObservationRef,
+    ReplaySampleRecord,
+    RewardRecord,
     RoleContext,
     RunMetadataRecord,
+    TurnLedgerRecord,
     TurnMetrics,
 )
 from face_of_agi.debug.contracts import ModelInputDebugRecord
@@ -311,6 +318,217 @@ class StateMemory:
             run_id=run_id,
             game_id=game_id,
             kind=kind,
+        )
+
+    def write_turn_ledger(
+        self,
+        *,
+        run_id: str,
+        game_id: str,
+        turn_id: int,
+        m_state_id: int | None,
+        action: ActionSpec,
+        change_summary: str,
+        memory_document: str,
+        goal_prediction: Any | None = None,
+        reward: Any | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> TurnLedgerRecord:
+        """Store one v1 turn-ledger row."""
+
+        return self.database.write_turn_ledger(
+            run_id=run_id,
+            game_id=game_id,
+            turn_id=turn_id,
+            m_state_id=m_state_id,
+            action=action,
+            change_summary=change_summary,
+            memory_document=memory_document,
+            goal_prediction=goal_prediction,
+            reward=reward,
+            metadata=metadata,
+        )
+
+    def write_candidate_prediction(
+        self,
+        *,
+        run_id: str,
+        game_id: str,
+        turn_id: int,
+        candidate_index: int,
+        action: ActionSpec,
+        prediction: str,
+        source: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> CandidatePredictionRecord:
+        """Store one candidate world prediction."""
+
+        return self.database.write_candidate_prediction(
+            run_id=run_id,
+            game_id=game_id,
+            turn_id=turn_id,
+            candidate_index=candidate_index,
+            action=action,
+            prediction=prediction,
+            source=source,
+            metadata=metadata,
+        )
+
+    def write_judge_score(
+        self,
+        *,
+        run_id: str,
+        game_id: str,
+        turn_id: int,
+        candidate_prediction_id: int | None,
+        score: float,
+        notes: str,
+        error_tags: tuple[str, ...],
+        metadata: dict[str, Any] | None = None,
+    ) -> JudgeScoreRecord:
+        """Store one Reward Judge score."""
+
+        return self.database.write_judge_score(
+            run_id=run_id,
+            game_id=game_id,
+            turn_id=turn_id,
+            candidate_prediction_id=candidate_prediction_id,
+            score=score,
+            notes=notes,
+            error_tags=error_tags,
+            metadata=metadata,
+        )
+
+    def write_goal_prediction(
+        self,
+        *,
+        run_id: str,
+        game_id: str,
+        turn_id: int,
+        goal_prediction: Any,
+        memory_document: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> GoalPredictionRecord:
+        """Store one Goal prediction."""
+
+        return self.database.write_goal_prediction(
+            run_id=run_id,
+            game_id=game_id,
+            turn_id=turn_id,
+            goal_prediction=goal_prediction,
+            memory_document=memory_document,
+            metadata=metadata,
+        )
+
+    def write_reward(
+        self,
+        *,
+        run_id: str,
+        game_id: str,
+        turn_id: int,
+        reward: Any,
+        metadata: dict[str, Any] | None = None,
+    ) -> RewardRecord:
+        """Store one reward row."""
+
+        return self.database.write_reward(
+            run_id=run_id,
+            game_id=game_id,
+            turn_id=turn_id,
+            reward=reward,
+            metadata=metadata,
+        )
+
+    def write_replay_sample(
+        self,
+        *,
+        run_id: str,
+        game_id: str,
+        turn_id: int,
+        role: str,
+        prompt: Any,
+        completion: Any,
+        reward: float,
+        held_out: bool,
+        metadata: dict[str, Any] | None = None,
+    ) -> ReplaySampleRecord:
+        """Store one online LoRA replay sample."""
+
+        return self.database.write_replay_sample(
+            run_id=run_id,
+            game_id=game_id,
+            turn_id=turn_id,
+            role=role,
+            prompt=prompt,
+            completion=completion,
+            reward=reward,
+            held_out=held_out,
+            metadata=metadata,
+        )
+
+    def update_replay_sample_reward_metadata(
+        self,
+        *,
+        sample_id: int,
+        reward: float,
+        metadata: dict[str, Any],
+    ) -> ReplaySampleRecord:
+        """Update one online LoRA replay sample reward and metadata."""
+
+        return self.database.update_replay_sample_reward_metadata(
+            sample_id=sample_id,
+            reward=reward,
+            metadata=metadata,
+        )
+
+    def write_lora_update(
+        self,
+        *,
+        run_id: str,
+        game_id: str,
+        update_index: int,
+        role: str,
+        status: str,
+        adapter_name: str,
+        adapter_path: str,
+        error: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> LoRAUpdateStateRecord:
+        """Store one LoRA update status row."""
+
+        return self.database.write_lora_update(
+            run_id=run_id,
+            game_id=game_id,
+            update_index=update_index,
+            role=role,
+            status=status,
+            adapter_name=adapter_name,
+            adapter_path=adapter_path,
+            error=error,
+            metadata=metadata,
+        )
+
+    def list_replay_samples(
+        self,
+        *,
+        run_id: str,
+        game_id: str,
+        role: str | None = None,
+        held_out: bool | None = None,
+        after_id: int | None = None,
+        limit: int | None = None,
+        ascending: bool = False,
+    ) -> list[ReplaySampleRecord]:
+        """Return recent replay samples for LoRA updates."""
+
+        return self.database.list_replay_samples(
+            run_id=run_id,
+            game_id=game_id,
+            role=role,
+            held_out=held_out,
+            after_id=after_id,
+            limit=limit,
+            ascending=ascending,
         )
 
     def write_model_input_debug_record(

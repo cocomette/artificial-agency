@@ -1,113 +1,47 @@
 # Model Inputs
 
-## Shared Context Inputs
+## Agent X
 
-Each prompt-backed model role receives immutable role instructions plus the
-role-specific mutable context assembled by orchestration.
+Agent X proposal receives:
 
-Agent context uses:
+- current Memory
+- latest Goal prediction
+- current observation frame
+- allowed current actions
+- full action glossary for prompt semantics
 
-```text
-C^X_i,t = K^X + L^X_i,t
-```
+Agent X final selection receives the same context plus the bounded candidate
+list and World prediction text for each candidate.
 
-Where:
+## Change Summary
 
-- `K^X` is game-agnostic agent context
-- `L^X_i,t` is game-specific agent context
+Change summary receives previous observation, current observation, chosen
+action, and glossary actions. Provider adapters send separate previous/current
+images plus prompt text.
 
-The immutable instruction is not part of `C`. Agent `X` receives
-`models/orchestrator_agent/instructions/system_prompt.md` separately from its
-mutable `role_context`. Updater `P` mutates only agent `K` and `L` in the
-current implementation.
+## Memory
 
-## Observation Inputs
+Memory receives the original first frame, current frame, and a sanitized
+Memory ledger. Each Memory ledger row contains only `turn_id`, prompt-facing
+`action`, and `change_summary`. Game-over reset does not replace the first
+frame or clear prior ledger entries; orchestration adds an explicit reset
+marker whose action/change summary are preserved in the sanitized rows.
+Candidate predictions, judge scores, rewards, goals, and ledger metadata remain
+internal/persisted orchestration artifacts and are not sent to Memory.
 
-Model-facing observations combine `ObservationText` strings with cropped PNG
-image attachments for implemented frame-consuming vLLM roles. The serializer
-accepts native 2D ARC integer grids, crops to original coordinates
-`x=3..60` and `y=3..60`, optionally prints cropped rows with `0..63`
-coordinate labels and uppercase ARC symbols `0..F`, lists 4-connected
-same-symbol components unless disabled by config or overflow applies, falls
-back from exact component `runs=` row spans to compact component fields when
-needed, and emits component-level deltas for bundles/change prompts. When
-components are omitted, deltas keep only changed-cell counts. Agent, updater,
-and change-summary user prompts use compact observation headers: the label is
-followed directly by configured frame evidence; observation id, step,
-crop-bound, coordinate-system, and symbol metadata remain internal serializer
-metadata rather than repeated prompt text.
+## World
 
-Observation-facing role instructions include a static ARC symbol color
-glossary. Serialized rows and coordinates remain authoritative when text and
-image appearance seem to conflict. The vLLM adapters attach PNG data URLs as
-OpenAI-compatible `image_url` content parts for Agent X, change summary, change
-reducer keyframes, and the agent-game updater.
+World receives current frame, one candidate action, action glossary, and the
+current Memory document.
 
-## Agent `X` Inputs
+## Goal
 
-Agent `X` receives inputs only for controllable final frames.
+Goal normally receives the latest Memory document and run progress metadata.
+For reward computation, orchestration makes one reward-only Goal call using the
+previous Memory plus the next frame before regenerating Memory for next-turn
+state.
 
-- composed agent context `C^X`
-- current observation as `ObservationText` plus one matching cropped image
-- current action space
-- bounded recent action history from prior frame turns
-- deterministic action outcome evidence, including cropped changed-cell counts
-- `AgentToolRuntime`, currently with no available tools
+## Reward Judge
 
-The recent action history is compact action memory, not frame history. The
-model-facing prompt contains only the bounded list of prior action payloads and
-summaries.
-
-New ACTION6 outputs are validated against the active visible crop range derived
-from `ObservationTextConfig.crop_cells`; with the default crop this is
-`x/y=3..60`. Historical ACTION6 rows remain rendered as recorded original-grid
-coordinates.
-
-Agent traces keep first/current observation references, and persisted frame-turn
-state keeps previous-frame references for orchestration and memory inspection,
-but the current Agent `X` prompt carries only the current observation evidence.
-
-## Change Summary Inputs
-
-The change summary model receives:
-
-- previous observation as `ObservationText` plus matching cropped image
-- current observation as `ObservationText` plus matching cropped image
-- a bounded first/intermediate/final sample of retained animation frames when a
-  filtered frame bundle is larger than the change-summary evidence-frame budget
-- component-level deltas for the transition or frame bundle
-- submitted real action or synthetic `NONE`
-- glossary/action-space information when available
-
-It uses cropped-frame changed counts for model-facing evidence and no-change
-short-circuiting.
-
-## Historizer Inputs
-
-The historizer receives recent agent context revisions selected by
-orchestration and the current agent context fields. It is text-only and does
-not receive frames directly.
-
-## Updater `P` Inputs
-
-Updater inputs are built by orchestration from live in-turn objects. The
-updater does not read SQLite or resolve memory references directly.
-
-Agent game context updates use `AgentGameContextUpdateInput`:
-
-- previous agent context for `X`
-- current observed frame after the last action, `o_t+1`, as `ObservationText`
-  plus one matching cropped image
-- full live `AgentTrace`
-- transition change summary
-- bounded prior action history
-- agent context history summary
-- reward/update quantities and turn metrics
-
-End-of-run general context updates use `GeneralKnowledgeUpdateInput`:
-
-- target role: `agent`
-- previous agent context, including the final game context and current general
-  context
-- run id, game id, stop reason, step count, completed levels, final state, and
-  state record ids
+Reward Judge receives the executed action, World prediction text, observed
+Change Summary text, and optional current/next frames.

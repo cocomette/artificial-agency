@@ -17,6 +17,12 @@ MemoryDomain = Literal["state", "experimental"]
 ToolName = str
 ActionId: TypeAlias = GameAction | str
 FrameControlReason = Literal["animation_unroll", "real_environment_turn"]
+VisualCoordinateSpace = Literal["pixel", "normalized_1000"]
+VisualBBoxOrder = Literal["xyxy", "yxyx"]
+VisualAxisFrame = Literal["top_left_x_right_y_down"]
+CANONICAL_VISUAL_BBOX_ORDER: VisualBBoxOrder = "xyxy"
+CANONICAL_VISUAL_AXIS_FRAME: VisualAxisFrame = "top_left_x_right_y_down"
+
 NONE_ACTION_ID = "NONE"
 
 
@@ -30,7 +36,6 @@ class ActionSpec:
 
     action_id: ActionId
     data: dict[str, Any] | None = None
-    target: str | None = None
 
     @classmethod
     def none(cls) -> "ActionSpec":
@@ -184,16 +189,15 @@ class ObservationRef:
 
 @dataclass(slots=True)
 class ActionHistoryEntry:
-    """Persisted raw frame-turn action and compact outcome signal."""
+    """Persisted frame-turn action and compact normalized outcome signal."""
 
     action: ActionSpec
     controllable: bool
-    changed_pixel_count: int
+    changed_pixel_percent: float
     change_summary: str
-    changed_cell_percent: float | None = None
-    completed_levels: int | None = None
-    action_count: int | None = None
+    retained_animation_frame_count: int = 0
     skipped_intermediate_animation_frame_count: int = 0
+    animation_avg_changed_pixel_percent: float | None = None
 
 
 @dataclass(slots=True)
@@ -280,6 +284,9 @@ class TurnMetrics:
     time_cost: float | None = None
     trace_cost: float | None = None
     cumulative_score: float | None = None
+    model_prompt_tokens: int = 0
+    model_completion_tokens: int = 0
+    model_total_tokens: int = 0
 
 
 @dataclass(slots=True)
@@ -314,6 +321,121 @@ class DecisionResult:
     trace: AgentTrace
 
 
+@dataclass(frozen=True, slots=True)
+class AgentCandidateAction:
+    """One candidate action considered by the two-stage agent loop."""
+
+    action: ActionSpec
+    source: Literal["runtime_simple_action", "agent_coordinate_proposal"]
+    rank: int
+    rationale: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryDocument:
+    """Current model-facing memory document regenerated from the turn ledger."""
+
+    document: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class GoalPrediction:
+    """Structured goal estimate used by the agent and reward shaping."""
+
+    goal: str
+    subgoals: tuple[str, ...]
+    steps_remaining: int
+    confidence: float
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class WorldPrediction:
+    """Predicted visible transition for one candidate action."""
+
+    candidate_index: int
+    action: ActionSpec
+    predicted_change: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateValuePrediction:
+    """Interest/value estimate for one candidate action."""
+
+    candidate_index: int
+    action: ActionSpec
+    expected_learning_progress: float
+    expected_goal_delta: float
+    confidence: float
+    notes: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class InterestPrediction:
+    """Batch Interest output for the current candidate set."""
+
+    candidate_values: tuple[CandidateValuePrediction, ...]
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class RewardJudgeScore:
+    """Scalar text/VLM judge score for a world prediction."""
+
+    score: float
+    notes: str
+    error_tags: tuple[str, ...] = ()
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class TurnReward:
+    """Computed reward components for one executed environment action."""
+
+    prediction_accuracy: float
+    learning_progress: float | None
+    goal_delta: float
+    progress_bonus: float
+    resource_cost: float
+    lp_weight: float
+    goal_weight: float
+    total: float
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class TurnLedgerEntry:
+    """Text-and-JSON durable ledger entry used by Memory and training."""
+
+    turn_id: int
+    action: ActionSpec
+    change_summary: str
+    reward: TurnReward | None = None
+    candidate_predictions: tuple[WorldPrediction, ...] = ()
+    judge_scores: tuple[RewardJudgeScore, ...] = ()
+    goal_before: GoalPrediction | None = None
+    goal_after: GoalPrediction | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class LoRAUpdateRecord:
+    """Status of one online LoRA update attempt."""
+
+    role: Literal["world", "interest", "agent"]
+    status: Literal["queued", "running", "succeeded", "failed"]
+    update_index: int
+    started_at: str | None = None
+    completed_at: str | None = None
+    adapter_name: str = ""
+    adapter_path: str = ""
+    error: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
 @dataclass(slots=True)
 class RuntimeConfig:
     """Minimal runtime configuration for one multi-game call."""
@@ -343,6 +465,117 @@ class MStateRecord:
     turn_metrics: TurnMetrics = field(
         default_factory=TurnMetrics
     )
+
+
+@dataclass(slots=True)
+class TurnLedgerRecord:
+    """Durable turn-ledger row for the new memory/world/goal runtime."""
+
+    id: int
+    m_state_id: int | None
+    game_id: str
+    run_id: str
+    turn_id: int
+    action: dict[str, Any]
+    change_summary: str
+    memory_document: str
+    goal_prediction: dict[str, Any] | None
+    reward: dict[str, Any] | None
+    metadata: dict[str, Any]
+    created_at: str
+
+
+@dataclass(slots=True)
+class CandidatePredictionRecord:
+    """Durable world prediction row for one candidate action."""
+
+    id: int
+    game_id: str
+    run_id: str
+    turn_id: int
+    candidate_index: int
+    action: dict[str, Any]
+    prediction: str
+    source: str
+    metadata: dict[str, Any]
+    created_at: str
+
+
+@dataclass(slots=True)
+class JudgeScoreRecord:
+    """Durable reward-judge row for one candidate prediction."""
+
+    id: int
+    game_id: str
+    run_id: str
+    turn_id: int
+    candidate_prediction_id: int | None
+    score: float
+    notes: str
+    error_tags: tuple[str, ...]
+    metadata: dict[str, Any]
+    created_at: str
+
+
+@dataclass(slots=True)
+class GoalPredictionRecord:
+    """Durable goal prediction row."""
+
+    id: int
+    game_id: str
+    run_id: str
+    turn_id: int
+    goal_prediction: dict[str, Any]
+    memory_document: str
+    metadata: dict[str, Any]
+    created_at: str
+
+
+@dataclass(slots=True)
+class RewardRecord:
+    """Durable reward row for one turn."""
+
+    id: int
+    game_id: str
+    run_id: str
+    turn_id: int
+    reward: dict[str, Any]
+    metadata: dict[str, Any]
+    created_at: str
+
+
+@dataclass(slots=True)
+class ReplaySampleRecord:
+    """Durable replay sample row for online LoRA updates."""
+
+    id: int
+    game_id: str
+    run_id: str
+    turn_id: int
+    role: Literal["world", "interest", "agent"]
+    prompt_json: dict[str, Any]
+    completion_json: dict[str, Any]
+    reward: float
+    held_out: bool
+    metadata: dict[str, Any]
+    created_at: str
+
+
+@dataclass(slots=True)
+class LoRAUpdateStateRecord:
+    """Durable LoRA update status row."""
+
+    id: int
+    game_id: str
+    run_id: str
+    update_index: int
+    role: Literal["world", "interest", "agent"]
+    status: str
+    adapter_name: str
+    adapter_path: str
+    error: str
+    metadata: dict[str, Any]
+    created_at: str
 
 
 @dataclass(slots=True)
@@ -395,7 +628,6 @@ class GameRunResult:
     step_count: int = 0
     completed_levels: int = 0
     last_state: GameState | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

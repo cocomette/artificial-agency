@@ -21,6 +21,10 @@ class VLLMServerConfig:
     model_path: str | None = None
     max_model_len: int | None = None
     reasoning_parser: str | None = None
+    enable_lora: bool = True
+    max_loras: int | None = 3
+    max_lora_rank: int | None = None
+    allow_runtime_lora_updating: bool = True
     extra_args: tuple[str, ...] = ()
 
     @property
@@ -45,16 +49,10 @@ def vllm_server_config_from_config_text(
     found: list[str] = []
     if shared_backend == "vllm":
         _append_model(found, shared.get("model"))
-    for role_name in ("agent", "change", "historizer"):
+    for role_name in ("agent", "change", "memory", "world", "goal", "reward_judge"):
         role = models.get(role_name) or {}
         if _backend(role) == "vllm":
             _append_model(found, role.get("model") or shared.get("model"))
-    updater = models.get("updater") or {}
-    if isinstance(updater, dict):
-        for task in ("agent", "general"):
-            role = updater.get(task) or {}
-            if _backend(role) == "vllm":
-                _append_model(found, role.get("model") or shared.get("model"))
     if not found:
         return None
 
@@ -76,6 +74,13 @@ def vllm_server_config_from_config_text(
         model_path=_optional_server_string(server.get("model_path")),
         max_model_len=_optional_server_int(server.get("max_model_len")),
         reasoning_parser=_optional_server_string(server.get("reasoning_parser")),
+        enable_lora=_optional_server_bool(server.get("enable_lora"), default=True),
+        max_loras=_optional_server_int(server.get("max_loras", 3)),
+        max_lora_rank=_optional_server_int(server.get("max_lora_rank")),
+        allow_runtime_lora_updating=_optional_server_bool(
+            server.get("allow_runtime_lora_updating"),
+            default=True,
+        ),
         extra_args=tuple(str(arg) for arg in extra_args),
     )
 
@@ -99,6 +104,12 @@ def vllm_server_command(config: VLLMServerConfig) -> tuple[str, ...]:
         command.extend(["--max-model-len", str(config.max_model_len)])
     if config.reasoning_parser:
         command.extend(["--reasoning-parser", config.reasoning_parser])
+    if config.enable_lora:
+        command.append("--enable-lora")
+    if config.max_loras is not None:
+        command.extend(["--max-loras", str(config.max_loras)])
+    if config.max_lora_rank is not None:
+        command.extend(["--max-lora-rank", str(config.max_lora_rank)])
     command.extend(config.extra_args)
     return tuple(command)
 
@@ -124,3 +135,9 @@ def _optional_server_int(value: Any) -> int | None:
     if value in {None, ""}:
         return None
     return int(value)
+
+
+def _optional_server_bool(value: Any, *, default: bool) -> bool:
+    if value is None:
+        return default
+    return bool(value)

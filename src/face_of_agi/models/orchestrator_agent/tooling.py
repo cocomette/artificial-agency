@@ -7,36 +7,34 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from face_of_agi.contracts import (
+    AgentCandidateAction,
     ActionHistoryItem,
     ActionOutcomeEvidence,
     ActionSpec,
     AgentTrace,
+    CandidateValuePrediction,
     DecisionResult,
     ExperimentToolInvocationResult,
+    GoalPrediction,
+    InterestPrediction,
+    MemoryDocument,
     Observation,
     ObservationRef,
     RoleContext,
     ToolCall,
     ToolResult,
+    VisualCoordinateSpace,
+    WorldPrediction,
 )
-from face_of_agi.frames import to_memory_jsonable
-from face_of_agi.models.color_glossary import append_arc_color_glossary
-from face_of_agi.models.action_coordinates import (
-    action6_coordinate_bounds,
-    action6_coordinate_range_phrase,
-    action6_coordinate_range_text,
-    action6_data_from_visible_crop,
-)
+from face_of_agi.frames import observation_to_pil_image, to_memory_jsonable
+from face_of_agi.models.arc_grid_crop import normalized_1000_to_arc_grid
 from face_of_agi.models.action_glossary import append_action_glossary
 from face_of_agi.models.action_history import (
     grouped_action_history_text,
     model_facing_action_text,
+    model_facing_action_text_for_crop,
 )
 from face_of_agi.models.orchestrator_agent.contracts import AgentToolRuntime
-from face_of_agi.models.observation_text import (
-    ObservationTextConfig,
-    serialize_observation,
-)
 
 INSTRUCTION_PATH = Path(__file__).parent / "instructions" / "system_prompt.md"
 
@@ -54,45 +52,33 @@ def load_agent_instructions() -> str:
 def build_agent_instructions(
     *,
     glossary_actions: Sequence[ActionSpec],
-    observation_text_config: ObservationTextConfig | dict[str, Any] | None = None,
 ) -> str:
     """Return X instructions with the current raw action glossary."""
 
-    return append_arc_color_glossary(
-        append_action_glossary(
-            load_agent_instructions(),
-            glossary_actions,
-            mode="agent_decision",
-            observation_text_config=observation_text_config,
-        )
+    return append_action_glossary(
+        load_agent_instructions(),
+        glossary_actions,
+        mode="agent_decision",
     )
 
 
 def build_decision_prompt(
     *,
     context: RoleContext,
-    current_observation: Observation,
     action_space: Sequence[ActionSpec],
     recent_action_history: Sequence[ActionHistoryItem] = (),
     recent_action_history_available: bool = True,
     action_outcome_evidence: ActionOutcomeEvidence | None = None,
-    observation_text_config: ObservationTextConfig | None = None,
+    crop_edges: Any | None = None,
 ) -> str:
-    """Build the provider-neutral Markdown text sent to X."""
+    """Build the provider-neutral Markdown text sent beside X images."""
 
     parts = [
         "## Agent context\n\n" + _text_or_none(context.composed()),
-        "## Current observation\n\n"
-        + serialize_observation(
-            current_observation,
-            config=observation_text_config,
-            label="current_observation",
-            include_header_metadata=False,
-        ).text,
         "## Allowed actions\n\n"
         + _allowed_actions_text(
             action_space,
-            observation_text_config=observation_text_config,
+            crop_edges=crop_edges,
         ),
     ]
     suppression_evidence = _action_suppression_evidence_text(
@@ -105,17 +91,25 @@ def build_decision_prompt(
         + _recent_actions_text(
             recent_action_history,
             available=recent_action_history_available,
-            observation_text_config=observation_text_config,
+            crop_edges=crop_edges,
         )
     )
     return "\n\n".join(parts)
 
 
-def final_action_schema(
-    action_space: Sequence[ActionSpec],
+def observation_images(
     *,
-    observation_text_config: ObservationTextConfig | dict[str, Any] | None = None,
-) -> dict[str, Any]:
+    current_observation: Observation,
+    frame_scale: int,
+) -> tuple[Any, ...]:
+    """Return the current observation image for X."""
+
+    return (
+        observation_to_pil_image(current_observation, frame_scale=frame_scale),
+    )
+
+
+def final_action_schema(action_space: Sequence[ActionSpec]) -> dict[str, Any]:
     """Return the structured final-action schema for one X frame turn."""
 
     simple_actions = [action for action in action_space if not action.is_complex()]
@@ -126,7 +120,6 @@ def final_action_schema(
             "action": _action_output_schema(
                 simple_actions=simple_actions,
                 complex_actions=complex_actions,
-                observation_text_config=observation_text_config,
             ),
         },
         "required": ["action"],
@@ -134,11 +127,157 @@ def final_action_schema(
     }
 
 
+def candidate_actions_schema(action_space: Sequence[ActionSpec]) -> dict[str, Any]:
+    """Return the candidate-action proposal schema."""
+
+    return {
+        "type": "object",
+        "properties": {
+            "candidate_actions": {
+                "type": "array",
+                "items": _action_output_schema(
+                    simple_actions=[action for action in action_space if not action.is_complex()],
+                    complex_actions=[action for action in action_space if action.is_complex()],
+                ),
+            },
+            "notes": {"type": "string"},
+        },
+        "required": ["candidate_actions", "notes"],
+        "additionalProperties": False,
+    }
+
+
+def build_candidate_prompt(
+    *,
+    memory: MemoryDocument,
+    goal: GoalPrediction,
+    action_space: Sequence[ActionSpec],
+    max_candidates: int,
+    recent_action_history: Sequence[ActionHistoryItem] = (),
+    crop_edges: Any | None = None,
+) -> str:
+    """Build the candidate-proposal prompt."""
+
+    return "\n\n".join(
+        [
+            "## Memory\n\n" + _text_or_none(memory.document),
+            "## Goal prediction\n\n" + goal_prediction_text(goal),
+            "## Allowed actions\n\n"
+            + _allowed_actions_text(action_space, crop_edges=crop_edges),
+            "## Recent actions\n\n"
+            + _recent_actions_text(
+                recent_action_history,
+                available=True,
+                crop_edges=crop_edges,
+            ),
+            "Return up to "
+            f"{max_candidates} useful ACTION6 coordinate candidates. "
+            "Runtime will include all simple actions automatically, so focus on "
+            "coordinates only when ACTION6 is available.",
+        ]
+    )
+
+
+def build_selection_prompt(
+    *,
+    memory: MemoryDocument,
+    goal: GoalPrediction,
+    candidates: Sequence[AgentCandidateAction],
+    world_predictions: Sequence[WorldPrediction],
+    interest_prediction: InterestPrediction | None = None,
+    recent_action_history: Sequence[ActionHistoryItem] = (),
+    crop_edges: Any | None = None,
+) -> str:
+    """Build the final action-selection prompt."""
+
+    prediction_by_index = {
+        prediction.candidate_index: prediction for prediction in world_predictions
+    }
+    value_by_index = _candidate_value_by_index(interest_prediction)
+    candidate_lines: list[str] = []
+    for candidate in candidates:
+        prediction = prediction_by_index.get(candidate.rank)
+        value = value_by_index.get(candidate.rank)
+        predicted_change = (
+            prediction.predicted_change if prediction is not None else "not available"
+        )
+        lines = [
+            f"- candidate_index: {candidate.rank}",
+            "  action: "
+            + model_facing_action_text(
+                candidate.action,
+                crop_edges=crop_edges,
+            ),
+            f"  source: {candidate.source}",
+            f"  predicted_change: {predicted_change}",
+            "  interest_value: " + _interest_value_text(value),
+            f"  rationale: {candidate.rationale}",
+        ]
+        candidate_lines.append("\n".join(lines))
+    return "\n\n".join(
+        [
+            "## Memory\n\n" + _text_or_none(memory.document),
+            "## Goal prediction\n\n" + goal_prediction_text(goal),
+            "## Candidate actions with World predictions and Interest values\n\n"
+            + "\n".join(candidate_lines),
+            "## Recent actions\n\n"
+            + _recent_actions_text(
+                recent_action_history,
+                available=True,
+                crop_edges=crop_edges,
+            ),
+            "Choose exactly one candidate action as the final environment action.",
+        ]
+    )
+
+
+def _candidate_value_by_index(
+    interest_prediction: InterestPrediction | None,
+) -> dict[int, CandidateValuePrediction]:
+    if interest_prediction is None:
+        return {}
+    return {
+        value.candidate_index: value
+        for value in interest_prediction.candidate_values
+    }
+
+
+def _interest_value_text(value: CandidateValuePrediction | None) -> str:
+    if value is None:
+        return "not available"
+    confidence_adjusted_lp = value.metadata.get(
+        "confidence_adjusted_learning_progress"
+    )
+    blended_score = value.metadata.get("blended_score")
+    fields = [
+        f"expected_learning_progress={value.expected_learning_progress}",
+        f"confidence={value.confidence}",
+        f"confidence_adjusted_learning_progress={confidence_adjusted_lp}",
+        f"expected_goal_delta={value.expected_goal_delta}",
+        f"blended_score={blended_score}",
+    ]
+    if value.notes:
+        fields.append(f"notes={value.notes}")
+    return "; ".join(fields)
+
+
+def goal_prediction_text(goal: GoalPrediction) -> str:
+    """Return prompt-facing Goal output text."""
+
+    return "\n".join(
+        [
+            f"goal: {goal.goal}",
+            f"subgoals: {list(goal.subgoals)}",
+            f"steps_remaining: {goal.steps_remaining}",
+            f"confidence: {goal.confidence}",
+        ]
+    )
+
+
 def _action_output_schema(
     *,
     simple_actions: Sequence[ActionSpec],
     complex_actions: Sequence[ActionSpec],
-    observation_text_config: ObservationTextConfig | dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Return the final action branch schema for simple/complex ARC actions."""
 
@@ -155,7 +294,6 @@ def _action_output_schema(
             _action_object_schema(
                 action_ids=[action.name for action in complex_actions],
                 include_data=True,
-                observation_text_config=observation_text_config,
             )
         )
     if len(branches) == 1:
@@ -167,7 +305,6 @@ def _action_object_schema(
     *,
     action_ids: Sequence[str],
     include_data: bool,
-    observation_text_config: ObservationTextConfig | dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     properties: dict[str, Any] = {
         "action_id": {
@@ -177,30 +314,36 @@ def _action_object_schema(
     }
     required = ["action_id"]
     if include_data:
-        minimum, maximum = action6_coordinate_bounds(observation_text_config)
         properties["data"] = {
             "type": "object",
             "properties": {
-                "x": {"type": "number", "minimum": minimum, "maximum": maximum},
-                "y": {"type": "number", "minimum": minimum, "maximum": maximum},
+                "x": {"type": "number"},
+                "y": {"type": "number"},
             },
             "required": ["x", "y"],
             "additionalProperties": False,
         }
-        properties["target"] = {
-            "type": "string",
-            "minLength": 1,
-            "description": (
-                "Concise text description of the visible object, cell, or "
-                "region targeted by these ACTION6 coordinates."
-            ),
-        }
-        required.extend(["data", "target"])
+        required.append("data")
     return {
         "type": "object",
         "properties": properties,
         "required": required,
         "additionalProperties": False,
+    }
+
+
+def openai_final_action_text_format(
+    action_space: Sequence[ActionSpec],
+) -> dict[str, Any]:
+    """Return OpenAI Responses structured-output config for final X action."""
+
+    return {
+        "format": {
+            "type": "json_schema",
+            "name": "agent_final_action",
+            "strict": True,
+            "schema": final_action_schema(action_space),
+        }
     }
 
 
@@ -210,12 +353,10 @@ def final_action_repair_prompt(
     validation_error: str,
     invalid_text: str | None,
     attempt: int,
-    observation_text_config: ObservationTextConfig | dict[str, Any] | None = None,
 ) -> str:
     """Return a provider-neutral final-action repair request."""
 
     allowed = ", ".join(action.name for action in action_space)
-    action6_range = action6_coordinate_range_phrase(observation_text_config)
     repair_parts = [
         f"Repair attempt {attempt}: the previous Agent X output was invalid.",
         "Validation error:\n" + validation_error,
@@ -228,10 +369,8 @@ def final_action_repair_prompt(
             "The top-level JSON must contain exactly one field named `action`. "
             "The `action` field value must be an object, never a string. "
             "The action object must contain `action_id`; simple actions must not "
-            "include `data`; ACTION6 must include a `data` object with integer "
-            f"`x` and `y` visible cropped coordinates from {action6_range}. "
-            "ACTION6 must also include a non-empty top-level `target` string "
-            "describing the object, cell, or region targeted by those coordinates. "
+            "include `data`; ACTION6 must include a `data` object with numeric "
+            "`x` and `y` in normalized visual 0..1000 coordinates. "
             "Do not include prose.",
             f"Allowed final actions: {allowed}.",
         ]
@@ -266,8 +405,8 @@ def build_decision_result(
 def parse_final_action(
     arguments: Any,
     action_space: Sequence[ActionSpec],
-    *,
-    observation_text_config: ObservationTextConfig | dict[str, Any] | None = None,
+    coordinate_space: VisualCoordinateSpace = "normalized_1000",
+    crop_edges: Any | None = None,
 ) -> ActionSpec:
     """Parse the terminal structured final-action payload."""
 
@@ -275,7 +414,8 @@ def parse_final_action(
     return parse_action(
         args.get("action"),
         action_space,
-        observation_text_config=observation_text_config,
+        coordinate_space=coordinate_space,
+        crop_edges=crop_edges,
     )
 
 
@@ -300,7 +440,8 @@ def parse_action(
     value: Any,
     action_space: Sequence[ActionSpec],
     *,
-    observation_text_config: ObservationTextConfig | dict[str, Any] | None = None,
+    coordinate_space: VisualCoordinateSpace = "normalized_1000",
+    crop_edges: Any | None = None,
 ) -> ActionSpec:
     """Parse and validate a provider action against the current action space."""
 
@@ -315,24 +456,19 @@ def parse_action(
     data = value.get("data")
     if data is not None and not isinstance(data, dict):
         raise AgentOutputError("action.data must be an object when provided")
-    target = value.get("target")
-    if target is not None and not isinstance(target, str):
-        raise AgentOutputError("action.target must be a string when provided")
 
     if matched.is_complex():
         if data is None:
             raise AgentOutputError("complex actions require action.data")
-        data = _visible_crop_action_data(
+        data = _normalized_action_data(
             data,
-            observation_text_config=observation_text_config,
+            coordinate_space=coordinate_space,
+            crop_edges=crop_edges,
         )
-        target = _action_target(target)
     elif data is not None:
         raise AgentOutputError("simple actions must not include action.data")
-    elif target is not None:
-        raise AgentOutputError("simple actions must not include action.target")
 
-    return ActionSpec(action_id=matched.action_id, data=data, target=target)
+    return ActionSpec(action_id=matched.action_id, data=data)
 
 
 def tool_result_feedback(invocation: ExperimentToolInvocationResult) -> dict[str, Any]:
@@ -354,7 +490,7 @@ def object_get(value: Any, key: str, default: Any = None) -> Any:
 
 
 def function_call_name_and_arguments(call: Any) -> tuple[str, Any]:
-    """Read one provider function call."""
+    """Read one Ollama-style function call."""
 
     function = object_get(call, "function", {})
     name = object_get(function, "name")
@@ -374,7 +510,7 @@ def _text_or_none(value: str | None) -> str:
 def _allowed_actions_text(
     action_space: Sequence[ActionSpec],
     *,
-    observation_text_config: ObservationTextConfig | dict[str, Any] | None = None,
+    crop_edges: Any | None,
 ) -> str:
     if not action_space:
         return "none"
@@ -386,7 +522,7 @@ def _allowed_actions_text(
         )
     ]
     lines.extend(
-        f"- {_action_text(action, observation_text_config=observation_text_config)}"
+        f"- {_action_text(action, crop_edges=crop_edges)}"
         for action in action_space
     )
     return "\n".join(lines)
@@ -396,29 +532,29 @@ def _recent_actions_text(
     history: Sequence[ActionHistoryItem],
     *,
     available: bool,
-    observation_text_config: ObservationTextConfig | dict[str, Any] | None = None,
+    crop_edges: Any | None,
 ) -> str:
     if not available:
         return "not available"
     if not history:
         return "none"
-    action6_range = action6_coordinate_range_text(observation_text_config)
     lines = [
         (
             "Numbered oldest-to-newest. Controllable action rows may include "
-            "nested animation_after rows; GAME_RESET rows mark environment "
+            "animation evidence fields; nested animation_after rows mark "
+            "synthetic animation-only turns. GAME_RESET rows mark environment "
             "resets between action groups, and SCORE_ADVANCE rows mark score "
             "or progress increases. The [latest] marker identifies the "
-            "transition, reset, or score marker that produced the current "
-            "frame. ACTION6 data shown in recent actions is rendered as ARC "
-            "grid coordinates. New ACTION6 outputs must use visible cropped "
-            f"coordinates {action6_range} on both axes and include a target "
-            "description."
+            "transition, reset, or score marker that produced the attached "
+            "current frame. "
+            "ACTION6 data shown in recent actions is rendered as normalized "
+            "visual 0..1000 coordinates, matching the coordinate space used "
+            "for new ACTION6 outputs."
         )
     ]
     return grouped_action_history_text(
         history,
-        action_text=model_facing_action_text,
+        action_text=model_facing_action_text_for_crop(crop_edges),
         numbered=True,
         latest_description=lines[0],
     )
@@ -449,15 +585,15 @@ def _action_suppression_evidence_text(
 def _action_text(
     action: ActionSpec,
     *,
-    observation_text_config: ObservationTextConfig | dict[str, Any] | None = None,
+    crop_edges: Any | None,
 ) -> str:
     if action.is_complex() and not action.data:
-        return (
-            f"{action.name}(x,y "
-            f"{action6_coordinate_range_text(observation_text_config)},target)"
-        )
+        return f"{action.name}(x,y normalized_0_1000)"
     if action.name == "ACTION6":
-        return model_facing_action_text(action)
+        return model_facing_action_text(
+            action,
+            crop_edges=crop_edges,
+        )
     if action.data:
         return f"{action.name} {json.dumps(action.data, sort_keys=True)}"
     return action.name
@@ -474,21 +610,41 @@ def _match_allowed_action(
     raise AgentOutputError(f"action {action_id!r} is not allowed; allowed: {allowed}")
 
 
-def _visible_crop_action_data(
+def _normalized_action_data(
     data: dict[str, Any],
     *,
-    observation_text_config: ObservationTextConfig | dict[str, Any] | None,
+    coordinate_space: VisualCoordinateSpace,
+    crop_edges: Any | None,
 ) -> dict[str, int]:
-    try:
-        return action6_data_from_visible_crop(
-            data,
-            observation_text_config=observation_text_config,
-        )
-    except ValueError as exc:
-        raise AgentOutputError(str(exc)) from exc
+    if coordinate_space == "normalized_1000":
+        try:
+            return {
+                "x": normalized_1000_to_arc_grid(
+                    _normalized_coordinate(data, "x"),
+                    "x",
+                    crop_edges=crop_edges,
+                ),
+                "y": normalized_1000_to_arc_grid(
+                    _normalized_coordinate(data, "y"),
+                    "y",
+                    crop_edges=crop_edges,
+                ),
+            }
+        except ValueError as exc:
+            raise AgentOutputError(str(exc)) from exc
+    raise AgentOutputError(
+        "pixel visual coordinates cannot be converted to ARC coordinates "
+        "without an image size; use a normalized_1000 model profile"
+    )
 
 
-def _action_target(target: str | None) -> str:
-    if target is None or not target.strip():
-        raise AgentOutputError("ACTION6 requires non-empty action.target")
-    return target.strip()
+def _normalized_coordinate(data: dict[str, Any], key: str) -> float:
+    if key not in data:
+        raise ValueError(f"complex action.data.{key} is required")
+    value = data[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"complex action.data.{key} must be numeric")
+    numeric = float(value)
+    if not 0 <= numeric <= 1000:
+        raise ValueError(f"complex action.data.{key} must be in normalized 0..1000")
+    return numeric

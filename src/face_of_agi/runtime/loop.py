@@ -72,10 +72,7 @@ class RuntimeLoop:
             debug=debug,
         )
         if not environment_config.debug_keep_all_m_states:
-            try:
-                self.orchestrator.cleanup_state_memory_keep_latest()
-            except Exception:
-                result.metadata["cleanup_fallback"] = True
+            self.orchestrator.cleanup_state_memory_keep_latest()
         return result
 
     def _debug_sink(self, environment_config: EnvironmentConfig) -> DebugSink:

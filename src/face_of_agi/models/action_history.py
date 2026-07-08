@@ -14,7 +14,8 @@ from face_of_agi.contracts import (
     ActionHistoryScoreAdvanceMarker,
     ActionSpec,
 )
-from face_of_agi.models.action_coordinates import action6_coordinate_range_text
+from face_of_agi.models.arc_grid_crop import arc_grid_to_normalized_1000
+from face_of_agi.models.change.adapter import format_changed_pixel_percent
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,21 +36,45 @@ ActionHistoryRow = (
 def model_facing_action_text(
     action: ActionSpec,
     *,
-    observation_text_config: Any = None,
+    crop_edges: Any | None = None,
 ) -> str:
-    """Render one action for prompts that use ARC-grid ACTION6 data."""
+    """Render one action for prompts that use normalized visual ACTION6 data."""
 
     if action.name == "ACTION6":
         if action.data is None:
-            action6_range = action6_coordinate_range_text(observation_text_config)
-            return f"{action.name}(x,y {action6_range},target)"
-        text = f"{action.name} " + json.dumps(action.data, sort_keys=True)
-        if action.target is not None and action.target.strip():
-            text += f" target={json.dumps(action.target.strip())}"
-        return text
+            return f"{action.name}(x,y normalized_0_1000)"
+        return (
+            f"{action.name} "
+            + json.dumps(
+                _normalized_action6_data(action.data, crop_edges=crop_edges),
+                sort_keys=True,
+            )
+        )
     if action.data:
         return f"{action.name} {json.dumps(action.data, sort_keys=True)}"
     return action.name
+
+
+def _normalized_action6_data(
+    data: dict[str, Any],
+    *,
+    crop_edges: Any | None,
+) -> dict[str, int]:
+    return {
+        "x": arc_grid_to_normalized_1000(data, "x", crop_edges=crop_edges),
+        "y": arc_grid_to_normalized_1000(data, "y", crop_edges=crop_edges),
+    }
+
+
+def model_facing_action_text_for_crop(
+    crop_edges: Any | None,
+) -> Callable[[ActionSpec], str]:
+    """Return an action renderer for one model-visible crop configuration."""
+
+    return lambda action: model_facing_action_text(
+        action,
+        crop_edges=crop_edges,
+    )
 
 
 def group_action_history(
@@ -239,22 +264,24 @@ def action_history_entry_text(
     text = action_text(entry.action)
     if not entry.controllable:
         text += " [animation]"
+    retained_count = max(0, entry.retained_animation_frame_count)
+    if retained_count > 1:
+        text += f" [retained_animation_frames={retained_count}]"
     skipped_count = max(0, entry.skipped_intermediate_animation_frame_count)
     if skipped_count:
         text += f" [skipped_intermediate_animation_frames={skipped_count}]"
+    if entry.animation_avg_changed_pixel_percent is not None:
+        text += (
+            " [animation_avg_changed_pixel_percent="
+            f"{format_changed_pixel_percent(entry.animation_avg_changed_pixel_percent)}]"
+        )
     if latest:
         text += " [latest]"
-    text += f" [changed_cells={entry.changed_pixel_count}]"
-    if entry.changed_cell_percent is not None:
-        text += (
-            f" [changed_cells_pct="
-            f"{_changed_cell_percent_text(entry.changed_cell_percent)}]"
-        )
-    if entry.completed_levels is not None:
-        text += f" [completed_levels={entry.completed_levels}]"
-    if entry.action_count is not None:
-        text += f" [action_count={entry.action_count}]"
-    summary = _change_summary_text(entry)
+    text += (
+        " [changed_pixel_percent="
+        f"{format_changed_pixel_percent(entry.changed_pixel_percent)}]"
+    )
+    summary = entry.change_summary.strip()
     if summary:
         text += f" change: {summary}"
     return text
@@ -294,37 +321,3 @@ def _nullable_metric_text(value: float | None) -> str:
     if value is None:
         return "null"
     return str(value)
-
-
-def _changed_cell_percent_text(value: float) -> str:
-    if value == 0:
-        return "0%"
-    text = f"{value:.4f}".rstrip("0").rstrip(".")
-    return f"{text}%"
-
-
-def _change_summary_text(entry: ActionHistoryEntry) -> str:
-    summary = entry.change_summary.strip()
-    if entry.changed_pixel_count != 0:
-        return summary
-
-    identity = "First and final frames are identical."
-    if not summary or _generic_zero_change_summary(summary):
-        return identity
-    if summary.lower().startswith(identity.lower()):
-        return summary
-    return f"{identity} {summary}"
-
-
-def _generic_zero_change_summary(summary: str) -> bool:
-    normalized = summary.strip().lower().rstrip(".!")
-    return normalized in {
-        "no change",
-        "no changes",
-        "nothing changed",
-        "no visible change",
-        "no visible changes",
-        "no visible playfield change",
-        "no visible playfield changes",
-        "no visible playfield change occurred",
-    }

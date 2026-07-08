@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from face_of_agi.contracts import (
-    ActionHistoryItem,
+    ActionHistoryEntry,
     ActionOutcomeEvidence,
     ActionSpec,
     AgentTrace,
@@ -157,7 +157,7 @@ class PlaybackAgent:
         current_observation: Observation,
         action_space: Sequence[ActionSpec],
         tool_runtime: AgentToolRuntime | None = None,
-        recent_action_history: tuple[ActionHistoryItem, ...] = (),
+        recent_action_history: tuple[ActionHistoryEntry, ...] = (),
         *,
         glossary_actions: Sequence[ActionSpec],
         first_observation_ref: ObservationRef | None = None,
@@ -213,7 +213,7 @@ class PlaybackAgentUpdater:
         self,
         update_input: AgentGameContextUpdateInput,
     ) -> RoleContext:
-        """Return stored game context during replay, otherwise delegate."""
+        """Return stored context during replay, otherwise delegate."""
 
         if not self.timeline.active():
             return self.live_updater.update_agent_game_context(update_input)

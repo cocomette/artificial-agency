@@ -2,44 +2,46 @@
 
 from face_of_agi.models.change.adapter import (
     CHANGE_SUMMARY_PROMPT,
-    CHANGE_SUMMARY_REDUCER_PROMPT,
     ChangeSummaryAdapter,
     ChangeSummaryOutputError,
     build_change_summary_prompt,
-    build_change_summary_reducer_prompt,
-    cropped_changed_cell_percent,
+    format_changed_pixel_percent,
     load_change_summary_instructions,
-    load_change_summary_reducer_instructions,
+    model_visible_changed_pixel_percent,
     parse_change_summary_output,
-    validate_change_summary_output,
 )
-from face_of_agi.models.change.config import VLLMChangeSummaryConfig
+from face_of_agi.models.change.config import (
+    HFChangeSummaryConfig,
+    OllamaChangeSummaryConfig,
+    OpenAIChangeSummaryConfig,
+    VLLMChangeSummaryConfig,
+)
 from face_of_agi.models.change.contracts import (
     ChangeSummaryModel,
     ChangeSummaryProvider,
     ChangeSummaryProviderResponse,
     ChangeSummaryResult,
-    DEFAULT_CHANGE_SUMMARY_MAX_CHARS,
     change_summary_json_schema,
+    openai_change_summary_text_format,
 )
 
 __all__ = [
     "ChangeSummaryAdapter",
     "CHANGE_SUMMARY_PROMPT",
-    "CHANGE_SUMMARY_REDUCER_PROMPT",
     "ChangeSummaryModel",
     "ChangeSummaryOutputError",
     "ChangeSummaryProvider",
     "ChangeSummaryProviderResponse",
     "ChangeSummaryResult",
-    "DEFAULT_CHANGE_SUMMARY_MAX_CHARS",
+    "HFChangeSummaryConfig",
+    "OllamaChangeSummaryConfig",
+    "OpenAIChangeSummaryConfig",
     "VLLMChangeSummaryConfig",
     "build_change_summary_prompt",
-    "build_change_summary_reducer_prompt",
     "change_summary_json_schema",
-    "cropped_changed_cell_percent",
+    "format_changed_pixel_percent",
     "load_change_summary_instructions",
-    "load_change_summary_reducer_instructions",
+    "model_visible_changed_pixel_percent",
+    "openai_change_summary_text_format",
     "parse_change_summary_output",
-    "validate_change_summary_output",
 ]

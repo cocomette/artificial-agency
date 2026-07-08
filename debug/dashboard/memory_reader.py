@@ -162,6 +162,47 @@ def load_model_input_debug_records(database_path: str | Path) -> list[dict[str, 
     return records
 
 
+def load_v1_artifacts(database_path: str | Path) -> dict[str, list[dict[str, Any]]]:
+    """Load optional v1 runtime artifact tables."""
+
+    return {
+        "turn_ledgers": _load_turn_ledgers(database_path),
+        "candidate_predictions": _load_candidate_predictions(database_path),
+        "judge_scores": _load_judge_scores(database_path),
+        "goal_predictions": _load_goal_predictions(database_path),
+        "rewards": _load_rewards(database_path),
+        "lora_updates": _load_lora_updates(database_path),
+    }
+
+
+def matching_v1_artifacts(
+    artifacts: dict[str, list[dict[str, Any]]],
+    state: dict[str, Any],
+) -> dict[str, list[dict[str, Any]]]:
+    """Return v1 artifact rows associated with the selected turn."""
+
+    run_id = state["run_id"]
+    game_id = state["game_id"]
+    turn_id = int(state["turn_id"])
+    matched: dict[str, list[dict[str, Any]]] = {}
+    for key, rows in artifacts.items():
+        if key == "lora_updates":
+            matched[key] = [
+                row
+                for row in rows
+                if row["run_id"] == run_id and row["game_id"] == game_id
+            ]
+            continue
+        matched[key] = [
+            row
+            for row in rows
+            if row["run_id"] == run_id
+            and row["game_id"] == game_id
+            and int(row["turn_id"]) == turn_id
+        ]
+    return matched
+
+
 def turn_summary(state: dict[str, Any]) -> dict[str, Any]:
     """Return compact table fields for one M state row."""
 
@@ -360,6 +401,127 @@ def redacted_for_json(value: Any) -> Any:
     return _redact_images(copied)
 
 
+def _load_turn_ledgers(database_path: str | Path) -> list[dict[str, Any]]:
+    rows = _optional_query_rows(database_path, "SELECT * FROM turn_ledgers ORDER BY id")
+    return [
+        {
+            "id": int(row["id"]),
+            "game_id": str(row["game_id"]),
+            "run_id": str(row["run_id"]),
+            "turn_id": int(row["turn_id"]),
+            "m_state_id": _row_value(row, "m_state_id"),
+            "action": _load_json(row["action_json"]),
+            "change_summary": str(row["change_summary"]),
+            "memory_document": str(row["memory_document"]),
+            "goal_prediction": _load_optional_json(row["goal_prediction_json"]),
+            "reward": _load_optional_json(row["reward_json"]),
+            "metadata": _load_json(row["metadata_json"]),
+            "created_at": str(row["created_at"]),
+        }
+        for row in rows
+    ]
+
+
+def _load_candidate_predictions(database_path: str | Path) -> list[dict[str, Any]]:
+    rows = _optional_query_rows(
+        database_path,
+        "SELECT * FROM candidate_predictions ORDER BY turn_id, candidate_index, id",
+    )
+    return [
+        {
+            "id": int(row["id"]),
+            "game_id": str(row["game_id"]),
+            "run_id": str(row["run_id"]),
+            "turn_id": int(row["turn_id"]),
+            "candidate_index": int(row["candidate_index"]),
+            "action": _load_json(row["action_json"]),
+            "prediction": str(row["prediction"]),
+            "source": str(row["source"]),
+            "metadata": _load_json(row["metadata_json"]),
+            "created_at": str(row["created_at"]),
+        }
+        for row in rows
+    ]
+
+
+def _load_judge_scores(database_path: str | Path) -> list[dict[str, Any]]:
+    rows = _optional_query_rows(database_path, "SELECT * FROM judge_scores ORDER BY id")
+    return [
+        {
+            "id": int(row["id"]),
+            "game_id": str(row["game_id"]),
+            "run_id": str(row["run_id"]),
+            "turn_id": int(row["turn_id"]),
+            "candidate_prediction_id": _row_value(row, "candidate_prediction_id"),
+            "score": float(row["score"]),
+            "notes": str(row["notes"]),
+            "error_tags": _load_json(row["error_tags_json"]),
+            "metadata": _load_json(row["metadata_json"]),
+            "created_at": str(row["created_at"]),
+        }
+        for row in rows
+    ]
+
+
+def _load_goal_predictions(database_path: str | Path) -> list[dict[str, Any]]:
+    rows = _optional_query_rows(
+        database_path,
+        "SELECT * FROM goal_predictions ORDER BY turn_id, id",
+    )
+    return [
+        {
+            "id": int(row["id"]),
+            "game_id": str(row["game_id"]),
+            "run_id": str(row["run_id"]),
+            "turn_id": int(row["turn_id"]),
+            "goal_prediction": _load_json(row["goal_prediction_json"]),
+            "memory_document": str(row["memory_document"]),
+            "metadata": _load_json(row["metadata_json"]),
+            "created_at": str(row["created_at"]),
+        }
+        for row in rows
+    ]
+
+
+def _load_rewards(database_path: str | Path) -> list[dict[str, Any]]:
+    rows = _optional_query_rows(database_path, "SELECT * FROM rewards ORDER BY id")
+    return [
+        {
+            "id": int(row["id"]),
+            "game_id": str(row["game_id"]),
+            "run_id": str(row["run_id"]),
+            "turn_id": int(row["turn_id"]),
+            "reward": _load_json(row["reward_json"]),
+            "metadata": _load_json(row["metadata_json"]),
+            "created_at": str(row["created_at"]),
+        }
+        for row in rows
+    ]
+
+
+def _load_lora_updates(database_path: str | Path) -> list[dict[str, Any]]:
+    rows = _optional_query_rows(
+        database_path,
+        "SELECT * FROM lora_updates ORDER BY update_index, id",
+    )
+    return [
+        {
+            "id": int(row["id"]),
+            "game_id": str(row["game_id"]),
+            "run_id": str(row["run_id"]),
+            "update_index": int(row["update_index"]),
+            "role": str(row["role"]),
+            "status": str(row["status"]),
+            "adapter_name": str(row["adapter_name"]),
+            "adapter_path": str(row["adapter_path"]),
+            "error": str(row["error"]),
+            "metadata": _load_json(row["metadata_json"]),
+            "created_at": str(row["created_at"]),
+        }
+        for row in rows
+    ]
+
+
 def _query_rows(database_path: str | Path, query: str) -> list[sqlite3.Row]:
     path = Path(database_path)
     if not path.exists():
@@ -369,6 +531,15 @@ def _query_rows(database_path: str | Path, query: str) -> list[sqlite3.Row]:
     with sqlite3.connect(uri, uri=True) as connection:
         connection.row_factory = sqlite3.Row
         return list(connection.execute(query).fetchall())
+
+
+def _optional_query_rows(database_path: str | Path, query: str) -> list[sqlite3.Row]:
+    try:
+        return _query_rows(database_path, query)
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):
+            return []
+        raise
 
 
 def _load_json(raw: Any) -> Any:

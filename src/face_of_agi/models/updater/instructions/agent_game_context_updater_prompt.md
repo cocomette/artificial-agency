@@ -6,7 +6,7 @@ Read the numbered action history as transition evidence, not as a plan. It is
 ordered oldest-to-newest. `GAME_RESET` rows mark environment resets between
 action groups. `SCORE_ADVANCE` rows mark score/progress increases after the
 preceding transition. The `[latest]` marker is on the transition, reset, or
-score marker that produced the serialized `current_observation`.
+score marker that produced the attached `current_observation_frame`.
 
 Returning the previous context is NEVER acceptable. Always fully revise.
 
@@ -38,38 +38,30 @@ it must be an explicit action-forcing directive.
 When this is `none` and `game_start_reason` is `game_over_reset`, build a
 fresh game context from the current frame and transition. Use `Agent context history` only as summarized failed-attempt evidence, not as live state to
 copy.
-- `Current observation`: serialized ARC grid text plus an attached cropped
-image for the current observation after the listed transition action. Use the
-image for visual pattern recognition and the serialized text as authoritative
-for exact symbols, coordinates, and future ACTION6 guidance.
+- Attached image: `current_observation_frame` is the current observation after the listed transition action.
 - `Allowed actions`: authoritative actions available in this turn.
 - `Action outcome evidence`: deterministic recent outcome evidence. Suppressed
-simple actions have already been removed from `Allowed actions` for this
-prompt. Suppressed `ACTION6` coordinates are choices to avoid while `ACTION6`
-remains available. Suppressed action choices are prompt-local; do not record
-them as permanently unavailable.
+simple actions and mixed-action `ACTION6` have already been removed from
+`Allowed actions` for this prompt; in `ACTION6`-only games, suppressed
+coordinates are choices to avoid while `ACTION6` remains available. Suppressed
+action choices are prompt-local; do not record them as permanently unavailable.
+- `Action history window`: the configured prior controllable-action-group limit  
+for the numbered action history.
 - `Action history`: bounded prior controllable action groups plus the current
 transition group, numbered oldest-to-newest. `GAME_RESET` rows mark reset
 boundaries and do not count as action groups. `SCORE_ADVANCE` rows mark
 score/progress increases and do not count as action groups. The `[latest]`
 marker identifies the transition, reset, or score marker that produced the
-current serialized observation. Nested
+attached current frame. Nested
 `animation_after` rows marked `[animation]`, especially `NONE [animation]`,
-are not agent choices. `changed_cells` is the cropped model-visible ARC cell
-count that differs between the first and final serialized evidence observations.
-In bundled transitions, intermediate frames may still change when
-`changed_cells=0`; use the `change:` text to distinguish transient animation
-from no visible effect.
-`changed_cells_pct` is the same first-to-final count as a percentage of the
-visible crop. `completed_levels` and `action_count` give progress and current
-level action count when available.
-If `ACTION6` appears
-with data in history, those `x,y` values are rendered as ARC grid coordinates
-with `(0,0)` at the top-left, `x` increasing right, and `y` increasing down.
-It may also include target text recorded from the agent decision.
-When writing future ACTION6 guidance, use visible cropped coordinates inside
-the range stated in the action glossary and allowed-action list, matching the
-serialized observation rows, and describe the intended target.
+are not agent choices. `changed_pixel_percent` is the percentage of
+model-visible pixels that changed after the transition images were resized and
+cropped for the change summarizer; `changed_pixel_percent=0` means the
+summarizer was skipped and the `change:` text is the deterministic `no changes`
+string. If `ACTION6` appears with data in history, those `x,y` values are
+rendered as normalized visual
+coordinates from 0 to 1000, with `(0,0)` at the top-left, `x` increasing right,
+and `y` increasing down.
 - `Agent context history`: summary of how your own prior context fields
 evolved across recent updater outputs. Use this to avoid reintroducing stale
 assumptions, repeated failed policies, or already-replaced goal hypotheses.
@@ -100,16 +92,11 @@ environment unrolls animation after the preceding controllable action. They are
 not choices made by the agent. Use animation rows only to update observed
 mechanics or history when they reveal what the environment animated
 after the last controllable action. A `[latest]` animation row means the
-current serialized observation came from environment unrolling, not from a new
-agent decision.
+attached frame came from environment unrolling, not from a new agent decision.
 
 ## Guidance and Rules
 
-Do not use metaphorical nor analogical descriptions. Stick to exact facts such
-as shape, symbol colors, positions, layout, background, and orientations.
-Refer to cells as `symbol 0` through `symbol F` or as `A-cells`, `4-cells`,
-etc. You may include the glossary color name when it improves clarity, but keep
-the ARC symbol as the primary identifier.
+Do not use metaphorical nor analogical descriptions. Stick to exact, simple visual facts such as shape, colors, patterns, positions, layout, background, and orientations.
 
 At the beginning of a fresh game instance, prioritize learning the
 effect of every allowed action before committing to a repeated policy. Use
@@ -127,8 +114,8 @@ When the agent is stagnant, spend `policy` characters on concrete action
 instructions before any general advice. The policy must say:
 
 - what repeated action or pattern to stop;
-- which allowed action ID, direction, visible cropped ACTION6 coordinate, or
-coordinate region and target to test next;
+- which allowed action ID, direction, normalized ACTION6 coordinate, or
+coordinate region to test next;
 
 Use imperative wording such as "stop ...; next ...; then ..." instead of
 passive advice like "explore more" or "try different actions".
@@ -140,17 +127,15 @@ evidence confirms the current strategy, tighten confidence or consolidate a
 lesson instead of changing the planned action sequence.
 Note that `time_cost` increases by 1 in each turn.
 
-When future policy recommends `ACTION6`, write visible cropped coordinates
-inside the range stated in the action glossary and allowed-action list, and name
-a visible cropped target or region.
+When future policy recommends `ACTION6`, write normalized visual 0..1000
+coordinates or a visual region.
 
 Use score and time as progress evidence alongside visible transition evidence.
-Flat `cumulative_score` means a visual change is not completion proof, but a
-high `changed_cells` cropped-cell count can still be useful evidence when it
-reveals deterministic mechanics, cycle position, movement, selection state, or
-a reversible operator.
+Flat `cumulative_score` means a visual change is not completion proof, but high
+`changed_pixel_percent` can still be useful evidence when it reveals deterministic
+mechanics, cycle position, movement, selection state, or a reversible operator.
 
-When action history repeats with `changed_cells=0`, and the current
+When action history repeats with `changed_pixel_percent=0`, and the current
 observation shows no useful new effect:
 
 - Rewrite `policy` to force a concrete exploratory action sequence.
@@ -162,16 +147,17 @@ until new evidence appears. Come up with new goals!
 When `Action outcome evidence` reports suppressed action choices or an active
 stagnation warning, rewrite `policy` around the remaining allowed actions.
 Do not ask the agent to use an action choice that has been removed from
-`Allowed actions` or named as a suppressed `ACTION6` coordinate. Suppressed
-action choices are prompt-local; do not record them as permanently unavailable.
+`Allowed actions` or, in `ACTION6`-only games, named as a suppressed
+coordinate. Suppressed action choices are prompt-local; do not record them as
+permanently unavailable.
 
 ## Reward guidance
 
-Treat repeated action patterns with `changed_cells=0` as serious negative
+Treat repeated action patterns with `changed_pixel_percent=0` as serious negative
 signals. In that case, the current policy is not producing useful information,
 even if the current goal hypothesis sounds plausible.
 
-Do not count visual change as solved progress solely because cells change.
+Do not count visual change as solved progress solely because pixels change.
 Record what the change teaches about mechanics, state, or action effects. For
 deterministic or cyclic high-change operators, preserve a coherent repeated
 action or sequence plan long enough to test a meaningful cycle unless a reset,
