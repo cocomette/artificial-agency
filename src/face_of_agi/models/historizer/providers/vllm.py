@@ -17,10 +17,6 @@ from face_of_agi.models.providers.vllm import (
     chat_response_metadata,
     json_schema_response_format,
 )
-from face_of_agi.models.structured_output import (
-    DEFAULT_INVALID_OUTPUT_PREVIEW_CHARS,
-    clipped_invalid_output_preview,
-)
 
 
 class VLLMHistorizerAdapter(AgentContextHistorizerAdapter):
@@ -62,16 +58,27 @@ class VLLMHistorizerProvider:
     ) -> PromptHistorizerProviderResponse:
         """Call vLLM and return raw historizer JSON text."""
 
+        return self._structured_chat(
+            request,
+            phase="summarize_context_history",
+        )
+
+    def _structured_chat(
+        self,
+        request: PromptHistorizerRequest,
+        *,
+        phase: str,
+    ) -> PromptHistorizerProviderResponse:
         response = self._client.chat(
             model=self.config.model,
             messages=self._messages(request),
             response_format=json_schema_response_format(
-                name="agent_context_history",
+                name=_schema_name(request),
                 schema=request.output_schema,
             ),
         )
         self._capture_request(
-            phase="summarize_context_history",
+            phase=phase,
             request=request,
             response=response,
         )
@@ -96,7 +103,7 @@ class VLLMHistorizerProvider:
                 attempt=attempt,
             ),
             response_format=json_schema_response_format(
-                name="agent_context_history",
+                name=_schema_name(request),
                 schema=request.output_schema,
             ),
         )
@@ -114,10 +121,7 @@ class VLLMHistorizerProvider:
                 "role": "system",
                 "content": request.instructions,
             },
-            {
-                "role": "user",
-                "content": request.text,
-            },
+            self._user_message(request),
         ]
 
     def _repair_messages(
@@ -130,17 +134,12 @@ class VLLMHistorizerProvider:
     ) -> list[dict[str, Any]]:
         repair_text = "\n\n".join(
             [
-                f"Repair attempt {attempt}: the previous historizer output was invalid.",
-                "Validation error:\n" + validation_error,
-                "Invalid output preview:\n"
-                + clipped_invalid_output_preview(
-                    invalid_text,
-                    max_chars=getattr(
-                        self.config,
-                        "repair_invalid_output_preview_chars",
-                        DEFAULT_INVALID_OUTPUT_PREVIEW_CHARS,
-                    ),
+                (
+                    f"Repair attempt {attempt}: the previous "
+                    "historizer output was invalid."
                 ),
+                "Validation error:\n" + validation_error,
+                "Invalid output:\n" + invalid_text,
                 "Original historizer input:\n" + request.text,
                 _repair_output_instruction(),
             ]
@@ -150,11 +149,22 @@ class VLLMHistorizerProvider:
                 "role": "system",
                 "content": request.instructions,
             },
-            {
-                "role": "user",
-                "content": repair_text,
-            },
+            self._user_message(request, content=repair_text),
         ]
+
+    def _user_message(
+        self,
+        request: PromptHistorizerRequest,
+        *,
+        content: str | None = None,
+    ) -> dict[str, Any]:
+        message_content: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": request.text if content is None else content,
+            }
+        ]
+        return {"role": "user", "content": message_content}
 
     def _provider_response(
         self,
@@ -191,7 +201,7 @@ class VLLMHistorizerProvider:
             return
         capture_vllm_model_input(
             self,
-            call_slot="historizer",
+            call_slot=_call_slot(request),
             provider=str(self.config.backend),
             model=self.config.model,
             phase=phase,
@@ -199,17 +209,24 @@ class VLLMHistorizerProvider:
             request=provider_request,
             response=response,
             metadata={
-                "role": "historizer",
-                "task": "agent_context_history",
+                "role": _call_slot(request),
+                "task": request.metadata.get("task", "agent_context_history"),
             },
         )
 
 
 def _repair_output_instruction() -> str:
     return (
-        "Return only corrected JSON with exactly one top-level "
-        "`field_evolution` field. Its value must be an object containing "
-        "exactly these string fields: goals, game_mechanics, policy, history, "
-        "extras. Use enough detail to capture field evolution while staying "
-        "trend-focused."
+        "Return only corrected JSON with exactly these top-level fields: "
+        "`probing_evolution`, `policy_evolution`, and `updater_mode`. "
+        "`probing_evolution` and `policy_evolution` must be strings; "
+        "`updater_mode` must be `probing` or `policy`."
     )
+
+
+def _schema_name(request: PromptHistorizerRequest) -> str:
+    return str(request.metadata.get("schema_name") or "agent_context_history")
+
+
+def _call_slot(request: PromptHistorizerRequest) -> str:
+    return "historizer"

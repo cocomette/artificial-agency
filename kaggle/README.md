@@ -8,22 +8,14 @@ public-game debug notebook for FACE-OF-AGI.
 Setup is required only once for a new Kaggle project. Rerun individual upload
 commands later only when that artifact needs a new Kaggle version.
 
-1. Copy `kaggle/.env.example` to `kaggle/.env`, then set your Kaggle username
-   and token path:
-
-   ```bash
-   FACE_OF_AGI_KAGGLE_OWNER=<your-kaggle-username>
-   FACE_OF_AGI_KAGGLE_TOKEN_FILE=.kaggle/access_token
-   ```
-
-   `FACE_OF_AGI_KAGGLE_TOKEN_FILE` is resolved from the repo root when it is a
-   relative path.
-2. Save a Kaggle API token at that configured path.
+1. Accept the ARC Prize 2026 ARC-AGI-3 Kaggle rules.
+2. Set your Kaggle username and token path in `kaggle/.env`. The default
+   `FACE_OF_AGI_KAGGLE_TOKEN_FILE=.kaggle/access_token` is resolved from the
+   repo root.
+3. Save a Kaggle API token at that configured path.
 
 The Makefile syncs user-specific Kaggle metadata from `kaggle/.env` before
-notebook and upload commands. Tracked metadata files use owner-neutral
-placeholders; `make sync-metadata` rewrites kernel, dataset, and model owner
-fields from `FACE_OF_AGI_KAGGLE_OWNER`.
+notebook and upload commands.
 
 The Makefile runs the Kaggle CLI through `uv run --with kaggle kaggle`, so a
 global `kaggle` executable is not required. Submission targets request
@@ -39,9 +31,20 @@ make wheelhouse-upload UPLOAD_MODE=create
 This uploads the wheels needed by the offline notebooks. Use
 `UPLOAD_MODE=version` for later wheelhouse updates.
 
-The competition notebook expects the model-weight Kaggle Dataset configured by
-`KAGGLE_SUBMISSION_MODEL_DATASET_SLUG`. The default is
-`face-of-agi-qwen36-35b-fp8-weights`.
+Upload the cached Modal model snapshot as a private Kaggle Dataset:
+
+```bash
+make modal-kaggle-secret
+make modal-model-dataset-upload-dry-run
+make modal-model-dataset-upload
+```
+
+`modal-kaggle-secret` creates the Modal `kaggle-api-token` secret from
+`FACE_OF_AGI_KAGGLE_TOKEN_FILE`. The upload uses the cached
+`Qwen/Qwen3.6-35B-A3B-FP8` snapshot in the Modal
+`face-of-agi-local-models` Volume and mounts on Kaggle at
+`/kaggle/input/face-of-agi-qwen36-35b-fp8-weights`. Use
+`UPLOAD_MODE=version` for later model dataset updates.
 
 Prepare and upload the public-game dataset for the debug notebook:
 
@@ -53,16 +56,6 @@ This packages the current public ARC normal-mode games. Use
 `UPLOAD_MODE=version` for later public-game dataset updates.
 
 ## Running
-
-Build the competition notebook locally without uploading:
-
-```bash
-make notebook
-```
-
-This writes `kaggle/notebooks/submission.ipynb`. The notebook archive embeds
-only `src/face_of_agi` and `pyproject.toml`; Kaggle runtime artifacts are
-attached as datasets through `kernel-metadata.json`.
 
 Build and submit the competition notebook:
 
@@ -85,19 +78,10 @@ make debug-status
 The debug notebook uses the same wheelhouse and model dataset, attaches the
 public-game dataset, starts vLLM, and runs a small public-game batch.
 `make debug-submit` regenerates the debug kernel id from the current branch and
-8-character HEAD commit id before pushing.
-
-To submit a debug notebook with a different vLLM runtime config and model
-dataset, pass both values to the Make target. Use a title suffix when the
-debug run should create a separate Kaggle kernel instead of versioning the
-default debug kernel:
-
-```bash
-make debug-submit \
-  KAGGLE_DEBUG_CONFIG=src/face_of_agi/runtime/configs/vllm/vllm_rtx6000_qwen36_35b_fp8_debug.yaml \
-  KAGGLE_DEBUG_MODEL_DATASET_SLUG=face-of-agi-qwen36-35b-fp8-weights \
-  DEBUG_KERNEL_TITLE_SUFFIX=qwen36
-```
+8-character HEAD commit id before pushing. The tracked
+`debug-notebooks/kernel-metadata.template.json` is the source template;
+`debug-notebooks/kernel-metadata.json` is generated for the Kaggle CLI and is
+not committed.
 
 Download debug SQLite outputs:
 
@@ -105,10 +89,15 @@ Download debug SQLite outputs:
 make debug-pull
 ```
 
-Set `DEBUG_KERNEL` to either `owner/slug` or a `https://www.kaggle.com/code/...`
-URL to pull or inspect a run launched elsewhere.
+This writes local snapshots under `../runs/kaggle-debug/`. By default it pulls
+from the debug kernel id generated for the current branch and HEAD commit. To
+pull a debug run launched from another machine, pass the exact notebook URL or
+`owner/slug` from Kaggle:
 
-This writes local snapshots under `../runs/kaggle-debug/`.
+```bash
+make debug-pull DEBUG_KERNEL=https://www.kaggle.com/code/<owner>/<kernel-slug>
+make debug-pull DEBUG_KERNEL=<owner>/<kernel-slug>
+```
 
 Inspect one pulled SQLite file with the dashboard:
 

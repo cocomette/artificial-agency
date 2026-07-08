@@ -9,19 +9,20 @@ from typing import Any
 from face_of_agi.contracts import (
     ActionHistoryItem,
     ActionHistoryResetMarker,
-    ActionHistoryScoreAdvanceMarker,
     AgentTrace,
     ActionSpec,
     ContextDocuments,
     FrameControlMode,
+    LevelSolutionSummaryRecord,
     MStateRecord,
     Observation,
     ObservationRef,
     RoleContext,
-    RunMetadataRecord,
+    SamePastStateDetection,
     TurnMetrics,
 )
 from face_of_agi.debug.contracts import ModelInputDebugRecord
+from face_of_agi.frames import observation_frame_hash
 from face_of_agi.memory.sqlite import SQLiteDatabase
 
 
@@ -62,7 +63,7 @@ class StateMemory:
             turn_metrics=(
                 turn_metrics or TurnMetrics()
             ),
-            metadata=metadata,
+            metadata=_with_current_frame_hash(metadata, current_observation),
         )
 
     def hydrate_contexts_for_game(
@@ -94,9 +95,20 @@ class StateMemory:
         frame_count: int,
         control_mode: FrameControlMode,
         contexts: ContextDocuments,
+        current_frame_hash: str | None = None,
+        current_frame_hash_crop_edges: tuple[int, int, int, int] | None = None,
     ) -> MStateRecord:
         """Create the M source row for one frame turn with standard metadata."""
 
+        frame_hash = current_frame_hash or observation_frame_hash(
+            current_observation,
+            crop_edges=current_frame_hash_crop_edges,
+        )
+        hash_metadata: dict[str, Any] = {"current_frame_hash": frame_hash}
+        if current_frame_hash_crop_edges is not None:
+            hash_metadata["current_frame_hash_crop_edges"] = list(
+                current_frame_hash_crop_edges
+            )
         return self.prewrite_state(
             run_id=run_id,
             game_id=game_id,
@@ -109,6 +121,7 @@ class StateMemory:
                 "turn_id": turn_id,
                 "control_mode": asdict(control_mode),
                 "prewritten": True,
+                **hash_metadata,
             },
         )
 
@@ -124,27 +137,39 @@ class StateMemory:
         contexts: ContextDocuments,
         agent_trace: AgentTrace,
         turn_metrics: TurnMetrics | None = None,
+        agent_context_history: dict[str, Any] | None = None,
+        agent_context_evolution: dict[str, Any] | None = None,
+        world_model_context: dict[str, Any] | None = None,
     ) -> MStateRecord:
         """Complete a prewritten frame-turn M row with standard metadata."""
 
+        source_metadata = _source_metadata(self.read_state_source(state_id))
+        metadata = {
+            "turn_id": turn_id,
+            "control_mode": asdict(control_mode),
+            **_current_frame_hash_metadata(source_metadata),
+            "previous_observation_ref": (
+                asdict(previous_observation_ref)
+                if previous_observation_ref is not None
+                else None
+            ),
+            "recent_action_history": [
+                _action_history_metadata(item) for item in recent_action_history
+            ],
+        }
+        if agent_context_history is not None:
+            metadata["agent_context_history"] = agent_context_history
+        if agent_context_evolution is not None:
+            metadata["agent_context_evolution"] = agent_context_evolution
+        if world_model_context is not None:
+            metadata["world_model_context"] = world_model_context
         return self.complete_state(
             state_id=state_id,
             chosen_action=chosen_action,
             contexts=contexts,
             agent_trace=agent_trace,
             turn_metrics=turn_metrics,
-            metadata={
-                "turn_id": turn_id,
-                "control_mode": asdict(control_mode),
-                "previous_observation_ref": (
-                    asdict(previous_observation_ref)
-                    if previous_observation_ref is not None
-                    else None
-                ),
-                "recent_action_history": [
-                    _action_history_metadata(item) for item in recent_action_history
-                ],
-            },
+            metadata=metadata,
         )
 
     def prewrite_state(
@@ -169,7 +194,7 @@ class StateMemory:
             frame_count=frame_count,
             current_observation=current_observation,
             agent_context=contexts.agent,
-            metadata=metadata,
+            metadata=_with_current_frame_hash(metadata, current_observation),
         )
 
     def complete_state(
@@ -213,7 +238,7 @@ class StateMemory:
             state_id=state_id,
         )
 
-    def read_recent_agent_game_contexts(
+    def read_agent_context_history(
         self,
         *,
         game_id: str,
@@ -221,42 +246,110 @@ class StateMemory:
         before_state_id: int | None,
         limit: int,
     ) -> tuple[str, ...]:
-        """Return recent same-run complete agent game contexts before a state row."""
+        """Return recent same-run agent context snapshots oldest-to-newest."""
 
         if before_state_id is None or limit <= 0:
             return ()
-        return self.database.read_recent_agent_game_contexts_before(
-            game_id=game_id,
-            run_id=run_id,
-            state_id=before_state_id,
-            limit=limit,
+        return tuple(
+            reversed(
+                self.database.read_recent_agent_context_history_before(
+                    game_id=game_id,
+                    run_id=run_id,
+                    state_id=before_state_id,
+                    limit=limit,
+                )
+            )
         )
 
-    def read_agent_game_context_history(
+    def read_agent_strategy_history_between(
         self,
         *,
         game_id: str,
         run_id: str,
-        before_state_id: int | None,
-        limit: int,
+        after_state_id: int | None,
+        through_state_id: int,
     ) -> tuple[str, ...]:
-        """Return recent same-run complete agent game contexts oldest-to-newest."""
+        """Return same-run strategy snapshots in an M-state id interval."""
 
-        return tuple(
-            reversed(
-                self.read_recent_agent_game_contexts(
-                    game_id=game_id,
-                    run_id=run_id,
-                    before_state_id=before_state_id,
-                    limit=limit,
-                )
-            )
+        return self.database.read_agent_strategy_history_between(
+            game_id=game_id,
+            run_id=run_id,
+            after_state_id=after_state_id,
+            through_state_id=through_state_id,
+        )
+
+    def write_level_solution_summary(
+        self,
+        *,
+        run_id: str,
+        game_id: str,
+        completed_level: int,
+        source_state_ids: tuple[int, ...],
+        solution_method: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> LevelSolutionSummaryRecord:
+        """Store one same-game solution method from a completed level."""
+
+        return self.database.write_level_solution_summary(
+            run_id=run_id,
+            game_id=game_id,
+            completed_level=completed_level,
+            source_state_ids=source_state_ids,
+            solution_method=solution_method,
+            metadata=metadata,
+        )
+
+    def read_latest_level_solution_summary(
+        self,
+        *,
+        game_id: str,
+        run_id: str | None = None,
+    ) -> LevelSolutionSummaryRecord | None:
+        """Read the latest same-game level solution method."""
+
+        return self.database.read_latest_level_solution_summary(
+            run_id=run_id,
+            game_id=game_id,
+        )
+
+    def read_world_model_context_before(
+        self,
+        *,
+        game_id: str,
+        before_state_id: int | None,
+    ) -> str:
+        """Return the newest previous world-model context before a state row."""
+
+        if before_state_id is None:
+            return ""
+        return self.database.read_world_model_context_before(
+            game_id=game_id,
+            state_id=before_state_id,
         )
 
     def read_latest_state(self, game_id: str) -> MStateRecord | None:
         """Read the latest complete M state for one game."""
 
         return self.database.read_latest_m_state(game_id=game_id)
+
+    def read_same_past_state_detections(
+        self,
+        *,
+        game_id: str,
+        run_id: str,
+        before_state_id: int | None,
+        current_frame_hash: str,
+    ) -> tuple[SamePastStateDetection, ...]:
+        """Return prior same-run rows with the same frame hash and updater plan."""
+
+        if before_state_id is None:
+            return ()
+        return self.database.read_same_past_state_detections_before(
+            game_id=game_id,
+            run_id=run_id,
+            state_id=before_state_id,
+            current_frame_hash=current_frame_hash,
+        )
 
     def read_latest_general_contexts(self) -> ContextDocuments:
         """Read the latest game-agnostic contexts across all games."""
@@ -280,38 +373,6 @@ class StateMemory:
         """List complete M state rows, optionally scoped to one game."""
 
         return self.database.list_m_states(game_id=game_id)
-
-    def write_run_metadata(
-        self,
-        *,
-        run_id: str,
-        game_id: str,
-        kind: str,
-        metadata: dict[str, Any] | None = None,
-    ) -> RunMetadataRecord:
-        """Store one run-level metadata row."""
-
-        return self.database.write_run_metadata(
-            run_id=run_id,
-            game_id=game_id,
-            kind=kind,
-            metadata=metadata,
-        )
-
-    def list_run_metadata(
-        self,
-        *,
-        run_id: str | None = None,
-        game_id: str | None = None,
-        kind: str | None = None,
-    ) -> list[RunMetadataRecord]:
-        """List stored run-level metadata rows."""
-
-        return self.database.list_run_metadata(
-            run_id=run_id,
-            game_id=game_id,
-            kind=kind,
-        )
 
     def write_model_input_debug_record(
         self,
@@ -442,18 +503,45 @@ def _dict(value: Any) -> dict[str, Any]:
     return {}
 
 
+def _with_current_frame_hash(
+    metadata: dict[str, Any] | None,
+    observation: Observation,
+    *,
+    crop_edges: tuple[int, int, int, int] | None = None,
+) -> dict[str, Any]:
+    if metadata is not None and isinstance(metadata.get("current_frame_hash"), str):
+        return dict(metadata)
+    result = {
+        **(metadata or {}),
+        "current_frame_hash": observation_frame_hash(observation, crop_edges=crop_edges),
+    }
+    if crop_edges is not None:
+        result["current_frame_hash_crop_edges"] = list(crop_edges)
+    return result
+
+
+def _source_metadata(record: MStateRecord | None) -> dict[str, Any]:
+    if record is None:
+        raise RuntimeError("cannot complete M state row without its source metadata")
+    return record.metadata
+
+
+def _current_frame_hash_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    frame_hash = metadata.get("current_frame_hash")
+    if not isinstance(frame_hash, str) or not frame_hash:
+        raise RuntimeError("prewritten M state metadata is missing current_frame_hash")
+    hash_metadata: dict[str, Any] = {"current_frame_hash": frame_hash}
+    crop_edges = metadata.get("current_frame_hash_crop_edges")
+    if crop_edges is not None:
+        hash_metadata["current_frame_hash_crop_edges"] = crop_edges
+    return hash_metadata
+
+
 def _action_history_metadata(item: ActionHistoryItem) -> dict[str, Any]:
     if isinstance(item, ActionHistoryResetMarker):
         return {
             "type": "game_reset",
             "reason": item.reason,
             "restart_count": item.restart_count,
-        }
-    if isinstance(item, ActionHistoryScoreAdvanceMarker):
-        return {
-            "type": "score_advance",
-            "previous_score": item.previous_score,
-            "new_score": item.new_score,
-            "delta": item.delta,
         }
     return asdict(item)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from face_of_agi.contracts import (
     ActionHistoryItem,
@@ -76,6 +77,7 @@ class GameLoopSession:
     frame_index: int = 0
     current: FrameTurnSnapshot | None = None
     next: FrameTurnSnapshot | None = None
+    previous_observation: Observation | None = None
     tool_runtime: AgentToolRuntime | None = None
     decision: DecisionResult | None = None
     decision_duration_seconds: float | None = None
@@ -84,7 +86,7 @@ class GameLoopSession:
     update_input: UpdaterFrameTransitionInput | None = None
     next_environment_observation: Observation | None = None
     next_frame_buffer: tuple[Observation, ...] = ()
-    transition_frame_observations: tuple[Observation, ...] = ()
+    last_transition_frame_observations: tuple[Observation, ...] = ()
     real_step_count: int = 0
     frame_turn_count: int = 0
     game_start_turn_id: int = 1
@@ -92,12 +94,16 @@ class GameLoopSession:
     game_restart_count: int = 0
     completed_levels: int = 0
     last_completed_levels: int = 0
-    last_observed_cumulative_score: float | None = None
-    last_score_advance_turn_id: int | None = None
     first_observation: Observation | None = None
     first_observation_ref: ObservationRef | None = None
     previous_observation_ref: ObservationRef | None = None
     last_decision: DecisionResult | None = None
+    queued_updater_actions: tuple[ActionSpec, ...] = ()
+    queued_updater_mode: str | None = None
+    pending_game_over_reset: bool = False
+    world_model_context: dict[str, Any] | None = None
+    agent_context_strategy_snapshot: dict[str, Any] | None = None
+    agent_context_evolution_snapshot: dict[str, Any] | None = None
     action_history: list[ActionHistoryItem] = field(default_factory=list)
     state_record_ids: list[int] = field(default_factory=list)
     running: bool = True

@@ -1,108 +1,101 @@
 # Model Roles
 
-## Orchestrator Agent `X`
+## Agent X
 
-`X` is the decision-making agent. It receives the current agent context,
-serialized observation text plus a cropped observation image, transition
-evidence, recent action history, and current ARC action space. It returns one
-final `ActionSpec` and an
-`AgentTrace`.
+Agent X is dormant in the current runtime game loop. Its adapter code still
+exists, but runtime bootstrap registers `orchestrator_agent=None`; controllable
+actions are selected by updater P and wrapped by orchestration as decision
+traces.
 
-The vLLM adapter sends OpenAI-compatible multimodal Chat Completions messages.
-Observation payloads contain an `ObservationText` string generated from native
-ARC grids plus a PNG data-URL image cropped to the same configured bounds.
-Role instructions include the canonical ARC symbol color glossary.
+## Change Summary
 
-ACTION6 history data uses original ARC grid coordinates. Model-facing guidance
-and validation require new ACTION6 decisions to use visible cropped
-coordinates, matching the active serialized crop in `ObservationText`
-(`x/y=3..60` for the default `crop_cells=3`), plus a non-empty target
-description.
+The change summary role receives the previous observation, current observation,
+chosen action, action glossary, previous change-summary element output, and
+optional post-action animation frame bundle. The attached frames remain the
+source of truth for the current visible change. It returns an
+`elements` array plus a `change_detected` boolean indicating whether any visible
+difference was detected across the attached image set. Each element has
+`element_name`, `element_description`, and `element_mutation`; unchanged visible
+elements keep an empty mutation. Orchestration stores the element list in action
+history and derives the prompt-facing `change_summary` text as one bullet per
+element, rendering the name, description, and either the mutation or an explicit
+no-detected-changes note. The derived
+summary is stored in action history
+alongside the updater mode that selected the action, cumulative
+`completed_levels`, and controllable `action_count`. Its attached frames are
+cropped by `input_image_crop_arc_grid_edges`, defaulting to 4 source ARC-grid
+cells per edge. Animation bundles keep the ordered frame array after exact
+consecutive duplicate filtering, then resize all attached frames to fit the
+change model's `animation_frame_budget_coefficient` configured-frame-area
+budget. The coefficient defaults to `2` and values below `2` are clamped to
+`2`. Optional `gaussian_blur_kernel_size` config blurs the final image copies
+sent to the change-summary provider before optional independently sampled
+zero-centered Gaussian RGB noise from `gaussian_noise_deviation`.
 
-### Tool Runtime Framework
+## World Model
 
-The provider-neutral agent contract still has a controlled tool runtime shape,
-but the current vLLM-only runtime does not wire real world or goal providers.
-The starter configs keep `max_tool_calls: 0`.
+The world-model role runs before the historizer. It receives the previous
+world-model context from state metadata plus action history, allowed actions,
+and the attached current frame for the latest transition. Previous frames and
+animation bundles are not attached to world-model provider calls; their
+transition evidence remains available through action history. The action
+history includes cumulative `completed_levels` and controllable
+`action_count`. The attached current frame is cropped by
+`input_image_crop_arc_grid_edges`, defaulting to 4 source ARC-grid cells per
+edge. It returns per-action effect summaries for the allowed action set, the
+latest world description, and special-event memory for isolated or sporadic
+feedback.
 
-`X` does not read memory, write SQLite, or call model adapters directly.
-Orchestration builds the frame-turn input, calls `X`, validates the returned
-action, and owns persistence.
+## Agent-Context Historizer
 
-Output:
+The historizer receives the fresh world-model output from that same turn plus
+recent same-run updater strategy snapshots collected from state metadata. Each
+snapshot contains the latest `probing_strategy` and `policy_strategy`
+after an updater ran. The historizer call returns compact `probing_evolution`,
+`policy_evolution` fields, and proposes whether probing or policy should update
+next. Orchestration enforces the configured probing cap before updater dispatch.
 
-- final `ActionSpec`
-- full `AgentTrace`
+## Level Summary
 
-## Transition Change Summary
+The level-summary role runs when ARC reports that one or more levels have been
+completed. It receives the completed level number and the ordered same-run
+strategy snapshots persisted since the previous level summary. It returns a
+compact `solution_method` that removes dead ends and keeps reusable same-game
+method guidance. Orchestration persists this summary and passes the latest
+same-run method to subsequent probing/policy updater calls.
 
-The change model receives previous and current observations as `ObservationText`
-strings plus cropped images for every serialized evidence frame in the current
-call. It summarizes visible changes, returns structured change fields, and uses
-cropped ARC-grid changed-cell counts for authoritative evidence.
+## Updater P
 
-For frame bundles and transition prompts, component-level deltas are generated
-directly from adjacent serialized frames. Large retained animation bundles are
-budgeted at the adapter boundary with balanced overlapping text chunks. There
-is no object matching heuristic;
-component IDs are frame-local labels, and omitted component sections suppress
-component-ID delta lines.
+Updater P has two active tasks:
 
-When chunking produces multiple change-summary calls, a final reducer may
-reconcile ordered partial summaries. The reducer sees deterministic
-changed-cell metrics, action context, selected row-only keyframes drawn from
-first/final/chunk-boundary frames, and cropped images for those selected
-keyframes, then returns the same `summary` plus `change_detected` schema.
-Reducer `change_detected` is validated against the full deterministic evidence,
-and repair exhaustion falls back to the chronological deterministic merge.
+- `agent_probing`: update `probing_strategy` and choose the next
+  mechanics-learning action after controllable transitions.
+- `agent_policy`: update `policy_strategy` and choose the next
+  goal-pursuing action after controllable transitions.
+- `general`: update agent general context at run end.
 
-Output:
+Each agent updater receives transition evidence, bounded action history with
+`completed_levels` and `action_count`, allowed actions, and historizer output.
+Their attached current frame is cropped by `input_image_crop_arc_grid_edges`,
+and ACTION6 outputs carry a target description, cropped normalized target
+bounding box, and target RGB color. The updater adapter deterministically
+selects the closest-color pixel inside that box, preferring pixels closest to
+the box center among equal color matches, then maps that point back to the full
+ARC grid. Both mode-specific agent
+updaters receive the current
+`probing_strategy` and `policy_strategy` as previous game context.
+Both receive `probing_evolution` and `policy_evolution` from the historizer.
+When available, both also
+receive the latest previous-level
+`solution_method`. Probing returns `probing_strategy` plus `next_actions`.
+Policy returns `policy_strategy` plus `next_actions`. `next_actions` is an
+ordered array whose length must equal the configured action window for the
+active mode. When the current frame hash matches prior complete same-run M rows,
+both agent updaters receive a `same_past_state_detections` section containing
+both strategy fields and stored historizer evolution fields for those turns.
+The section intentionally does not include prior actions. Both agent updaters
+receive the fresh world-model context, but neither persists or rewrites it.
 
-- transition summary text
-- changed-cell evidence and structured fields used by orchestration/updaters
-
-## Agent Context Historizer
-
-The historizer summarizes recent agent context revisions before the updater
-builds the next context. It is a text-only vLLM role and does not receive
-frames directly.
-
-Output:
-
-- structured summary of recent agent context evolution
-
-## Updater `P`
-
-`P` runs after observed transitions. In the frame-unrolled game loop, animation
-frame transitions compare the current frame to the next buffered frame, while
-controllable final-frame transitions compare the selected action against the
-first frame returned by the next real environment step.
-
-The implemented updater slots are:
-
-| Slot | Updates |
-| --- | --- |
-| `agent` | Agent game context `L^X`. |
-| `general` | Agent general context `K^X` at end of run. |
-
-Agent game updater prompts include observation serialization plus a cropped
-current-frame image where frame context is needed. Agent game updater
-instructions use the active visible crop for future ACTION6 policy guidance.
-The updater does not own persistence. Its
-outputs return to orchestration, which applies them to live working context
-documents and persists the resulting state into `M`.
-
-Output:
-
-- updated `L^X` during frame/game-loop updates
-- updated `K^X` at end of run through the shared general updater task
-
-## Model Adapter Rule
-
-Adapters translate between role contracts and vLLM Chat Completions calls.
-They do not own the runtime loop, environment stepping, or SQLite persistence.
-They also do not read memory directly; memory access is mediated by
-orchestration.
-
-Provider-specific adapters live in `providers/` folders under each model role.
-Shared vLLM transport utilities live in `models/providers/vllm.py`.
+`next_actions` is queued by orchestration. One queued action is submitted on
+each controllable frame after previous-to-current transition modeling. The game
+loop does not call Agent X to revise those actions.

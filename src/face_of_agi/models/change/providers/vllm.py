@@ -2,21 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from typing import Any
 
 from face_of_agi.debug.capture import capture_vllm_model_input
 from face_of_agi.models.change.contracts import ChangeSummaryProviderResponse
-from face_of_agi.models.image_inputs import vllm_text_image_content
+from face_of_agi.models.image_inputs import vllm_image_content, vllm_video_content
 from face_of_agi.models.providers.vllm import (
     VLLMChatClient,
     chat_message_optional_content,
     chat_response_metadata,
     json_schema_response_format,
-)
-from face_of_agi.models.structured_output import (
-    DEFAULT_INVALID_OUTPUT_PREVIEW_CHARS,
-    clipped_invalid_output_preview,
 )
 
 
@@ -45,140 +40,54 @@ class VLLMChangeSummaryProvider:
         *,
         instructions_text: str,
         prompt_text: str,
-        images: Sequence[Any],
+        previous_image: Any,
+        current_image: Any,
         output_schema: dict[str, Any],
+        images: Any | None = None,
     ) -> ChangeSummaryProviderResponse:
         """Call vLLM and return raw change summary JSON text."""
 
-        return self._complete(
-            instructions_text=instructions_text,
-            prompt_text=prompt_text,
-            images=images,
-            output_schema=output_schema,
-            phase="complete",
-        )
-
-    def repair_complete(
-        self,
-        *,
-        instructions_text: str,
-        prompt_text: str,
-        images: Sequence[Any],
-        output_schema: dict[str, Any],
-        invalid_text: str,
-        validation_error: str,
-        attempt: int,
-    ) -> ChangeSummaryProviderResponse:
-        """Ask vLLM to repair invalid change summary JSON."""
-
-        return self._repair_complete(
-            instructions_text=instructions_text,
-            prompt_text=prompt_text,
-            images=images,
-            output_schema=output_schema,
-            invalid_text=invalid_text,
-            validation_error=validation_error,
-            attempt=attempt,
-            phase="repair_complete",
-            description="the previous change summary was invalid",
-        )
-
-    def reduce_complete(
-        self,
-        *,
-        instructions_text: str,
-        prompt_text: str,
-        images: Sequence[Any],
-        output_schema: dict[str, Any],
-    ) -> ChangeSummaryProviderResponse:
-        """Call vLLM and return raw reduced change summary JSON text."""
-
-        return self._complete(
-            instructions_text=instructions_text,
-            prompt_text=prompt_text,
-            images=images,
-            output_schema=output_schema,
-            phase="reduce_complete",
-        )
-
-    def repair_reduce_complete(
-        self,
-        *,
-        instructions_text: str,
-        prompt_text: str,
-        images: Sequence[Any],
-        output_schema: dict[str, Any],
-        invalid_text: str,
-        validation_error: str,
-        attempt: int,
-    ) -> ChangeSummaryProviderResponse:
-        """Ask vLLM to repair invalid reduced change summary JSON."""
-
-        return self._repair_complete(
-            instructions_text=instructions_text,
-            prompt_text=prompt_text,
-            images=images,
-            output_schema=output_schema,
-            invalid_text=invalid_text,
-            validation_error=validation_error,
-            attempt=attempt,
-            phase="repair_reduce_complete",
-            description="the previous reduced change summary was invalid",
-        )
-
-    def _complete(
-        self,
-        *,
-        instructions_text: str,
-        prompt_text: str,
-        images: Sequence[Any],
-        output_schema: dict[str, Any],
-        phase: str,
-    ) -> ChangeSummaryProviderResponse:
         response = self._client.chat(
             model=self.config.model,
             messages=self._messages(
                 instructions_text=instructions_text,
                 prompt_text=prompt_text,
+                previous_image=previous_image,
+                current_image=current_image,
                 images=images,
             ),
             response_format=json_schema_response_format(
                 name="change_summary",
                 schema=output_schema,
             ),
+            extra_body=self._extra_body(images=images),
         )
-        self._capture_request(phase=phase, response=response)
+        self._capture_request(phase="complete", response=response)
         return self._provider_response(response)
 
-    def _repair_complete(
+    def repair_complete(
         self,
         *,
         instructions_text: str,
         prompt_text: str,
-        images: Sequence[Any],
+        previous_image: Any,
+        current_image: Any,
         output_schema: dict[str, Any],
         invalid_text: str,
         validation_error: str,
         attempt: int,
-        phase: str,
-        description: str,
+        images: Any | None = None,
     ) -> ChangeSummaryProviderResponse:
+        """Ask vLLM to repair invalid change summary JSON."""
+
         repair_text = "\n\n".join(
             [
-                f"Repair attempt {attempt}: {description}.",
+                f"Repair attempt {attempt}: the previous change summary was invalid.",
                 "Original request:\n" + prompt_text,
                 "Validation error:\n" + validation_error,
-                "Invalid output preview:\n"
-                + clipped_invalid_output_preview(
-                    invalid_text,
-                    max_chars=getattr(
-                        self.config,
-                        "repair_invalid_output_preview_chars",
-                        DEFAULT_INVALID_OUTPUT_PREVIEW_CHARS,
-                    ),
-                ),
-                "Return only corrected JSON with a non-empty string `summary` "
-                "field and boolean `change_detected` field.",
+                "Invalid output:\n" + invalid_text,
+                "Return only corrected JSON with array field 'elements' and "
+                "boolean field 'change_detected'.",
             ]
         )
         response = self._client.chat(
@@ -186,15 +95,18 @@ class VLLMChangeSummaryProvider:
             messages=self._messages(
                 instructions_text=instructions_text,
                 prompt_text=repair_text,
+                previous_image=previous_image,
+                current_image=current_image,
                 images=images,
             ),
             response_format=json_schema_response_format(
                 name="change_summary",
                 schema=output_schema,
             ),
+            extra_body=self._extra_body(images=images),
         )
         self._capture_request(
-            phase=phase,
+            phase="repair_complete",
             response=response,
             attempt=attempt,
         )
@@ -205,25 +117,81 @@ class VLLMChangeSummaryProvider:
         *,
         instructions_text: str,
         prompt_text: str,
-        images: Sequence[Any],
+        previous_image: Any,
+        current_image: Any,
+        images: Any | None,
     ) -> list[dict[str, Any]]:
         return [
             {
                 "role": "system",
                 "content": instructions_text,
             },
-            self._user_message(prompt_text, images=images),
+            self._user_message(
+                prompt_text,
+                previous_image=previous_image,
+                current_image=current_image,
+                images=images,
+            ),
         ]
 
-    def _user_message(self, prompt: str, *, images: Sequence[Any]) -> dict[str, Any]:
+    def _user_message(
+        self,
+        prompt: str,
+        *,
+        previous_image: Any,
+        current_image: Any,
+        images: Any | None,
+    ) -> dict[str, Any]:
+        image_sequence = tuple(images or (previous_image, current_image))
+        media_content = self._media_content(image_sequence)
         return {
             "role": "user",
-            "content": vllm_text_image_content(
-                prompt,
+            "content": [
+                {"type": "text", "text": prompt},
+                *media_content,
+            ],
+        }
+
+    def _media_content(self, images: tuple[Any, ...]) -> list[dict[str, Any]]:
+        mode = _normalized_frame_input_mode(
+            getattr(self.config, "frame_input_mode", "image")
+        )
+        if mode == "image":
+            return vllm_image_content(
                 images,
                 detail=self.config.input_image_detail,
+                size=None,
+                resample=self.config.input_image_resample,
                 mime_type=self.config.image_mime_type,
-            ),
+            )
+        return vllm_video_content(
+            images,
+            size=None,
+            resample=self.config.input_image_resample,
+            mime_type=getattr(self.config, "video_mime_type", "video/jpeg"),
+        )
+
+    def _extra_body(self, *, images: Any | None) -> dict[str, Any] | None:
+        mode = _normalized_frame_input_mode(
+            getattr(self.config, "frame_input_mode", "image")
+        )
+        if mode == "image":
+            return None
+
+        frame_count = len(tuple(images or ()))
+        if frame_count <= 0:
+            frame_count = 2
+        fps = _normalized_video_fps(getattr(self.config, "video_fps", 1.0))
+        return {
+            "media_io_kwargs": {
+                "video": {
+                    "fps": fps,
+                    "frames_indices": list(range(frame_count)),
+                    "total_num_frames": frame_count,
+                    "duration": frame_count / fps,
+                    "do_sample_frames": False,
+                },
+            },
         }
 
     def _provider_response(self, response: Any) -> ChangeSummaryProviderResponse:
@@ -265,3 +233,18 @@ class VLLMChangeSummaryProvider:
                 "response_metadata": chat_response_metadata(response),
             },
         )
+
+
+def _normalized_frame_input_mode(value: Any) -> str:
+    if value not in {"image", "video"}:
+        raise ValueError("frame_input_mode must be 'image' or 'video'")
+    return value
+
+
+def _normalized_video_fps(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("video_fps must be a positive number")
+    normalized = float(value)
+    if normalized <= 0:
+        raise ValueError("video_fps must be a positive number")
+    return normalized

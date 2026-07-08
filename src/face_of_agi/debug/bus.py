@@ -22,11 +22,9 @@ class DebugBus:
         *,
         sink: DebugSink | None = None,
         state_memory: StateMemory | None = None,
-        persist_model_input_debug_records: bool = True,
     ) -> None:
         self.sink = sink or NullDebugSink()
         self.state_memory = state_memory
-        self.persist_model_input_debug_records = persist_model_input_debug_records
 
     @classmethod
     def disabled(cls) -> "DebugBus":
@@ -37,10 +35,7 @@ class DebugBus:
     def emit(self, event: DebugEvent) -> None:
         """Emit one typed debug event."""
 
-        try:
-            self.sink.emit(event)
-        except Exception:
-            pass
+        self.sink.emit(event)
 
     def capture_model_inputs(
         self,
@@ -50,29 +45,20 @@ class DebugBus:
     ) -> None:
         """Persist and clear provider request captures for one model call slot."""
 
-        try:
-            if adapter is None:
-                return
+        if adapter is None:
+            return
 
-            records = drain_model_input_debug_records(adapter)
-            if not records:
-                return
+        records = drain_model_input_debug_records(adapter)
+        if not records:
+            return
 
-            if not self.persist_model_input_debug_records:
-                return
+        if self.state_memory is None or frame_context.current_source_state_id is None:
+            return
 
-            if (
-                self.state_memory is None
-                or frame_context.current_source_state_id is None
-            ):
-                return
-
-            self.state_memory.write_model_input_debug_records(
-                m_state_id=frame_context.current_source_state_id,
-                run_id=frame_context.run_id,
-                game_id=frame_context.game_id,
-                turn_id=turn_id,
-                records=records,
-            )
-        except Exception:
-            pass
+        self.state_memory.write_model_input_debug_records(
+            m_state_id=frame_context.current_source_state_id,
+            run_id=frame_context.run_id,
+            game_id=frame_context.game_id,
+            turn_id=turn_id,
+            records=records,
+        )

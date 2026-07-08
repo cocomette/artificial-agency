@@ -36,11 +36,12 @@ class ModelRoleConfig:
 class ModelRuntimeConfig:
     """Runtime model backend config for agent and tool roles."""
 
-    observation_text: dict[str, Any] = field(default_factory=dict)
     shared_vlm: ModelRoleConfig = field(default_factory=ModelRoleConfig)
     agent: ModelRoleConfig = field(default_factory=ModelRoleConfig)
     change: ModelRoleConfig = field(default_factory=ModelRoleConfig)
+    world: ModelRoleConfig = field(default_factory=ModelRoleConfig)
     historizer: ModelRoleConfig = field(default_factory=ModelRoleConfig)
+    level_summary: ModelRoleConfig = field(default_factory=ModelRoleConfig)
     updater: "UpdaterRuntimeConfig | None" = None
 
 
@@ -48,7 +49,8 @@ class ModelRuntimeConfig:
 class UpdaterRuntimeConfig:
     """Runtime backend config for updater task slots."""
 
-    agent: ModelRoleConfig = field(default_factory=ModelRoleConfig)
+    agent_probing: ModelRoleConfig = field(default_factory=ModelRoleConfig)
+    agent_policy: ModelRoleConfig = field(default_factory=ModelRoleConfig)
     general: ModelRoleConfig = field(default_factory=ModelRoleConfig)
 
 
@@ -76,11 +78,15 @@ class EnvironmentConfig:
     use_learned_contexts: bool = True
     experimental_memory_turn_buffer: int = 2
     agent_action_history_window: int = 8
-    agent_updater_action_history_window: int = 8
+    action_history_window: int = 8
+    world_action_history_window: int = 8
+    historizer_action_history_window: int = 8
+    probing_action_history_window: int = 8
+    policy_action_history_window: int = 8
     agent_context_history_window: int = 8
-    animation_keyframe_pixel_threshold: int = 8
-    action_suppression_zero_changed_pixel_turns: int = 3
-    updater_stagnation_warning_zero_changed_pixel_turns: int = 3
+    probing_actions_window: int = 1
+    policy_actions_window: int = 1
+    probing_mode_cap_ratio: float = 0.35
     debug_keep_all_m_states: bool = False
     debug_trace: DebugTraceMode = "minimal"
     debug_color: DebugColorMode = "auto"
@@ -144,25 +150,53 @@ def load_environment_config(path: str | Path) -> EnvironmentConfig:
             raw_data.get("agent_action_history_window", 8),
             key="agent_action_history_window",
         ),
-        agent_updater_action_history_window=_non_negative_int(
-            raw_data.get("agent_updater_action_history_window", 8),
-            key="agent_updater_action_history_window",
+        action_history_window=_non_negative_int(
+            raw_data.get("action_history_window", 8),
+            key="action_history_window",
+        ),
+        world_action_history_window=_non_negative_int(
+            raw_data.get(
+                "world_action_history_window",
+                raw_data.get("action_history_window", 8),
+            ),
+            key="world_action_history_window",
+        ),
+        historizer_action_history_window=_non_negative_int(
+            raw_data.get(
+                "historizer_action_history_window",
+                raw_data.get("action_history_window", 8),
+            ),
+            key="historizer_action_history_window",
+        ),
+        probing_action_history_window=_non_negative_int(
+            raw_data.get(
+                "probing_action_history_window",
+                raw_data.get("action_history_window", 8),
+            ),
+            key="probing_action_history_window",
+        ),
+        policy_action_history_window=_non_negative_int(
+            raw_data.get(
+                "policy_action_history_window",
+                raw_data.get("action_history_window", 8),
+            ),
+            key="policy_action_history_window",
         ),
         agent_context_history_window=_non_negative_int(
             raw_data.get("agent_context_history_window", 8),
             key="agent_context_history_window",
         ),
-        animation_keyframe_pixel_threshold=_non_negative_int(
-            raw_data.get("animation_keyframe_pixel_threshold", 8),
-            key="animation_keyframe_pixel_threshold",
+        probing_actions_window=_positive_int(
+            raw_data.get("probing_actions_window", 1),
+            key="probing_actions_window",
         ),
-        action_suppression_zero_changed_pixel_turns=_non_negative_int(
-            raw_data.get("action_suppression_zero_changed_pixel_turns", 3),
-            key="action_suppression_zero_changed_pixel_turns",
+        policy_actions_window=_positive_int(
+            raw_data.get("policy_actions_window", 1),
+            key="policy_actions_window",
         ),
-        updater_stagnation_warning_zero_changed_pixel_turns=_non_negative_int(
-            raw_data.get("updater_stagnation_warning_zero_changed_pixel_turns", 3),
-            key="updater_stagnation_warning_zero_changed_pixel_turns",
+        probing_mode_cap_ratio=_ratio_float(
+            raw_data.get("probing_mode_cap_ratio", 0.35),
+            key="probing_mode_cap_ratio",
         ),
         debug_keep_all_m_states=_optional_bool(
             raw_data.get("debug_keep_all_m_states"),
@@ -198,11 +232,12 @@ def _load_model_runtime_config(value: Any) -> ModelRuntimeConfig:
 
     _reject_removed_model_keys(value)
     return ModelRuntimeConfig(
-        observation_text=_load_observation_text_config(value.get("observation_text")),
         shared_vlm=_load_model_role_config(value.get("shared_vlm")),
         agent=_load_model_role_config(value.get("agent")),
         change=_load_required_model_role_config(value, "change"),
-        historizer=_load_model_role_config(value.get("historizer")),
+        world=_load_required_model_role_config(value, "world"),
+        historizer=_load_required_model_role_config(value, "historizer"),
+        level_summary=_load_required_model_role_config(value, "level_summary"),
         updater=_load_updater_runtime_config(value.get("updater")),
     )
 
@@ -217,7 +252,14 @@ def _load_updater_runtime_config(value: Any) -> UpdaterRuntimeConfig:
     _reject_removed_updater_keys(value)
 
     return UpdaterRuntimeConfig(
-        agent=_load_required_updater_task_config(value, "agent"),
+        agent_probing=_load_required_updater_task_config(
+            value,
+            "agent_probing",
+        ),
+        agent_policy=_load_required_updater_task_config(
+            value,
+            "agent_policy",
+        ),
         general=_load_required_updater_task_config(value, "general"),
     )
 
@@ -262,7 +304,7 @@ def _load_optional_active_model_role_config(
 
 
 def _reject_removed_model_keys(value: dict[str, Any]) -> None:
-    removed = sorted(set(value) & {"world", "goal"})
+    removed = sorted(set(value) & {"goal"})
     if removed:
         names = ", ".join(f"models.{key}" for key in removed)
         raise ValueError(f"{names} config has been removed")
@@ -273,16 +315,6 @@ def _reject_removed_updater_keys(value: dict[str, Any]) -> None:
     if removed:
         names = ", ".join(f"models.updater.{key}" for key in removed)
         raise ValueError(f"{names} config has been removed")
-
-
-def _load_observation_text_config(value: Any) -> dict[str, Any]:
-    """Load shared text observation serializer options."""
-
-    if value is None:
-        return {}
-    if not isinstance(value, dict):
-        raise ValueError("models.observation_text config must be a mapping")
-    return dict(value)
 
 
 def _load_model_role_config(value: Any) -> ModelRoleConfig:
@@ -336,6 +368,7 @@ def _read_yaml(path: str | Path) -> dict[str, Any]:
             "max_actions_per_game has been removed; use max_actions_per_level "
             "for the per-level action budget"
         )
+
     return loaded
 
 
@@ -451,6 +484,24 @@ def _non_negative_int(value: Any, *, key: str) -> int:
     parsed = int(value)
     if parsed < 0:
         raise ValueError(f"{key} must be non-negative")
+    return parsed
+
+
+def _positive_int(value: Any, *, key: str) -> int:
+    """Normalize one positive integer config value."""
+
+    parsed = int(value)
+    if parsed < 1:
+        raise ValueError(f"{key} must be at least 1")
+    return parsed
+
+
+def _ratio_float(value: Any, *, key: str) -> float:
+    """Normalize one ratio config value."""
+
+    parsed = float(value)
+    if parsed < 0 or parsed > 1:
+        raise ValueError(f"{key} must be between 0 and 1")
     return parsed
 
 

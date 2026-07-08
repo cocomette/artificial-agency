@@ -17,7 +17,7 @@ The environment module exposes `EnvironmentInfo` values containing:
 
 - current game id
 - lifecycle state
-- available actions
+- available actions reported by ARC-AGI
 - completed levels
 - target win levels when known
 - pass-through metadata

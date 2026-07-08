@@ -19,7 +19,6 @@ from rich.theme import Theme
 from face_of_agi.contracts import (
     ActionHistoryItem,
     ActionHistoryResetMarker,
-    ActionHistoryScoreAdvanceMarker,
     ActionSpec,
     AgentTrace,
     FrameTurnContext,
@@ -619,7 +618,6 @@ def _action_payload(action: ActionSpec | None) -> dict[str, Any] | None:
     return {
         "action_id": action.name,
         "data": action.data,
-        "target": action.target,
         "requires_data": action.is_complex(),
     }
 
@@ -631,24 +629,17 @@ def _action_history_payload(item: ActionHistoryItem) -> dict[str, Any]:
             "reason": item.reason,
             "restart_count": item.restart_count,
         }
-    if isinstance(item, ActionHistoryScoreAdvanceMarker):
-        return {
-            "type": "score_advance",
-            "previous_score": item.previous_score,
-            "new_score": item.new_score,
-            "delta": item.delta,
-        }
     return {
         "action": _action_payload(item.action),
         "controllable": item.controllable,
         "changed_pixel_count": item.changed_pixel_count,
-        "changed_cell_percent": item.changed_cell_percent,
         "completed_levels": item.completed_levels,
         "action_count": item.action_count,
-        "skipped_intermediate_animation_frame_count": (
-            item.skipped_intermediate_animation_frame_count
-        ),
+        "action_mode": item.action_mode,
+        "animation_frame_count": item.animation_frame_count,
+        "avg_changed_pixel_count": item.avg_changed_pixel_count,
         "change_summary": item.change_summary,
+        "change_elements": item.change_elements,
     }
 
 
@@ -668,12 +659,9 @@ def _tool_result_summary(result: ToolResult | None) -> dict[str, Any] | None:
 
 
 def _format_action(action: ActionSpec) -> str:
-    suffix = ""
-    if action.target is not None and action.target.strip():
-        suffix = f" target={action.target.strip()!r}"
     if action.data:
-        return f"{action.name} {action.data}{suffix}"
-    return action.name + suffix
+        return f"{action.name} {action.data}"
+    return action.name
 
 
 def _display_scalar(value: Any) -> str:

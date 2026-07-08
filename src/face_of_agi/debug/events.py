@@ -128,6 +128,7 @@ class FrameTurnCompleted:
     turn_duration_seconds: float
     completed_levels: int
     remaining_actions: int
+    max_actions_per_level: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

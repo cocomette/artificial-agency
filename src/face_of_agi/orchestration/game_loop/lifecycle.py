@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from time import perf_counter
 
 from arcengine import GameState
 
@@ -15,22 +16,20 @@ from face_of_agi.contracts import (
 from face_of_agi.environment.adapter import EnvironmentAdapter
 from face_of_agi.environment.config import EnvironmentConfig
 from face_of_agi.memory import StateMemory
+from face_of_agi.models.level_summary import (
+    LevelSolutionSummarizerModel,
+    LevelSolutionSummaryInput,
+)
 from face_of_agi.models.updater import UpdaterTaskRegistry
 from face_of_agi.debug.bus import DebugBus
-from face_of_agi.debug.events import RunStarted, RunStopped
+from face_of_agi.debug.events import ModelCallCompleted, RunStarted, RunStopped
 from face_of_agi.orchestration.game_loop.actions.context_updates import (
     apply_general_context_updates,
 )
 from face_of_agi.orchestration.game_loop.session import GameLoopSession
-from face_of_agi.runtime.source_metadata import (
-    RUNTIME_STARTUP_METADATA_KIND,
-    build_runtime_source_metadata,
-)
 
 RUNTIME_DEADLINE_REACHED = "runtime_deadline_reached"
 LEVEL_LIMIT_REACHED = "level_limit_reached"
-STARTUP_ERROR_FALLBACK = "startup_error_fallback"
-FRAMEWORK_ERROR_FALLBACK = "framework_error_fallback"
 
 
 def start_run(
@@ -48,25 +47,12 @@ def start_run(
         raise RuntimeError("environment config is missing the resolved game_id")
 
     selected_game_id = environment.select_game_by_id(environment_config.game_id)
-    if state_memory is not None:
-        try:
-            state_memory.write_run_metadata(
-                run_id=config.run_id,
-                game_id=selected_game_id,
-                kind=RUNTIME_STARTUP_METADATA_KIND,
-                metadata=build_runtime_source_metadata(),
-            )
-        except Exception:
-            pass
     if environment_config.use_learned_contexts and state_memory is not None:
-        try:
-            hydrated = state_memory.hydrate_contexts_for_game(
-                game_id=selected_game_id,
-                defaults=contexts,
-            )
-            contexts.agent = hydrated.agent
-        except Exception:
-            pass
+        hydrated = state_memory.hydrate_contexts_for_game(
+            game_id=selected_game_id,
+            defaults=contexts,
+        )
+        contexts.agent = hydrated.agent
     observation = environment.reset()
     debug.emit(
         RunStarted(
@@ -85,7 +71,13 @@ def start_run(
     )
 
 
-def check_lifecycle(session: GameLoopSession) -> None:
+def check_lifecycle(
+    session: GameLoopSession,
+    *,
+    state_memory: StateMemory | None = None,
+    level_solution_summarizer: LevelSolutionSummarizerModel | None = None,
+    debug: DebugBus | None = None,
+) -> None:
     """Handle lifecycle states before processing a frame turn."""
 
     info = session.environment.get_info()
@@ -93,6 +85,18 @@ def check_lifecycle(session: GameLoopSession) -> None:
     state = info.state
 
     if state == GameState.WIN:
+        completed_levels = max(session.completed_levels, info.levels_completed)
+        if completed_levels > session.completed_levels:
+            _summarize_completed_levels(
+                session,
+                state_memory=state_memory,
+                level_solution_summarizer=level_solution_summarizer,
+                debug=debug,
+                previous_completed_levels=session.completed_levels,
+                completed_levels=completed_levels,
+            )
+            session.completed_levels = completed_levels
+            session.last_completed_levels = completed_levels
         stop_session(
             session,
             stop_reason="game_end",
@@ -103,9 +107,19 @@ def check_lifecycle(session: GameLoopSession) -> None:
 
     completed_levels = max(session.completed_levels, info.levels_completed)
     if completed_levels > session.completed_levels:
+        _summarize_completed_levels(
+            session,
+            state_memory=state_memory,
+            level_solution_summarizer=level_solution_summarizer,
+            debug=debug,
+            previous_completed_levels=session.completed_levels,
+            completed_levels=completed_levels,
+        )
         session.completed_levels = completed_levels
         session.last_completed_levels = completed_levels
         session.remaining_actions = session.environment_config.max_actions_per_level
+        session.queued_updater_actions = ()
+        session.queued_updater_mode = None
 
     if _level_limit_reached(session, completed_levels):
         stop_session(
@@ -126,12 +140,85 @@ def check_lifecycle(session: GameLoopSession) -> None:
         return
 
     if state == GameState.GAME_OVER:
+        if session.previous_observation is not None and session.last_decision is not None:
+            session.pending_game_over_reset = True
+            session.queued_updater_actions = ()
+            session.queued_updater_mode = None
+            session.real_actions = tuple(info.available_actions) or tuple(
+                session.environment.get_action_space()
+            )
+            return
         reset_after_game_over(session)
         return
 
     session.real_actions = tuple(info.available_actions) or tuple(
         session.environment.get_action_space()
     )
+
+
+def _summarize_completed_levels(
+    session: GameLoopSession,
+    *,
+    state_memory: StateMemory | None,
+    level_solution_summarizer: LevelSolutionSummarizerModel | None,
+    debug: DebugBus | None,
+    previous_completed_levels: int,
+    completed_levels: int,
+) -> None:
+    if state_memory is None or level_solution_summarizer is None:
+        return
+    if not session.state_record_ids:
+        return
+    latest_state_id = session.state_record_ids[-1]
+    latest_summary = state_memory.read_latest_level_solution_summary(
+        run_id=session.config.run_id,
+        game_id=session.game_id,
+    )
+    after_state_id = None
+    if latest_summary is not None and latest_summary.source_state_ids:
+        after_state_id = latest_summary.source_state_ids[-1]
+    source_state_ids = tuple(
+        state_id
+        for state_id in session.state_record_ids
+        if after_state_id is None or state_id > after_state_id
+    )
+    if not source_state_ids:
+        return
+    strategy_history = state_memory.read_agent_strategy_history_between(
+        game_id=session.game_id,
+        run_id=session.config.run_id,
+        after_state_id=after_state_id,
+        through_state_id=latest_state_id,
+    )
+    for completed_level in range(previous_completed_levels + 1, completed_levels + 1):
+        started_at = perf_counter()
+        summary = level_solution_summarizer.summarize_level_solution(
+            LevelSolutionSummaryInput(
+                run_id=session.config.run_id,
+                game_id=session.game_id,
+                completed_level=completed_level,
+                strategy_history=strategy_history,
+                metadata={
+                    "source_state_ids": source_state_ids,
+                    "previous_completed_levels": previous_completed_levels,
+                },
+            )
+        )
+        if debug is not None:
+            debug.emit(
+                ModelCallCompleted(
+                    role="level_summary",
+                    duration_seconds=perf_counter() - started_at,
+                )
+            )
+        state_memory.write_level_solution_summary(
+            run_id=session.config.run_id,
+            game_id=session.game_id,
+            completed_level=completed_level,
+            source_state_ids=source_state_ids,
+            solution_method=summary.solution_method,
+            metadata=summary.metadata,
+        )
 
 
 def _level_limit_reached(session: GameLoopSession, completed_levels: int) -> bool:
@@ -165,50 +252,12 @@ def stop_for_runtime_deadline(session: GameLoopSession) -> None:
     )
 
 
-def startup_error_result(
-    *,
-    config: RuntimeConfig,
-    environment_config: EnvironmentConfig,
-    error: Exception,
-) -> GameRunResult:
-    """Return a terminal result when startup cannot enter the game loop."""
-
-    return GameRunResult(
-        run_id=config.run_id,
-        game_id=environment_config.game_id or "unknown",
-        stop_reason=STARTUP_ERROR_FALLBACK,
-        metadata=_exception_metadata(error),
-    )
-
-
-def stop_for_framework_error(
-    session: GameLoopSession,
-    *,
-    error: Exception,
-) -> None:
-    """Record a clean terminal result for an otherwise fatal loop error."""
-
-    completed_levels = session.completed_levels
-    last_state = None
-    if session.current_info is not None:
-        completed_levels = max(completed_levels, session.current_info.levels_completed)
-        last_state = session.current_info.state
-    stop_session(
-        session,
-        stop_reason=FRAMEWORK_ERROR_FALLBACK,
-        completed_levels=completed_levels,
-        last_state=last_state,
-        metadata=_exception_metadata(error),
-    )
-
-
 def stop_session(
     session: GameLoopSession,
     *,
     stop_reason: str,
     completed_levels: int,
     last_state: GameState | None,
-    metadata: dict[str, object] | None = None,
 ) -> None:
     """Set the single terminal result consumed by the run exit path."""
 
@@ -222,7 +271,6 @@ def stop_session(
         step_count=session.real_step_count,
         completed_levels=completed_levels,
         last_state=last_state,
-        metadata=metadata or {},
     )
     session.running = False
     session.process_turn = False
@@ -242,11 +290,17 @@ def reset_after_game_over(session: GameLoopSession) -> None:
         )
     )
     session.previous_observation_ref = None
+    session.previous_observation = None
+    session.last_decision = None
+    session.queued_updater_actions = ()
+    session.queued_updater_mode = None
+    session.pending_game_over_reset = False
     reset_info = session.environment.get_info()
     session.current_info = reset_info
     session.last_completed_levels = session.completed_levels
     session.frame_buffer = ()
     session.frame_index = 0
+    session.last_transition_frame_observations = ()
     session.current = None
     session.next = None
     session.process_turn = False
@@ -267,36 +321,24 @@ def finish_run(
 
     result = session.terminal_result
     if result.stop_reason == "game_end":
-        try:
-            apply_general_context_updates(
+        apply_general_context_updates(
+            contexts=contexts,
+            updater_tasks=updater_tasks,
+            debug=debug,
+            run_id=result.run_id,
+            game_id=result.game_id,
+            stop_reason=result.stop_reason or "unknown",
+            step_count=result.step_count,
+            completed_levels=result.completed_levels,
+            last_state_name=(
+                result.last_state.name if result.last_state is not None else None
+            ),
+            state_record_ids=result.state_record_ids,
+        )
+        if state_memory is not None and result.state_record_ids:
+            state_memory.update_state_contexts(
+                state_id=result.state_record_ids[-1],
                 contexts=contexts,
-                updater_tasks=updater_tasks,
-                debug=debug,
-                run_id=result.run_id,
-                game_id=result.game_id,
-                stop_reason=result.stop_reason or "unknown",
-                step_count=result.step_count,
-                completed_levels=result.completed_levels,
-                last_state_name=(
-                    result.last_state.name if result.last_state is not None else None
-                ),
-                state_record_ids=result.state_record_ids,
-            )
-            if state_memory is not None and result.state_record_ids:
-                state_memory.update_state_contexts(
-                    state_id=result.state_record_ids[-1],
-                    contexts=contexts,
-                )
-        except Exception as exc:
-            result.metadata["general_context_update_fallback"] = _exception_metadata(
-                exc
             )
     debug.emit(RunStopped(result))
     return result
-
-
-def _exception_metadata(error: Exception) -> dict[str, object]:
-    return {
-        "fallback_error_type": type(error).__name__,
-        "fallback_error": str(error),
-    }

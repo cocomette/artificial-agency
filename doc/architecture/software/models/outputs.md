@@ -1,46 +1,50 @@
 # Model Outputs
 
-## Agent `X`
+## Agent X
 
-The orchestrator agent returns:
+Agent X is dormant in the current runtime game loop. If the adapter path is
+re-enabled, it returns a `DecisionResult` with:
 
-- one final `ActionSpec`
-- `AgentTrace` with reasoning summary, optional tool call/result records, and
-  metadata
-
-The current runtime exposes no real tools to `X`, so normal traces contain no
-tool results. Provider-specific responses are normalized inside the Agent X
-model layer before orchestration sees the final `DecisionResult`.
+- final `ActionSpec`
+- `AgentTrace` containing frame refs, reasoning summary, optional tool calls,
+  optional generic tool results, and metadata
 
 ## Change Summary
 
-The change model returns:
+The change summary role returns `ChangeSummaryResult`:
 
-- concise transition summary text
-- structured change fields
-- cropped changed-cell count
-- provider metadata
+- `summary`
+- `change_detected`
+- metadata
 
-Orchestration uses this output to build compact action history and updater
-input.
+## World Model
 
-## Agent Context Historizer
+The world-model role returns the latest world description, special-event
+memory, and per-allowed-action effect summaries.
 
-The historizer returns a structured summary of recent agent context evolution
-over the fields `goals`, `game_mechanics`, `policy`, `history`, and `extras`.
+## Historizer
 
-## Updater `P`
+The historizer role returns `probing_evolution`, `policy_evolution`, and
+`updater_mode`.
+Orchestration combines this with the fresh world-model output as
+`AgentContextHistorySummary` for updater input.
 
-The updater returns revised context documents for the orchestration-selected
-task.
+## Level Summary
 
-- agent game updater replaces `RoleContext.game`
-- agent general updater replaces `RoleContext.general`
+The level-summary role returns `solution_method`, a compact reusable method
+summary for the next level of the same game. Orchestration stores it in
+`level_solution_summaries`.
 
-Orchestration applies these outputs to its live `ContextDocuments` working
-state, then persists the resulting authoritative contexts into `M`.
+## Updater P
 
-## Output Rule
-
-Model outputs are data. Orchestration decides whether they are committed `M`
-history, active agent context, action history evidence, or updater input.
+Updater P returns `RoleContext` replacements. Agent probing returns
+`probing_strategy` and required `next_actions`; agent policy returns
+`policy_strategy` and required `next_actions`. `next_actions` is an exact-length
+array of action objects matching the active mode's configured action window.
+ACTION6 updater action objects include a required `target` description,
+crop-relative normalized `bbox`, and `target_rgb_color`; the updater adapter
+converts that targeting description into execution coordinates in `data`.
+Orchestration persists those summaries as the agent game context and stores the
+world-model output separately in frame-turn metadata. Actions are submitted in
+order on controllable frames without an Agent X revision step. The general task
+replaces the general segment and preserves the game segment.

@@ -54,7 +54,7 @@ VLLM_TORCH_DEPENDENCY_PACKAGES = (
     "ninja",
     "numpy>=1.23.5",
     "nvidia-cudnn-frontend>=1.13.0",
-    "nvidia-cutlass-dsl==4.6.0.dev0",
+    "nvidia-cutlass-dsl>=4.4.2",
     "nvidia-ml-py",
     "packaging>=24.2",
     "psutil",

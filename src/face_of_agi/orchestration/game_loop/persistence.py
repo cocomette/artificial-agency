@@ -34,19 +34,19 @@ def persist_turn(
         turn_id=current.turn_id,
         step=current.observation.step,
     ):
-        try:
-            persist_turn_shell(
-                frame_context=current.to_frame_context(),
-                turn_id=current.turn_id,
-                decision=decision,
-                update_input=update_input,
-                state_record_ids=session.state_record_ids,
-                state_memory=state_memory,
-                contexts=contexts,
-                debug=debug,
-            )
-        except Exception:
-            pass
+        persist_turn_shell(
+            frame_context=current.to_frame_context(),
+            turn_id=current.turn_id,
+            decision=decision,
+            update_input=update_input,
+            state_record_ids=session.state_record_ids,
+            state_memory=state_memory,
+            contexts=contexts,
+            debug=debug,
+            agent_context_history=session.agent_context_strategy_snapshot,
+            agent_context_evolution=session.agent_context_evolution_snapshot,
+            world_model_context=session.world_model_context,
+        )
 
 
 def persist_turn_shell(
@@ -59,6 +59,9 @@ def persist_turn_shell(
     state_memory: StateMemory | None,
     contexts: ContextDocuments,
     debug: DebugBus,
+    agent_context_history: dict[str, Any] | None = None,
+    agent_context_evolution: dict[str, Any] | None = None,
+    world_model_context: dict[str, Any] | None = None,
 ) -> None:
     """Complete the prewritten M row for one frame turn."""
 
@@ -75,6 +78,9 @@ def persist_turn_shell(
         contexts=contexts,
         agent_trace=decision.trace,
         turn_metrics=update_input.turn_metrics,
+        agent_context_history=agent_context_history,
+        agent_context_evolution=agent_context_evolution,
+        world_model_context=world_model_context,
     )
     state_record_ids.append(state.id)
     debug.emit(MStatePersisted(record_id=state.id, turn_id=turn_id))

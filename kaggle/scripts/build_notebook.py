@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 from io import BytesIO
 import json
-import os
 from pathlib import Path
 import sys
 import tarfile
@@ -27,30 +26,16 @@ _ACCELERATORS = {
     "rtx6000": {"name": "NvidiaRtxPro6000", "gpu": True},
 }
 
-KAGGLE_SUBMISSION_CONFIG_ENV = "FACE_OF_AGI_KAGGLE_SUBMISSION_CONFIG"
-KAGGLE_MODEL_DATASET_SLUG_ENV = "FACE_OF_AGI_KAGGLE_MODEL_DATASET_SLUG"
-KAGGLE_KERNEL_ID_ENV = "FACE_OF_AGI_KAGGLE_SUBMISSION_KERNEL_ID"
-KAGGLE_KERNEL_TITLE_ENV = "FACE_OF_AGI_KAGGLE_SUBMISSION_KERNEL_TITLE"
-DEFAULT_CONFIG_RELATIVE_PATH = (
+CONFIG_RELATIVE_PATH = (
     "src/face_of_agi/runtime/configs/vllm/"
     "vllm_rtx6000_qwen36_35b_fp8_parallel.yaml"
 )
-CONFIG_RELATIVE_PATH = os.environ.get(
-    KAGGLE_SUBMISSION_CONFIG_ENV,
-    DEFAULT_CONFIG_RELATIVE_PATH,
-).strip() or DEFAULT_CONFIG_RELATIVE_PATH
 PROJECT_DIR = "/kaggle/working/face-of-agi"
 WHEELHOUSE_DATASET_SLUG = "face-of-agi-wheelhouse"
 COMPETITION_SLUG = "arc-prize-2026-arc-agi-3"
-DEFAULT_MODEL_DATASET_SLUG = "face-of-agi-qwen36-35b-fp8-weights"
-MODEL_DATASET_SLUG = os.environ.get(
-    KAGGLE_MODEL_DATASET_SLUG_ENV,
-    DEFAULT_MODEL_DATASET_SLUG,
-).strip() or DEFAULT_MODEL_DATASET_SLUG
+MODEL_DATASET_SLUG = "face-of-agi-qwen36-35b-fp8-weights"
 CONFIG_MODEL_PATH = f"/kaggle/input/{MODEL_DATASET_SLUG}"
 DATASET_SOURCE_SLUGS = (WHEELHOUSE_DATASET_SLUG, MODEL_DATASET_SLUG)
-KAGGLE_KERNEL_ID = os.environ.get(KAGGLE_KERNEL_ID_ENV, "").strip()
-KAGGLE_KERNEL_TITLE = os.environ.get(KAGGLE_KERNEL_TITLE_ENV, "").strip()
 VLLM_VERSION = "0.19.1"
 RUNTIME_PACKAGES = (
     "arc-agi",
@@ -80,7 +65,7 @@ VLLM_TORCH_DEPENDENCY_PACKAGES = (
     "ninja",
     "numpy>=1.23.5",
     "nvidia-cudnn-frontend>=1.13.0",
-    "nvidia-cutlass-dsl==4.6.0.dev0",
+    "nvidia-cutlass-dsl>=4.4.2",
     "nvidia-ml-py",
     "packaging>=24.2",
     "psutil",
@@ -294,8 +279,6 @@ def _run_rerun_cell() -> dict:
                     "RECORDINGS_DIR": "/kaggle/working/server_recording",
                     "MPLBACKEND": "agg",
                     "VLLM_API_KEY": "EMPTY",
-                    "VLLM_DISABLE_LOG_LOGO": "1",
-                    "VLLM_LOGGING_LEVEL": "ERROR",
                 }})
                 source_dir = str(project_dir / "src")
                 existing_pythonpath = os.environ.get("PYTHONPATH")
@@ -515,32 +498,15 @@ def main() -> None:
     NOTEBOOK_PATH.write_text(json.dumps(build(), indent=1), encoding="utf-8")
     print(f"[build_notebook] Wrote {NOTEBOOK_PATH.relative_to(ROOT)}")
 
-    _sync_metadata()
-
-
-def _sync_metadata() -> dict | None:
     if METADATA_PATH.exists():
         meta = json.loads(METADATA_PATH.read_text(encoding="utf-8"))
-        if KAGGLE_KERNEL_ID:
-            meta["id"] = KAGGLE_KERNEL_ID
-        else:
-            meta = with_kaggle_kernel_id(meta)
-        if KAGGLE_KERNEL_TITLE:
-            meta["title"] = KAGGLE_KERNEL_TITLE
+        meta = with_kaggle_kernel_id(meta)
         meta["enable_gpu"] = _ACCELERATORS[ACCELERATOR]["gpu"]
         meta["enable_internet"] = False
         meta["dataset_sources"] = kaggle_dataset_sources(DATASET_SOURCE_SLUGS)
         meta["model_sources"] = []
         METADATA_PATH.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
-        print(f"[build_notebook] Synced {_display_path(METADATA_PATH)}")
-        return meta
-    return None
-
-
-def _display_path(path: Path) -> Path:
-    if path.is_relative_to(ROOT):
-        return path.relative_to(ROOT)
-    return path
+        print(f"[build_notebook] Synced {METADATA_PATH.relative_to(ROOT)}")
 
 
 if __name__ == "__main__":

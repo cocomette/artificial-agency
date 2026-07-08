@@ -8,11 +8,13 @@ from face_of_agi.models.historizer.adapter import (
 )
 from face_of_agi.models.historizer.config import (
     HistorizerConfig,
+    OllamaHistorizerConfig,
+    OpenAIHistorizerConfig,
     VLLMHistorizerConfig,
+    openai_agent_context_history_text_format,
 )
 from face_of_agi.models.historizer.contracts import (
-    AGENT_CONTEXT_HISTORY_KEYS,
-    DEFAULT_FIELD_EVOLUTION_MAX_CHARS,
+    AgentContextHistoryDecision,
     AgentContextHistorizerModel,
     AgentContextHistoryInput,
     AgentContextHistorySummary,
@@ -23,19 +25,21 @@ from face_of_agi.models.historizer.contracts import (
 )
 
 __all__ = [
-    "AGENT_CONTEXT_HISTORY_KEYS",
-    "DEFAULT_FIELD_EVOLUTION_MAX_CHARS",
     "AgentContextHistorizerAdapter",
     "AgentContextHistorizerModel",
+    "AgentContextHistoryDecision",
     "AgentContextHistoryInput",
     "AgentContextHistorySummary",
     "HistorizerConfig",
     "HistorizerOutputError",
+    "OllamaHistorizerConfig",
+    "OpenAIHistorizerConfig",
     "PromptHistorizerProvider",
     "PromptHistorizerProviderResponse",
     "PromptHistorizerRequest",
     "VLLMHistorizerConfig",
     "agent_context_history_json_schema",
     "load_historizer_instructions",
+    "openai_agent_context_history_text_format",
     "parse_agent_context_history_output",
 ]

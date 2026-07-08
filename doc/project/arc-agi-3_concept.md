@@ -6,7 +6,7 @@ The ARC-AGI-3 challenge is about building an AI agent that can interact with nov
 
 The agent must be able to:
 
-- Explore unfamiliar environments.
+- Probe unfamiliar environments.
 - Infer what matters from interaction.
 - Discover goals without explicit instructions.
 - Learn environment dynamics.
@@ -21,7 +21,7 @@ ARC-AGI-3 evaluates whether an agent can perform general intelligence-like behav
 
 The main capabilities tested are:
 
-### 1. Exploration
+### 1. Probing
 
 The agent must actively gather information by interacting with the environment.
 
@@ -89,11 +89,8 @@ The most important programming constraints are:
 - API-based systems such as hosted LLM calls cannot be used at evaluation time.
 - Prize-eligible solutions must be reproducible.
 - Prize-eligible solutions must be open source.
-- Public release material should use a clear open-source license. For this
-  public repo, covered project material is offered under `Apache-2.0`.
-- Third-party code, model weights, datasets, and Kaggle competition inputs keep
-  their own upstream terms and must allow the public/reproducible submission
-  workflow required by the competition.
+- Code and methods authored by the submitter must be released under a permissive public-domain-style license, such as CC0 or MIT-0.
+- Third-party code must allow public sharing.
 - Participants must open source their solution before receiving official private evaluation scores.
 
 ## Competition Mode Constraints
@@ -131,7 +128,7 @@ ARC-AGI-3 should be approached as a general game-playing and reasoning-agent cha
 
 The agent needs to combine:
 
-- Exploration strategy.
+- Probing strategy.
 - State representation.
 - World modeling.
 - Goal inference.
