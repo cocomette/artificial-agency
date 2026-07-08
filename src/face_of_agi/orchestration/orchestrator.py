@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TextIO
 
+from face_of_agi.agent_creator.service import AgentCreatorService
 from face_of_agi.contracts import (
     ContextDocuments,
     FrameTurnContext,
@@ -14,8 +15,7 @@ from face_of_agi.contracts import (
 from face_of_agi.environment.adapter import EnvironmentAdapter
 from face_of_agi.environment.config import EnvironmentConfig
 from face_of_agi.memory import ExperimentalMemory, StateMemory
-from face_of_agi.models.adapters import ModelRegistry, OrchestratorAgentModel
-from face_of_agi.models.updater import UpdaterTaskRegistry
+from face_of_agi.models.adapters import ModelRegistry
 from face_of_agi.debug.bus import DebugBus
 from face_of_agi.debug.sinks import DebugTrace
 from face_of_agi.orchestration.game_loop import (
@@ -40,11 +40,13 @@ class Orchestrator:
         models: ModelRegistry | None = None,
         contexts: ContextDocuments | None = None,
         experimental_memory_turn_buffer: int = 2,
+        agent_creator_service: AgentCreatorService | None = None,
     ) -> None:
         self.state_memory = state_memory
         self.experimental_memory = experimental_memory
         self.models = self._ensure_models(models)
         self.contexts = contexts or ContextDocuments()
+        self.agent_creator_service = agent_creator_service
         if experimental_memory_turn_buffer < 1:
             raise ValueError("experimental memory turn buffer must be at least 1")
         self.experimental_memory_turn_buffer = experimental_memory_turn_buffer
@@ -78,13 +80,17 @@ class Orchestrator:
             return GameLoopStateMachine(
                 state_memory=self.state_memory,
                 contexts=self.contexts,
-                agent=self._require_orchestrator_agent(),
                 change_summary_model=self.models.require_change_summary_model(),
+                world_model=self.models.require_world_model(),
                 agent_context_historizer=(
                     self.models.agent_context_historizer_model
                 ),
+                level_solution_summarizer=(
+                    self.models.level_solution_summarizer
+                ),
                 updater_tasks=self.models.require_updater_tasks(),
-                tool_runtime_factory=self._build_agent_tool_runtime,
+                tool_runtime_factory=None,
+                agent_creator_service=self.agent_creator_service,
                 debug=active_debug,
             ).run(
                 config=config,
@@ -103,11 +109,6 @@ class Orchestrator:
 
     def _ensure_models(self, models: ModelRegistry | None) -> ModelRegistry:
         return models or ModelRegistry()
-
-    def _require_orchestrator_agent(self) -> OrchestratorAgentModel:
-        if self.models is None:
-            raise RuntimeError("orchestrator models were not configured")
-        return self.models.require_orchestrator_agent()
 
     def _build_agent_tool_runtime(
         self,

@@ -1,46 +1,15 @@
-# ARC-AGI-3 Tech Stack
+# Tech Stack
 
-## Purpose
+- Python 3.12 with `uv` for environment and command execution.
+- ARC-AGI-3 environment integration through the runtime environment adapter.
+- OpenAI, Ollama, and vLLM provider adapters for active model roles.
+- SQLite for state memory, the optional agent-creator role store,
+  experimental tool memory, and model-input debug records.
+- Rich terminal tracing and Streamlit dashboard tooling for local debugging.
 
-This file lists the concrete tools, frameworks, and runtime assumptions used by
-the repository. Architecture and module ownership live in
-`doc/architecture/system_architecture.md` and `doc/architecture/software/`.
-
-## Core Runtime
-
-- Language: Python 3.12.
-- Environment and dependency manager: `uv`.
-- Package build backend: Hatchling.
-- Environment interface: ARC-AGI Toolkit.
-- Persistence: SQLite through Python's built-in `sqlite3` module.
-- Rendering/visualization: Matplotlib.
-- Base install: ARC-AGI Toolkit, Matplotlib, Rich, PyYAML, and the OpenAI SDK
-  used only as the vLLM OpenAI-compatible HTTP client.
-
-## Model Runtime
-
-- Real model backend: vLLM.
-- Transport: vLLM's OpenAI-compatible Chat Completions API.
-- Model-facing observations: `ObservationText` serialization of native 2D ARC
-  integer grids plus cropped PNG image data URLs for frame-consuming vLLM roles.
-- Runtime configs: `src/face_of_agi/runtime/configs/starter_loop.yaml` and
-  `src/face_of_agi/runtime/configs/vllm/**`.
-
-OpenAI, Ollama, HuggingFace, and Diffusers provider paths are not part of the
-current runtime stack.
-
-## Hardware Assumptions
-
-- vLLM is expected to run outside the base Python environment, locally or on
-  dedicated GPU infrastructure.
-- The runtime process only needs network access to the configured vLLM
-  OpenAI-compatible endpoint.
-- Hardware-specific vLLM launch/config variants live under
-  `src/face_of_agi/runtime/configs/vllm/`.
-
-## Development Tools
-
-- Tests: `pytest`.
-- Interactive work: Jupyter Notebook and IPython kernel.
-- Rendering/visualization: Matplotlib; Linux `render_mode: human` needs Tk
-  installed through the system package manager.
+Active game-loop model calls are change summary, world model,
+agent-context historizer, and updater P for agent context. When configured, the
+agent creator runs as a sidecar that writes learned roles to its own database;
+those roles are not consumed by the game loop. Agent X adapters remain in the
+codebase, but Agent X is dormant in the current game loop; updater P returns
+the actions that orchestration queues and submits.

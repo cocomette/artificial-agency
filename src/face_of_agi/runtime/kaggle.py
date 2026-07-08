@@ -293,9 +293,10 @@ def _run_kaggle_game(
     model_registry = _build_model_registry(
         agent_config=environment_config.models.agent,
         change_config=environment_config.models.change,
+        world_config=environment_config.models.world,
         historizer_config=environment_config.models.historizer,
+        level_summary_config=environment_config.models.level_summary,
         shared_vlm_config=environment_config.models.shared_vlm,
-        observation_text_config=environment_config.models.observation_text,
         updater_config=environment_config.models.updater,
     )
     runtime = RuntimeLoop(

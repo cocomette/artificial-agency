@@ -1,47 +1,31 @@
 # Orchestration Overview
 
-Orchestration is the central control layer for the runtime. It owns the game
-loop and is the only module that coordinates environment calls, model calls,
-memory reads and writes, updater calls, and action submission.
+Orchestration owns the game loop and coordinates environment, models, memory,
+debug tracing, and runtime lifecycle.
 
-The orchestrator agent `X` is a model role. The orchestration layer is the
-deterministic software controller that calls `X` and handles every side effect
-around it.
+Per controllable frame turn it:
 
-The top-level `Orchestrator` acts as a facade and dependency coordinator.
-Concrete workflows live in focused sub-orchestration components. The current
-ARC game loop is implemented as `GameLoopStateMachine` in
-`src/face_of_agi/orchestration/game_loop/state_machine.py`.
+1. builds a frame snapshot and optional source `M` row
+2. models the previous-to-current transition when one exists
+3. runs the agent-context historizer and updater P when a fresh queued action
+   chain is needed
+4. submits the updater-selected action to the environment
+5. completes the `M` row
 
-The game loop defines frame-bundle unrolling, synthetic `NONE` decisions during
-non-controllable animation frames, and real environment action submission only
-on controllable final frames.
+Agent X is dormant in the current game loop. The orchestrator-agent adapters
+remain in the codebase, but runtime bootstrap registers no Agent X model and
+controllable frame decisions are wrappers around updater-selected actions.
 
-## Responsibilities
+Updater P returns an ordered queued action chain. Valid queued actions are
+submitted on later controllable frames without rerunning the world model,
+historizer, or updater. If the latest real action has zero net visible
+first-to-last frame change, orchestration clears the remaining queued actions
+before deciding whether fresh context is needed. Animation bundles still run
+through change summary even when their final frame matches the first frame.
 
-At a high level, orchestration:
-
-- starts and advances one ARC-AGI game run
-- receives observations and metadata from the environment module
-- composes current agent context from global `K^X` and selected-game `L^X`
-- calls Agent `X` only on controllable final frames
-- exposes an `AgentToolRuntime` with no available tools in the current runtime
-- receives the final action and trace from `X`, or synthesizes `NONE` and an
-  orchestration-owned trace for animation frames
-- sends final-frame real actions to the environment module
-- resolves the actual next frame for transition evidence
-- calls the change summary model for compact transition text
-- calls the agent context historizer when configured
-- runs updater `P` after each observed frame transition
-- applies updater-returned agent context to live working context documents
-- persists frame transitions, traces, metrics, action history, and context into
-  `M`
-
-## Boundary
-
-Orchestration depends on typed interfaces from the environment, memory, models,
-updates, and shared contracts modules. It does not depend on a specific model
-backend or provider-specific response format.
-
-The true main loop lives here. Runtime can assemble and invoke orchestration,
-but it should not grow independent game-step logic.
+Post-action animation bundles produce one synthetic `NONE` raw history entry
+that renders on the same prompt-facing line as the action that caused it. When
+fresh context is needed, the bundled transition is sent through one world-model
+update. Historizer mode selection and updater P run on the final controllable
+animation frame before the next environment action is submitted, so updater
+decisions are based on the actual actionable state.

@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from face_of_agi.models.agent_creator.contracts import AgentCreatorModel
 from face_of_agi.models.change.contracts import ChangeSummaryModel
 from face_of_agi.models.historizer.contracts import AgentContextHistorizerModel
+from face_of_agi.models.level_summary.contracts import LevelSolutionSummarizerModel
 from face_of_agi.models.orchestrator_agent.contracts import OrchestratorAgentModel
 from face_of_agi.models.updater.contracts import UpdaterTaskRegistry
+from face_of_agi.models.world.contracts import AgentWorldModel
 
 
 @dataclass(slots=True)
@@ -15,9 +18,13 @@ class ModelRegistry:
     """Small registry for injected model role implementations."""
 
     agent_context_historizer_model: AgentContextHistorizerModel | None = None
+    level_solution_summarizer: LevelSolutionSummarizerModel | None = None
+    world_model: AgentWorldModel | None = None
     orchestrator_agent: OrchestratorAgentModel | None = None
     change_summary_model: ChangeSummaryModel | None = None
     updater_tasks: UpdaterTaskRegistry | None = None
+    agent_creator_model: AgentCreatorModel | None = None
+    agent_creator_role_author_model: AgentCreatorModel | None = None
 
     def require_agent_context_historizer_model(self) -> AgentContextHistorizerModel:
         """Return the agent context historizer, failing early if not wired."""
@@ -25,6 +32,20 @@ class ModelRegistry:
         if self.agent_context_historizer_model is None:
             raise RuntimeError("agent context historizer model is not registered")
         return self.agent_context_historizer_model
+
+    def require_world_model(self) -> AgentWorldModel:
+        """Return the world-model role, failing early if not wired."""
+
+        if self.world_model is None:
+            raise RuntimeError("world model is not registered")
+        return self.world_model
+
+    def require_level_solution_summarizer(self) -> LevelSolutionSummarizerModel:
+        """Return the level summarizer, failing early if it was not wired."""
+
+        if self.level_solution_summarizer is None:
+            raise RuntimeError("level solution summarizer model is not registered")
+        return self.level_solution_summarizer
 
     def require_orchestrator_agent(self) -> OrchestratorAgentModel:
         """Return the X agent role, failing early if it was not wired."""
@@ -47,10 +68,27 @@ class ModelRegistry:
             raise RuntimeError("updater task registry is not registered")
         return self.updater_tasks
 
+    def require_agent_creator_model(self) -> AgentCreatorModel:
+        """Return the agent creator role, failing early if it was not wired."""
+
+        if self.agent_creator_model is None:
+            raise RuntimeError("agent creator model is not registered")
+        return self.agent_creator_model
+
+    def require_agent_creator_role_author_model(self) -> AgentCreatorModel:
+        """Return the agent creator role author, failing early if not wired."""
+
+        if self.agent_creator_role_author_model is None:
+            raise RuntimeError("agent creator role-author model is not registered")
+        return self.agent_creator_role_author_model
+
 
 __all__ = [
+    "AgentCreatorModel",
     "ChangeSummaryModel",
     "AgentContextHistorizerModel",
+    "AgentWorldModel",
+    "LevelSolutionSummarizerModel",
     "ModelRegistry",
     "OrchestratorAgentModel",
     "UpdaterTaskRegistry",

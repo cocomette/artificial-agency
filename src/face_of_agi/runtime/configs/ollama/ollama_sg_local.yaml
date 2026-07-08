@@ -1,0 +1,47 @@
+# Fully local model run: Ollama active roles and updater tasks.
+game_index: 0
+max_actions_per_level: 3
+operation_mode: offline
+game_catalog_path: src/face_of_agi/environment/local_games.json
+environments_dir: environment_files
+recordings_dir: recordings
+enable_visualization: true
+render_mode: terminal
+seed: 0
+save_recording: false
+experimental_memory_turn_buffer: 4
+agent_context_history_window: 8
+probing_actions_window: 1
+policy_actions_window: 1
+debug_keep_all_m_states: true
+debug_trace: minimal
+debug_color: auto
+models:
+  agent:
+    backend: ollama
+    model: gemma4:e4b
+    max_tool_calls: 0
+    repair_attempts: 1
+  change:
+    backend: ollama
+    model: gemma4:e4b
+    input_image_size: 256x256
+  world:
+    backend: ollama
+    model: gemma4:e4b
+  historizer:
+    backend: ollama
+    model: gemma4:e4b
+  level_summary:
+    backend: ollama
+    model: gemma4:e4b
+  updater:
+    agent_probing:
+      backend: ollama
+      model: gemma4:e4b
+    agent_policy:
+      backend: ollama
+      model: gemma4:e4b
+    general:
+      backend: ollama
+      model: gemma4:e4b

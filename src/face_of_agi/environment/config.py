@@ -36,11 +36,16 @@ class ModelRoleConfig:
 class ModelRuntimeConfig:
     """Runtime model backend config for agent and tool roles."""
 
-    observation_text: dict[str, Any] = field(default_factory=dict)
     shared_vlm: ModelRoleConfig = field(default_factory=ModelRoleConfig)
     agent: ModelRoleConfig = field(default_factory=ModelRoleConfig)
     change: ModelRoleConfig = field(default_factory=ModelRoleConfig)
+    world: ModelRoleConfig = field(default_factory=ModelRoleConfig)
     historizer: ModelRoleConfig = field(default_factory=ModelRoleConfig)
+    level_summary: ModelRoleConfig = field(default_factory=ModelRoleConfig)
+    agent_creator: ModelRoleConfig = field(default_factory=ModelRoleConfig)
+    agent_creator_role_author: ModelRoleConfig = field(
+        default_factory=ModelRoleConfig
+    )
     updater: "UpdaterRuntimeConfig | None" = None
 
 
@@ -48,8 +53,22 @@ class ModelRuntimeConfig:
 class UpdaterRuntimeConfig:
     """Runtime backend config for updater task slots."""
 
-    agent: ModelRoleConfig = field(default_factory=ModelRoleConfig)
+    agent_probing: ModelRoleConfig = field(default_factory=ModelRoleConfig)
+    agent_policy: ModelRoleConfig = field(default_factory=ModelRoleConfig)
     general: ModelRoleConfig = field(default_factory=ModelRoleConfig)
+
+
+@dataclass(slots=True)
+class AgentCreatorRuntimeConfig:
+    """Runtime config for the shared agent creator service."""
+
+    base_learned_roles_file: str = "data/agent_creator"
+    use_learned_roles: bool = True
+    batch_size: int = 8
+    max_tool_calls: int = 4
+    max_roles: int = 8
+    strategy_history_window: int = 10
+    action_history_window: int = 20
 
 
 @dataclass(slots=True)
@@ -76,11 +95,14 @@ class EnvironmentConfig:
     use_learned_contexts: bool = True
     experimental_memory_turn_buffer: int = 2
     agent_action_history_window: int = 8
-    agent_updater_action_history_window: int = 8
+    action_history_window: int = 8
     agent_context_history_window: int = 8
-    animation_keyframe_pixel_threshold: int = 8
-    action_suppression_zero_changed_pixel_turns: int = 3
-    updater_stagnation_warning_zero_changed_pixel_turns: int = 3
+    probing_actions_window: int = 1
+    policy_actions_window: int = 1
+    probing_mode_cap_ratio: float = 0.35
+    agent_creator: AgentCreatorRuntimeConfig = field(
+        default_factory=AgentCreatorRuntimeConfig
+    )
     debug_keep_all_m_states: bool = False
     debug_trace: DebugTraceMode = "minimal"
     debug_color: DebugColorMode = "auto"
@@ -92,6 +114,10 @@ def load_environment_config(path: str | Path) -> EnvironmentConfig:
     """Load the starter environment config from YAML."""
 
     raw_data = _read_yaml(path)
+    if "use_learned_roles" in raw_data:
+        raise ValueError(
+            "use_learned_roles moved to agent_creator.use_learned_roles"
+        )
     game_index, game_indices, game_ids, game_selection = _load_game_selection(raw_data)
     game_id = _optional_string(raw_data.get("game_id"))
     if (game_indices or game_ids or game_selection is not None) and game_id is not None:
@@ -144,25 +170,28 @@ def load_environment_config(path: str | Path) -> EnvironmentConfig:
             raw_data.get("agent_action_history_window", 8),
             key="agent_action_history_window",
         ),
-        agent_updater_action_history_window=_non_negative_int(
-            raw_data.get("agent_updater_action_history_window", 8),
-            key="agent_updater_action_history_window",
+        action_history_window=_non_negative_int(
+            raw_data.get("action_history_window", 8),
+            key="action_history_window",
         ),
         agent_context_history_window=_non_negative_int(
             raw_data.get("agent_context_history_window", 8),
             key="agent_context_history_window",
         ),
-        animation_keyframe_pixel_threshold=_non_negative_int(
-            raw_data.get("animation_keyframe_pixel_threshold", 8),
-            key="animation_keyframe_pixel_threshold",
+        probing_actions_window=_positive_int(
+            raw_data.get("probing_actions_window", 1),
+            key="probing_actions_window",
         ),
-        action_suppression_zero_changed_pixel_turns=_non_negative_int(
-            raw_data.get("action_suppression_zero_changed_pixel_turns", 3),
-            key="action_suppression_zero_changed_pixel_turns",
+        policy_actions_window=_positive_int(
+            raw_data.get("policy_actions_window", 1),
+            key="policy_actions_window",
         ),
-        updater_stagnation_warning_zero_changed_pixel_turns=_non_negative_int(
-            raw_data.get("updater_stagnation_warning_zero_changed_pixel_turns", 3),
-            key="updater_stagnation_warning_zero_changed_pixel_turns",
+        probing_mode_cap_ratio=_ratio_float(
+            raw_data.get("probing_mode_cap_ratio", 0.35),
+            key="probing_mode_cap_ratio",
+        ),
+        agent_creator=_load_agent_creator_runtime_config(
+            raw_data.get("agent_creator")
         ),
         debug_keep_all_m_states=_optional_bool(
             raw_data.get("debug_keep_all_m_states"),
@@ -198,11 +227,16 @@ def _load_model_runtime_config(value: Any) -> ModelRuntimeConfig:
 
     _reject_removed_model_keys(value)
     return ModelRuntimeConfig(
-        observation_text=_load_observation_text_config(value.get("observation_text")),
         shared_vlm=_load_model_role_config(value.get("shared_vlm")),
         agent=_load_model_role_config(value.get("agent")),
         change=_load_required_model_role_config(value, "change"),
-        historizer=_load_model_role_config(value.get("historizer")),
+        world=_load_required_model_role_config(value, "world"),
+        historizer=_load_required_model_role_config(value, "historizer"),
+        level_summary=_load_required_model_role_config(value, "level_summary"),
+        agent_creator=_load_model_role_config(value.get("agent_creator")),
+        agent_creator_role_author=_load_model_role_config(
+            value.get("agent_creator_role_author")
+        ),
         updater=_load_updater_runtime_config(value.get("updater")),
     )
 
@@ -217,8 +251,62 @@ def _load_updater_runtime_config(value: Any) -> UpdaterRuntimeConfig:
     _reject_removed_updater_keys(value)
 
     return UpdaterRuntimeConfig(
-        agent=_load_required_updater_task_config(value, "agent"),
+        agent_probing=_load_required_updater_task_config(
+            value,
+            "agent_probing",
+        ),
+        agent_policy=_load_required_updater_task_config(
+            value,
+            "agent_policy",
+        ),
         general=_load_required_updater_task_config(value, "general"),
+    )
+
+
+def _load_agent_creator_runtime_config(value: Any) -> AgentCreatorRuntimeConfig:
+    """Load shared agent creator service config."""
+
+    if value is None:
+        return AgentCreatorRuntimeConfig()
+    if not isinstance(value, dict):
+        raise ValueError("agent_creator config must be a mapping")
+    if "database_path" in value:
+        raise ValueError(
+            "agent_creator.database_path moved to "
+            "agent_creator.base_learned_roles_file"
+        )
+    defaults = AgentCreatorRuntimeConfig()
+    return AgentCreatorRuntimeConfig(
+        base_learned_roles_file=str(
+            value.get(
+                "base_learned_roles_file",
+                defaults.base_learned_roles_file,
+            )
+        ),
+        use_learned_roles=_optional_bool(
+            value.get("use_learned_roles"),
+            default=defaults.use_learned_roles,
+        ),
+        batch_size=_positive_int(
+            value.get("batch_size", defaults.batch_size),
+            key="agent_creator.batch_size",
+        ),
+        max_tool_calls=_non_negative_int(
+            value.get("max_tool_calls", defaults.max_tool_calls),
+            key="agent_creator.max_tool_calls",
+        ),
+        max_roles=_positive_int(
+            value.get("max_roles", defaults.max_roles),
+            key="agent_creator.max_roles",
+        ),
+        strategy_history_window=_non_negative_int(
+            value.get("strategy_history_window", defaults.strategy_history_window),
+            key="agent_creator.strategy_history_window",
+        ),
+        action_history_window=_non_negative_int(
+            value.get("action_history_window", defaults.action_history_window),
+            key="agent_creator.action_history_window",
+        ),
     )
 
 
@@ -262,7 +350,7 @@ def _load_optional_active_model_role_config(
 
 
 def _reject_removed_model_keys(value: dict[str, Any]) -> None:
-    removed = sorted(set(value) & {"world", "goal"})
+    removed = sorted(set(value) & {"goal"})
     if removed:
         names = ", ".join(f"models.{key}" for key in removed)
         raise ValueError(f"{names} config has been removed")
@@ -273,16 +361,6 @@ def _reject_removed_updater_keys(value: dict[str, Any]) -> None:
     if removed:
         names = ", ".join(f"models.updater.{key}" for key in removed)
         raise ValueError(f"{names} config has been removed")
-
-
-def _load_observation_text_config(value: Any) -> dict[str, Any]:
-    """Load shared text observation serializer options."""
-
-    if value is None:
-        return {}
-    if not isinstance(value, dict):
-        raise ValueError("models.observation_text config must be a mapping")
-    return dict(value)
 
 
 def _load_model_role_config(value: Any) -> ModelRoleConfig:
@@ -336,6 +414,7 @@ def _read_yaml(path: str | Path) -> dict[str, Any]:
             "max_actions_per_game has been removed; use max_actions_per_level "
             "for the per-level action budget"
         )
+
     return loaded
 
 
@@ -451,6 +530,24 @@ def _non_negative_int(value: Any, *, key: str) -> int:
     parsed = int(value)
     if parsed < 0:
         raise ValueError(f"{key} must be non-negative")
+    return parsed
+
+
+def _positive_int(value: Any, *, key: str) -> int:
+    """Normalize one positive integer config value."""
+
+    parsed = int(value)
+    if parsed < 1:
+        raise ValueError(f"{key} must be at least 1")
+    return parsed
+
+
+def _ratio_float(value: Any, *, key: str) -> float:
+    """Normalize one ratio config value."""
+
+    parsed = float(value)
+    if parsed < 0 or parsed > 1:
+        raise ValueError(f"{key} must be between 0 and 1")
     return parsed
 
 

@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from dataclasses import replace
 from time import perf_counter
 
 from face_of_agi.contracts import (
+    ActionHistoryEntry,
     ActionHistoryItem,
+    ActionSpec,
     ContextDocuments,
     FrameTurnContext,
+    Observation,
     RoleContext,
     UpdaterFrameTransitionInput,
 )
@@ -21,11 +25,16 @@ from face_of_agi.models.historizer import (
 )
 from face_of_agi.models.updater import (
     AGENT_GAME_CONTEXT_KEYS,
-    AgentContextRevisionFeedback,
     AgentGameContextUpdateInput,
-    AgentProgressFeedback,
+    AgentGameContextUpdateResult,
+    AgentUpdaterMode,
     GeneralKnowledgeUpdateInput,
     UpdaterTaskRegistry,
+)
+from face_of_agi.models.world import (
+    AgentContextWorldSummary,
+    AgentWorldModel,
+    AgentWorldModelInput,
 )
 from face_of_agi.debug.bus import DebugBus
 from face_of_agi.debug.events import (
@@ -35,9 +44,10 @@ from face_of_agi.debug.events import (
 )
 from face_of_agi.orchestration.game_loop.helpers import (
     bounded_action_history,
-    prompt_action_outcome,
 )
 from face_of_agi.runtime import timing as runtime_timing
+
+DEFAULT_PROBING_MODE_CAP_RATIO = 0.35
 
 
 def apply_context_updates(
@@ -46,194 +56,215 @@ def apply_context_updates(
     contexts: ContextDocuments,
     updater_tasks: UpdaterTaskRegistry,
     debug: DebugBus,
-    state_memory: StateMemory | None,
     frame_context: FrameTurnContext,
     prior_action_history: Sequence[ActionHistoryItem],
-    agent_updater_action_history_window: int,
+    action_history_window: int,
     agent_context_history: AgentContextHistorySummary,
-    action_suppression_zero_changed_pixel_turns: int,
-    updater_stagnation_warning_zero_changed_pixel_turns: int,
     game_last_started_turns_ago: int | None,
-    score_last_advanced_turns_ago: int | None,
     game_start_reason: str | None,
-    game_restart_count: int,
+    probing_actions_window: int,
+    policy_actions_window: int,
+    probing_mode_cap_ratio: float,
     turn_id: int,
-) -> None:
-    """Apply updater P, preserving live context if updater work fails."""
-
-    previous_agent_context = contexts.agent
-    try:
-        _apply_context_updates(
-            update_input,
-            contexts=contexts,
-            updater_tasks=updater_tasks,
-            debug=debug,
-            state_memory=state_memory,
-            frame_context=frame_context,
-            prior_action_history=prior_action_history,
-            agent_updater_action_history_window=agent_updater_action_history_window,
-            agent_context_history=agent_context_history,
-            action_suppression_zero_changed_pixel_turns=(
-                action_suppression_zero_changed_pixel_turns
-            ),
-            updater_stagnation_warning_zero_changed_pixel_turns=(
-                updater_stagnation_warning_zero_changed_pixel_turns
-            ),
-            game_last_started_turns_ago=game_last_started_turns_ago,
-            score_last_advanced_turns_ago=score_last_advanced_turns_ago,
-            game_start_reason=game_start_reason,
-            game_restart_count=game_restart_count,
-            turn_id=turn_id,
-        )
-    except Exception:
-        contexts.agent = previous_agent_context
-
-
-def _apply_context_updates(
-    update_input: UpdaterFrameTransitionInput,
-    *,
-    contexts: ContextDocuments,
-    updater_tasks: UpdaterTaskRegistry,
-    debug: DebugBus,
-    state_memory: StateMemory | None,
-    frame_context: FrameTurnContext,
-    prior_action_history: Sequence[ActionHistoryItem],
-    agent_updater_action_history_window: int,
-    agent_context_history: AgentContextHistorySummary,
-    action_suppression_zero_changed_pixel_turns: int,
-    updater_stagnation_warning_zero_changed_pixel_turns: int,
-    game_last_started_turns_ago: int | None,
-    score_last_advanced_turns_ago: int | None,
-    game_start_reason: str | None,
-    game_restart_count: int,
-    turn_id: int,
-) -> None:
+    previous_level_solution_method: str = "",
+) -> tuple[tuple[ActionSpec, ...], AgentUpdaterMode]:
     """Apply updater P to the live working contexts before persistence."""
 
     if update_input.actual_next_observation is None:
         raise ValueError("game updaters require the current observation")
+    if update_input.action_history_entry is None:
+        raise ValueError("game updaters require a current action history entry")
 
-    agent_updater_prior_action_history = bounded_action_history(
+    bounded_prior_action_history = bounded_action_history(
         prior_action_history,
-        window=agent_updater_action_history_window,
-        key="agent_updater_action_history_window",
+        window=action_history_window,
+        key="action_history_window",
     )
 
-    agent_updater = updater_tasks.require_agent_game_updater()
     agent_action_history = updater_action_history(
         update_input,
-        prior_action_history=agent_updater_prior_action_history,
+        prior_action_history=bounded_prior_action_history,
         updater_label="agent",
     )
-    stagnation_warning_threshold = (
-        updater_stagnation_warning_zero_changed_pixel_turns
-        if frame_context.control_mode.controllable
-        else 0
-    )
-    agent_prompt_actions = prompt_action_outcome(
-        action_space=frame_context.control_mode.allowed_actions,
-        action_history=agent_action_history,
-        action_suppression_zero_changed_pixel_turns=(
-            action_suppression_zero_changed_pixel_turns
-        ),
-        updater_stagnation_warning_zero_changed_pixel_turns=(
-            stagnation_warning_threshold
-        ),
-    )
-    fresh_game_context_after_reset = _is_fresh_game_over_reset_update(
-        game_start_reason=game_start_reason,
-        game_last_started_turns_ago=game_last_started_turns_ago,
-    )
-    previous_agent_context = _agent_previous_context_for_update(
-        contexts.agent,
-        fresh_game_context=fresh_game_context_after_reset,
-    )
-    context_revision_feedback = (
-        AgentContextRevisionFeedback()
-        if fresh_game_context_after_reset
-        else _context_revision_feedback(
-            current_context=contexts.agent.game,
-            state_memory=state_memory,
-            frame_context=frame_context,
-            lookback=len(agent_updater_prior_action_history),
-        )
-    )
-
-    agent_update_input = AgentGameContextUpdateInput(
-        previous_context=previous_agent_context,
+    result = apply_agent_context_update(
+        contexts=contexts,
+        updater_tasks=updater_tasks,
+        debug=debug,
+        frame_context=frame_context,
         current_observation=update_input.actual_next_observation,
-        allowed_actions=agent_prompt_actions.allowed_actions,
-        glossary_actions=frame_context.control_mode.allowed_actions,
-        action_history_window=agent_updater_action_history_window,
-        context_history=agent_context_history,
         action_history=agent_action_history,
-        turn_metrics=AgentProgressFeedback(
-            time_cost=update_input.turn_metrics.time_cost,
-            cumulative_score=update_input.turn_metrics.cumulative_score,
-            game_last_started_turns_ago=game_last_started_turns_ago,
-            score_last_advanced_turns_ago=score_last_advanced_turns_ago,
+        allowed_action_source=frame_context.control_mode.allowed_actions,
+        agent_context_history=agent_context_history,
+        previous_level_solution_method=previous_level_solution_method,
+        turn_id=turn_id,
+        probing_actions_window=probing_actions_window,
+        policy_actions_window=policy_actions_window,
+        action_history_window=action_history_window,
+        probing_mode_cap_ratio=probing_mode_cap_ratio,
+        fresh_game_context_after_reset=_is_fresh_game_over_reset_update(
             game_start_reason=game_start_reason,
-            game_restart_count=game_restart_count,
+            game_last_started_turns_ago=game_last_started_turns_ago,
         ),
-        context_revision_feedback=context_revision_feedback,
-        action_outcome_evidence=agent_prompt_actions.evidence,
     )
-    debug.emit(UpdaterInputCaptured(role="agent", update_input=agent_update_input))
-    started_at = perf_counter()
-    with runtime_timing.span("updater.agent_game"):
-        try:
-            contexts.agent = agent_updater.update_agent_game_context(
-                agent_update_input
-            )
-        except Exception:
-            contexts.agent = previous_agent_context
-        finally:
-            debug.emit(
-                ModelCallCompleted(
-                    role="updater.agent",
-                    duration_seconds=perf_counter() - started_at,
-                )
-            )
-            debug.emit(
-                UpdaterProviderOutputCaptured(role="agent", adapter=agent_updater)
-            )
-    debug.capture_model_inputs(frame_context, turn_id, agent_updater)
+    return result.next_actions, result.updater_mode
 
 
-def apply_general_context_updates(
+def apply_agent_context_update(
     *,
     contexts: ContextDocuments,
     updater_tasks: UpdaterTaskRegistry,
     debug: DebugBus,
-    run_id: str,
-    game_id: str,
-    stop_reason: str,
-    step_count: int,
-    completed_levels: int,
-    last_state_name: str | None,
-    state_record_ids: tuple[int, ...],
-) -> None:
-    """Apply end-of-run context updates, preserving context on any failure."""
+    frame_context: FrameTurnContext,
+    current_observation: Observation,
+    action_history: Sequence[ActionHistoryItem],
+    allowed_action_source: Sequence[ActionSpec],
+    agent_context_history: AgentContextHistorySummary,
+    turn_id: int,
+    probing_actions_window: int = 1,
+    policy_actions_window: int = 1,
+    action_history_window: int | None = None,
+    probing_mode_cap_ratio: float = DEFAULT_PROBING_MODE_CAP_RATIO,
+    previous_level_solution_method: str = "",
+    fresh_game_context_after_reset: bool = False,
+) -> AgentGameContextUpdateResult:
+    """Run exactly one mode-specific agent updater and merge its field."""
 
-    previous_agent_context = contexts.agent
-    try:
-        _apply_general_context_updates(
-            contexts=contexts,
-            updater_tasks=updater_tasks,
-            debug=debug,
-            run_id=run_id,
-            game_id=game_id,
-            stop_reason=stop_reason,
-            step_count=step_count,
-            completed_levels=completed_levels,
-            last_state_name=last_state_name,
-            state_record_ids=state_record_ids,
+    if agent_context_history.updater_mode not in {"probing", "policy"}:
+        raise RuntimeError(
+            "agent context historizer returned invalid updater_mode: "
+            f"{agent_context_history.updater_mode!r}"
         )
-    except Exception:
-        contexts.agent = previous_agent_context
+    agent_context_history = _apply_probing_mode_cap(
+        agent_context_history,
+        action_history=action_history,
+        probing_actions_window=probing_actions_window,
+        action_history_window=action_history_window,
+        probing_mode_cap_ratio=probing_mode_cap_ratio,
+    )
+    current_fields = _agent_context_fields_for_update(
+        contexts.agent.game,
+        fresh_game_context=fresh_game_context_after_reset,
+    )
+    updater_mode = agent_context_history.updater_mode
+    updated_key = _agent_context_key_for_mode(updater_mode)
+    previous_agent_context = RoleContext(
+        general=contexts.agent.general,
+        game=_dump_agent_context_fields(current_fields),
+    )
+    agent_update_input = AgentGameContextUpdateInput(
+        previous_context=previous_agent_context,
+        current_observation=current_observation,
+        allowed_actions=tuple(allowed_action_source),
+        glossary_actions=tuple(allowed_action_source),
+        context_history=agent_context_history,
+        previous_level_solution_method=previous_level_solution_method,
+        action_history=tuple(action_history),
+        actions_window=(
+            probing_actions_window
+            if updater_mode == "probing"
+            else policy_actions_window
+        ),
+    )
+    task_label = f"agent_{updater_mode}"
+    debug.emit(UpdaterInputCaptured(role=task_label, update_input=agent_update_input))
+    if updater_mode == "probing":
+        agent_updater = updater_tasks.require_agent_probing_updater()
+        span_name = "updater.agent_probing"
+        update = agent_updater.update_agent_probing_context
+    else:
+        agent_updater = updater_tasks.require_agent_policy_updater()
+        span_name = "updater.agent_policy"
+        update = agent_updater.update_agent_policy_context
+    with runtime_timing.span(span_name):
+        started_at = perf_counter()
+        try:
+            result = update(agent_update_input)
+        finally:
+            debug.emit(
+                ModelCallCompleted(
+                    role=task_label,
+                    duration_seconds=perf_counter() - started_at,
+                )
+            )
+            debug.emit(
+                UpdaterProviderOutputCaptured(role=task_label, adapter=agent_updater)
+            )
+    debug.capture_model_inputs(frame_context, turn_id, agent_updater)
+    if result.updater_mode != updater_mode:
+        raise RuntimeError(
+            "agent updater returned mismatched updater_mode: "
+            f"{result.updater_mode!r} for selected {updater_mode!r}"
+        )
+    if len(result.next_actions) != agent_update_input.actions_window:
+        raise RuntimeError(
+            f"{task_label} updater returned {len(result.next_actions)} actions, "
+            f"expected exactly {agent_update_input.actions_window}"
+        )
+    updated_fields = _agent_context_fields(result.context, expected_keys=(updated_key,))
+    if set(updated_fields) != {updated_key}:
+        raise RuntimeError(
+            f"{task_label} updater must return only {updated_key!r}"
+        )
+    merged_fields = dict(current_fields)
+    merged_fields[updated_key] = updated_fields[updated_key]
+    contexts.agent = RoleContext(
+        general=contexts.agent.general,
+        game=_dump_agent_context_fields(merged_fields),
+    )
+    return result
 
 
-def _apply_general_context_updates(
+def _apply_probing_mode_cap(
+    agent_context_history: AgentContextHistorySummary,
+    *,
+    action_history: Sequence[ActionHistoryItem],
+    probing_actions_window: int,
+    action_history_window: int | None,
+    probing_mode_cap_ratio: float,
+) -> AgentContextHistorySummary:
+    if agent_context_history.updater_mode != "probing":
+        return agent_context_history
+    if action_history_window is None or action_history_window <= 0:
+        return agent_context_history
+    bounded_history = bounded_action_history(
+        action_history,
+        window=action_history_window,
+        key="action_history_window",
+    )
+    probing_mode_count = sum(
+        1
+        for item in bounded_history
+        if (
+            isinstance(item, ActionHistoryEntry)
+            and item.controllable
+            and item.action_mode == "probing"
+        )
+    )
+    probing_ratio = (
+        probing_actions_window + probing_mode_count
+    ) / action_history_window
+    if probing_ratio <= probing_mode_cap_ratio:
+        return agent_context_history
+    return replace(
+        agent_context_history,
+        updater_mode="policy",
+        metadata={
+            **agent_context_history.metadata,
+            "updater_mode_override": {
+                "from": "probing",
+                "to": "policy",
+                "reason": "probing_mode_cap",
+                "probing_actions_window": probing_actions_window,
+                "probing_mode_count": probing_mode_count,
+                "action_history_window": action_history_window,
+                "probing_ratio": probing_ratio,
+                "cap_ratio": probing_mode_cap_ratio,
+            },
+        },
+    )
+
+
+def apply_general_context_updates(
     *,
     contexts: ContextDocuments,
     updater_tasks: UpdaterTaskRegistry,
@@ -265,21 +296,12 @@ def _apply_general_context_updates(
         **common_kwargs,
     )
     debug.emit(UpdaterInputCaptured(role="agent", update_input=agent_update_input))
-    started_at = perf_counter()
     with runtime_timing.span("updater.general_agent"):
         try:
             contexts.agent = general_updater.update_general_knowledge(
                 agent_update_input
             )
-        except Exception:
-            contexts.agent = agent_update_input.previous_context
         finally:
-            debug.emit(
-                ModelCallCompleted(
-                    role="updater.general",
-                    duration_seconds=perf_counter() - started_at,
-                )
-            )
             debug.emit(
                 UpdaterProviderOutputCaptured(role="agent", adapter=general_updater)
             )
@@ -297,14 +319,14 @@ def updater_action_history(
         raise ValueError(
             f"{updater_label} game updater requires a current action history entry"
         )
+    if update_input.action_history_entries:
+        return (
+            *prior_action_history,
+            *update_input.action_history_entries,
+        )
     return (
         *prior_action_history,
         update_input.action_history_entry,
-        *(
-            (update_input.action_history_score_advance_marker,)
-            if update_input.action_history_score_advance_marker is not None
-            else ()
-        ),
     )
 
 
@@ -319,165 +341,186 @@ def _is_fresh_game_over_reset_update(
     )
 
 
-def _agent_previous_context_for_update(
-    previous_context: RoleContext,
-    *,
-    fresh_game_context: bool,
-) -> RoleContext:
-    if not fresh_game_context:
-        return previous_context
-    return RoleContext(general=previous_context.general, game="")
-
-
-def _context_revision_feedback(
-    *,
-    current_context: str,
-    state_memory: StateMemory | None,
-    frame_context: FrameTurnContext,
-    lookback: int,
-) -> AgentContextRevisionFeedback:
-    if state_memory is None:
-        return AgentContextRevisionFeedback()
-    previous_contexts = state_memory.read_recent_agent_game_contexts(
-        game_id=frame_context.game_id,
-        run_id=frame_context.run_id,
-        before_state_id=frame_context.current_source_state_id,
-        limit=lookback,
-    )
-    return agent_context_revision_feedback(
-        current_context=current_context,
-        previous_contexts=previous_contexts,
-    )
-
-
 def summarize_agent_context_history(
     *,
     state_memory: StateMemory | None,
     frame_context: FrameTurnContext,
     historizer: AgentContextHistorizerModel | None,
     context_window: int,
+    previous_observation: Observation | None,
+    current_observation: Observation,
+    action_history: Sequence[ActionHistoryItem],
+    allowed_actions: Sequence[ActionSpec],
+    current_world_model: AgentContextWorldSummary,
     turn_id: int,
-    debug: DebugBus | None = None,
+    debug: DebugBus,
 ) -> AgentContextHistorySummary:
-    """Summarize prior agent context history for updater context."""
+    """Summarize prior agent context history without writing debug records."""
 
-    try:
-        if context_window < 0:
-            raise ValueError("agent context history window must be non-negative")
-        if context_window == 0 or state_memory is None:
-            return AgentContextHistorySummary.not_available()
-        previous_contexts = state_memory.read_agent_game_context_history(
+    if context_window < 0:
+        raise ValueError("agent context history window must be non-negative")
+    if historizer is None:
+        raise RuntimeError("agent context historizer model is not registered")
+    if context_window == 0 or state_memory is None:
+        previous_summaries: tuple[str, ...] = ()
+    else:
+        previous_summaries = state_memory.read_agent_context_history(
             game_id=frame_context.game_id,
             run_id=frame_context.run_id,
             before_state_id=frame_context.current_source_state_id,
             limit=context_window,
         )
-        if len(previous_contexts) < 2:
-            return AgentContextHistorySummary.not_available()
-        if historizer is None:
-            raise RuntimeError(
-                "agent context history is available but historizer model is not "
-                "registered"
-            )
-        history_input = AgentContextHistoryInput(
+    previous_world_model = (
+        ""
+        if state_memory is None
+        else state_memory.read_world_model_context_before(
             game_id=frame_context.game_id,
-            context_window=context_window,
-            contexts=previous_contexts,
-            metadata={
-                "run_id": frame_context.run_id,
-                "before_state_id": frame_context.current_source_state_id,
-            },
+            before_state_id=frame_context.current_source_state_id,
         )
-        with runtime_timing.span(
-            "historizer.agent_context_history",
-            turn_id=turn_id,
-            context_count=len(previous_contexts),
-        ):
-            started_at = perf_counter()
-            try:
-                summary = historizer.summarize_agent_context_history(history_input)
-            finally:
-                if debug is not None:
-                    debug.emit(
-                        ModelCallCompleted(
-                            role="historizer",
-                            duration_seconds=perf_counter() - started_at,
-                        )
-                    )
-        return summary
-    except Exception as exc:
-        return _agent_context_history_not_available(
-            fallback="historizer_error",
-            error=exc,
-        )
-
-
-def _agent_context_history_not_available(
-    *,
-    fallback: str,
-    error: Exception | None = None,
-) -> AgentContextHistorySummary:
-    summary = AgentContextHistorySummary.not_available()
-    summary.metadata = {
-        **summary.metadata,
-        "fallback": fallback,
-    }
-    if error is not None:
-        summary.metadata.update(
-            {
-                "fallback_error_type": type(error).__name__,
-                "fallback_error": str(error),
-            }
-        )
+    )
+    history_input = AgentContextHistoryInput(
+        game_id=frame_context.game_id,
+        context_window=context_window,
+        strategy_history=previous_summaries,
+        current_world_model=current_world_model,
+        previous_world_model=previous_world_model,
+        previous_observation=previous_observation,
+        current_observation=current_observation,
+        action_history=tuple(action_history),
+        allowed_actions=tuple(allowed_actions),
+        metadata={
+            "run_id": frame_context.run_id,
+            "before_state_id": frame_context.current_source_state_id,
+        },
+    )
+    with runtime_timing.span(
+        "historizer.agent_context_history",
+        turn_id=turn_id,
+        context_count=len(previous_summaries),
+    ):
+        started_at = perf_counter()
+        try:
+            summary = historizer.summarize_agent_context_history(history_input)
+        finally:
+            debug.emit(
+                ModelCallCompleted(
+                    role="historizer",
+                    duration_seconds=perf_counter() - started_at,
+                )
+            )
     return summary
 
 
-def agent_context_revision_feedback(
+def summarize_agent_world_model(
     *,
-    current_context: str,
-    previous_contexts: Sequence[str],
-) -> AgentContextRevisionFeedback:
-    """Count field staleness across consecutive prior agent contexts."""
+    state_memory: StateMemory | None,
+    frame_context: FrameTurnContext,
+    world_model: AgentWorldModel | None,
+    current_observation: Observation,
+    action_history: Sequence[ActionHistoryItem],
+    allowed_actions: Sequence[ActionSpec],
+    turn_id: int,
+    debug: DebugBus,
+) -> AgentContextWorldSummary:
+    """Summarize world-model context without selecting updater mode."""
 
-    current = _agent_context_fields(current_context)
-    if current is None:
-        return AgentContextRevisionFeedback()
-
-    active = {key: True for key in AGENT_GAME_CONTEXT_KEYS}
-    counts = {key: 0 for key in AGENT_GAME_CONTEXT_KEYS}
-    compared_turns = 0
-    for previous_context in previous_contexts:
-        previous = _agent_context_fields(previous_context)
-        if previous is None:
-            break
-        compared_turns += 1
-        for key in AGENT_GAME_CONTEXT_KEYS:
-            if active[key] and previous[key] == current[key]:
-                counts[key] += 1
-            else:
-                active[key] = False
-        if not any(active.values()):
-            break
-
-    return AgentContextRevisionFeedback(
-        compared_turns=compared_turns,
-        goals_unchanged_turns=counts["goals"],
-        game_mechanics_unchanged_turns=counts["game_mechanics"],
-        policy_unchanged_turns=counts["policy"],
-        history_unchanged_turns=counts["history"],
-        extras_unchanged_turns=counts["extras"],
+    if world_model is None:
+        raise RuntimeError("world model is not registered")
+    previous_world_model = (
+        ""
+        if state_memory is None
+        else state_memory.read_world_model_context_before(
+            game_id=frame_context.game_id,
+            before_state_id=frame_context.current_source_state_id,
+        )
     )
+    world_input = AgentWorldModelInput(
+        game_id=frame_context.game_id,
+        previous_world_model=previous_world_model,
+        current_observation=current_observation,
+        action_history=tuple(action_history),
+        allowed_actions=tuple(allowed_actions),
+        metadata={
+            "run_id": frame_context.run_id,
+            "before_state_id": frame_context.current_source_state_id,
+        },
+    )
+    with runtime_timing.span(
+        "world_model.agent_context",
+        turn_id=turn_id,
+    ):
+        started_at = perf_counter()
+        try:
+            return world_model.summarize_agent_world_model(world_input)
+        finally:
+            debug.emit(
+                ModelCallCompleted(
+                    role="world",
+                    duration_seconds=perf_counter() - started_at,
+                )
+            )
 
 
-def _agent_context_fields(text: str) -> dict[str, str] | None:
+def _agent_context_fields_for_update(
+    text: str,
+    *,
+    fresh_game_context: bool,
+) -> dict[str, Any]:
+    if fresh_game_context or not text.strip():
+        return _blank_agent_context_fields()
+    return _agent_context_fields(text)
+
+
+def agent_context_strategy_snapshot(contexts: ContextDocuments) -> dict[str, str]:
+    """Return the current two-field agent game context for history storage."""
+
+    return _agent_context_fields(contexts.agent.game)
+
+
+def _agent_context_fields(
+    text: str,
+    *,
+    expected_keys: Sequence[str] = AGENT_GAME_CONTEXT_KEYS,
+) -> dict[str, Any]:
+    expected = ", ".join(expected_keys)
     try:
         loaded = json.loads(text)
     except json.JSONDecodeError:
-        return None
+        raise RuntimeError("agent game context must be two-field JSON") from None
     if not isinstance(loaded, dict):
-        return None
-    if set(loaded) != set(AGENT_GAME_CONTEXT_KEYS):
-        return None
-    if any(not isinstance(value, str) for value in loaded.values()):
-        return None
-    return {key: loaded[key] for key in AGENT_GAME_CONTEXT_KEYS}
+        raise RuntimeError("agent game context must be a JSON object")
+    if set(loaded) != set(expected_keys):
+        raise RuntimeError(f"agent game context must contain exactly: {expected}")
+    _validate_agent_context_field_values(loaded, expected_keys=expected_keys)
+    return {key: loaded[key] for key in expected_keys}
+
+
+def _validate_agent_context_field_values(
+    fields: dict[str, Any],
+    *,
+    expected_keys: Sequence[str] = AGENT_GAME_CONTEXT_KEYS,
+) -> None:
+    for key in expected_keys:
+        if not isinstance(fields.get(key), str):
+            raise RuntimeError(f"agent game context {key} must be a string")
+
+
+def _blank_agent_context_fields() -> dict[str, Any]:
+    return {
+        "probing_strategy": "",
+        "policy_strategy": "",
+    }
+
+
+def _dump_agent_context_fields(fields: dict[str, Any]) -> str:
+    return json.dumps(
+        {key: fields[key] for key in fields},
+        indent=2,
+        ensure_ascii=False,
+    )
+
+
+def _agent_context_key_for_mode(mode: AgentUpdaterMode) -> str:
+    if mode == "probing":
+        return "probing_strategy"
+    return "policy_strategy"

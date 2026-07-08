@@ -1,42 +1,42 @@
-"""Tests for vLLM updater prompts."""
+"""Tests for the active updater P prompt adapter tasks."""
 
 from __future__ import annotations
 
 import json
 from typing import Any
 
-from arcengine import GameAction
 import pytest
+from arcengine import GameAction
+from PIL import Image
 
-from face_of_agi.contracts import ActionSpec, Observation, RoleContext
+from face_of_agi.contracts import (
+    ActionHistoryEntry,
+    ActionSpec,
+    Observation,
+    RoleContext,
+)
+from face_of_agi.models.historizer import AgentContextHistorySummary
 from face_of_agi.models.updater import (
-    AGENT_GAME_CONTEXT_KEYS,
     AgentGameContextUpdateInput,
     GeneralKnowledgeUpdateInput,
     PromptUpdateProviderResponse,
     PromptUpdateRequest,
-    PromptUpdateResult,
     PromptUpdaterAdapter,
     UpdaterConfig,
-    UpdaterContextTarget,
     UpdaterOutputError,
     agent_game_updated_context_json_schema,
     parse_agent_game_updated_context_output,
-    parse_updated_context_output,
     updated_context_json_schema,
-)
-from face_of_agi.models.updater.config import VLLMUpdaterConfig
-from face_of_agi.models.updater.providers.vllm import (
-    VLLMUpdaterAdapter,
-    VLLMUpdaterProvider,
+    updater_instruction_path,
 )
 
 
-class FakePromptUpdaterProvider:
+class FakeUpdaterProvider:
     backend = "fake"
     model = "fake-model"
 
-    def __init__(self) -> None:
+    def __init__(self, *responses: str) -> None:
+        self.responses = list(responses)
         self.requests: list[PromptUpdateRequest] = []
 
     def update_prompt(
@@ -44,270 +44,643 @@ class FakePromptUpdaterProvider:
         request: PromptUpdateRequest,
     ) -> PromptUpdateProviderResponse:
         self.requests.append(request)
-        if request.target.task == "agent_game":
-            payload = {
-                "updated_context": {
-                    key: f"{request.target.role}-{key}"
-                    for key in AGENT_GAME_CONTEXT_KEYS
-                }
-            }
-        else:
-            payload = {"updated_context": f"{request.target.role}-general"}
+        text = self.responses.pop(0)
+        return PromptUpdateProviderResponse(target=request.target, text=text)
+
+    def repair_prompt(
+        self,
+        request: PromptUpdateRequest,
+        *,
+        invalid_text: str,
+        validation_error: str,
+        attempt: int,
+    ) -> PromptUpdateProviderResponse:
+        self.requests.append(request)
+        text = self.responses.pop(0)
         return PromptUpdateProviderResponse(
             target=request.target,
-            text=json.dumps(payload),
+            text=text,
+            metadata={
+                "invalid_text": invalid_text,
+                "validation_error": validation_error,
+                "attempt": attempt,
+            },
         )
 
-    def repair_prompt(self, *args: Any, **kwargs: Any) -> PromptUpdateProviderResponse:
-        raise AssertionError("repair should not be needed")
+
+def test_instruction_paths_cover_active_tasks(tmp_path) -> None:
+    assert updater_instruction_path(
+        task="agent_probing",
+        instruction_dir=tmp_path,
+    ) == tmp_path / "agent_probing_context_updater_prompt.md"
+    assert updater_instruction_path(
+        task="agent_policy",
+        instruction_dir=tmp_path,
+    ) == tmp_path / "agent_policy_context_updater_prompt.md"
+    assert updater_instruction_path(
+        task="general",
+        role="agent",
+        instruction_dir=tmp_path,
+    ) == tmp_path / "agent_general_context_updater_prompt.md"
 
 
-class FakeCompletions:
-    def __init__(self, responses: list[dict[str, Any]]) -> None:
-        self.responses = responses
-        self.calls: list[dict[str, Any]] = []
-
-    def create(self, **kwargs: Any) -> dict[str, Any]:
-        self.calls.append(kwargs)
-        return self.responses.pop(0)
-
-
-class FakeClient:
-    def __init__(self, responses: list[dict[str, Any]]) -> None:
-        self.chat = type(
-            "FakeChat",
-            (),
-            {"completions": FakeCompletions(responses)},
-        )()
-
-
-def _grid(fill: int = 0) -> list[list[int]]:
-    return [[fill for _x in range(64)] for _y in range(64)]
-
-
-def _agent_update_input() -> AgentGameContextUpdateInput:
-    grid = _grid()
-    grid[9][8] = 3
-    return AgentGameContextUpdateInput(
-        previous_context=RoleContext(general="general", game="old game context"),
-        current_observation=Observation(id="obs-1", step=1, frame=grid),
-        allowed_actions=(ActionSpec("ACTION1"), ActionSpec(GameAction.ACTION6)),
-        glossary_actions=(ActionSpec("ACTION1"), ActionSpec(GameAction.ACTION6)),
-        action_history_window=3,
+def test_agent_game_updater_returns_structured_agent_context(tmp_path) -> None:
+    _write_instruction_files(tmp_path)
+    response = {
+        "probing_strategy": "try the newly opened path",
+        "next_actions": [{"action_id": "ACTION1"}],
+    }
+    provider = FakeUpdaterProvider(json.dumps(response))
+    updater = PromptUpdaterAdapter(
+        provider,
+        UpdaterConfig(instruction_dir=str(tmp_path)),
     )
 
+    result = updater.update_agent_probing_context(
+        AgentGameContextUpdateInput(
+            previous_context=RoleContext(general="K", game="old"),
+            current_observation=_observation(),
+            allowed_actions=(ActionSpec(action_id="ACTION1"),),
+            glossary_actions=(ActionSpec(action_id="ACTION1"),),
+            context_history=_history_summary("world updated"),
+        )
+    )
 
-def _chat_response(content: str) -> dict[str, Any]:
-    return {
-        "id": "resp-updater",
-        "model": "fake-vllm",
-        "choices": [
+    request = provider.requests[0]
+    assert request.target.role == "agent"
+    assert request.target.task == "agent_probing"
+    assert request.output_schema == agent_game_updated_context_json_schema(
+        mode="probing",
+        allowed_actions=(ActionSpec(action_id="ACTION1"),),
+    )
+    assert "probing_strategy" in request.output_schema["properties"]
+    assert "## Action glossary" in request.instructions
+    assert "- `ACTION1`: up." in request.instructions
+    assert "- `ACTION2`" not in request.instructions
+    assert request.images[0].label == "current_observation_frame"
+    assert json.loads(result.context) == {
+        "probing_strategy": "try the newly opened path"
+    }
+    assert result.next_actions[0].name == "ACTION1"
+    assert result.updater_mode == "probing"
+    assert "## Previous game context" in request.text
+    assert "## World model" in request.text
+    assert "world_description: world updated" in request.text
+    assert "special_events: none" in request.text
+    assert "action_effects:" in request.text
+    assert "world updated" in request.text
+    assert "## Probing evolution" in request.text
+    assert "probing evolved" in request.text
+    assert "## Policy evolution" in request.text
+    assert "policy evolved" in request.text
+    assert "## Strategy summary" in request.text
+    assert "strategy evolved" in request.text
+
+
+def test_agent_policy_updater_prompt_includes_historizer_evolution(
+    tmp_path,
+) -> None:
+    _write_instruction_files(tmp_path)
+    response = {
+        "policy_strategy": "reach the exit",
+        "next_actions": [{"action_id": "ACTION1"}],
+    }
+    provider = FakeUpdaterProvider(json.dumps(response))
+    updater = PromptUpdaterAdapter(
+        provider,
+        UpdaterConfig(instruction_dir=str(tmp_path)),
+    )
+
+    result = updater.update_agent_policy_context(
+        AgentGameContextUpdateInput(
+            previous_context=RoleContext(
+                game=json.dumps(
+                    {
+                        "probing_strategy": "probe actions",
+                        "policy_strategy": "reach target",
+                    }
+                )
+            ),
+            current_observation=_observation(),
+            allowed_actions=(ActionSpec(action_id="ACTION1"),),
+            glossary_actions=(ActionSpec(action_id="ACTION1"),),
+            context_history=_history_summary("world updated"),
+        )
+    )
+
+    request = provider.requests[0]
+    assert request.target.task == "agent_policy"
+    assert json.loads(result.context) == {"policy_strategy": "reach the exit"}
+    assert "## World model" in request.text
+    assert "world_description: world updated" in request.text
+    assert "action_effects:" in request.text
+    assert "## Probing evolution" in request.text
+    assert "probing evolved" in request.text
+    assert "## Policy evolution" in request.text
+    assert "policy evolved" in request.text
+    assert "## Strategy summary" in request.text
+    assert "strategy evolved" in request.text
+
+
+def test_agent_game_updater_retargets_action6_by_color_then_bbox_center(
+    tmp_path,
+) -> None:
+    _write_instruction_files(tmp_path)
+    response = {
+        "probing_strategy": "target the red tile",
+        "next_actions": [
             {
-                "message": {"role": "assistant", "content": content},
-                "finish_reason": "stop",
+                "action_id": "ACTION6",
+                "target": "the red tile",
+                "bbox": [312, 312, 469, 469],
+                "target_rgb_color": [255, 0, 0],
             }
         ],
     }
-
-
-def _assert_no_stale_text_prompt_terms(text: str) -> None:
-    lower_text = text.lower()
-    stale_terms = (
-        "attached image",
-        "attached frame",
-        "current image frame",
-        "0..1000",
-        "0 to 1000",
+    frame = Image.new("RGB", (64, 64), color=(0, 0, 0))
+    frame.putpixel((24, 24), (0, 0, 255))
+    frame.putpixel((21, 21), (255, 0, 0))
+    frame.putpixel((27, 25), (255, 0, 0))
+    provider = FakeUpdaterProvider(json.dumps(response))
+    updater = PromptUpdaterAdapter(
+        provider,
+        UpdaterConfig(
+            instruction_dir=str(tmp_path),
+            input_image_crop_arc_grid_edges=None,
+        ),
     )
-    for term in stale_terms:
-        assert term not in lower_text
+
+    result = updater.update_agent_probing_context(
+        AgentGameContextUpdateInput(
+            previous_context=RoleContext(game="old"),
+            current_observation=Observation(
+                id="obs-64",
+                step=1,
+                frame=frame,
+            ),
+            allowed_actions=(ActionSpec(action_id=GameAction.ACTION6),),
+            glossary_actions=(ActionSpec(action_id=GameAction.ACTION6),),
+            context_history=_history_summary("world updated"),
+        )
+    )
+
+    assert provider.requests[0].images[0].image.size == (64, 64)
+    assert result.next_actions[0].data == {"x": 27, "y": 25}
+    assert result.next_actions[0].target == "the red tile"
 
 
-def _text_part(content: Any) -> str:
-    assert isinstance(content, list)
-    assert content[0]["type"] == "text"
-    return content[0]["text"]
-
-
-def _image_parts(content: Any) -> list[dict[str, Any]]:
-    assert isinstance(content, list)
-    return [part for part in content if part.get("type") == "image_url"]
-
-
-def test_prompt_updater_builds_agent_observation_text_request() -> None:
-    provider = FakePromptUpdaterProvider()
-    updater = PromptUpdaterAdapter(provider=provider, config=UpdaterConfig())
-
-    result = updater.update_agent_game_context(_agent_update_input())
-
-    assert "agent-goals" in result.game
-    request = provider.requests[0]
-    assert request.target.role == "agent"
-    assert request.target.task == "agent_game"
-    _assert_no_stale_text_prompt_terms(request.instructions)
-    _assert_no_stale_text_prompt_terms(request.text)
-    assert "ARC grid 0..63 coordinates" not in request.instructions
-    assert "visible cropped coordinates" in request.instructions
-    assert "3 to 60" in request.instructions
-    assert "shape, colors" not in request.instructions
-    assert "ARC color glossary" in request.instructions
-    assert "0=white" not in request.instructions
-    assert "A=cyan" not in request.instructions
-    assert "symbol A (cyan)" not in request.instructions
-    assert "canonical glossary colors" not in request.instructions
-    assert "symbol A: light cyan" in request.instructions
-    assert "symbol 0" in request.instructions
-    assert "symbol F" in request.instructions
-    assert "A-cells" in request.instructions
-    assert "Action history window" not in request.instructions
-    assert len(request.images) == 1
-    assert request.images[0].label == "current_observation"
-    assert request.images[0].image.size == (2048, 2048)
-    assert "## Current observation" in request.text
-    assert "## current_observation\n\n### frame 0" in request.text
-    assert "x_range: 3..60" in request.text
-    assert "ACTION6(x,y 3..60,target)" in request.text
-    assert "## Action history window" not in request.text
-    assert "observation_id:" not in request.text
-    assert "crop_bounds_original_xyxy:" not in request.text
-    assert "coordinate_system:" not in request.text
-    assert "symbols:" not in request.text
-    assert "ARC color symbols" not in request.text
-    assert "image_url" not in request.text
-    assert "base64" not in request.text
-
-
-def test_vllm_updater_sends_plain_text_message() -> None:
-    updated_context = {
-        "updated_context": {
-            key: f"updated {key}" for key in AGENT_GAME_CONTEXT_KEYS
-        }
+def test_agent_game_updater_history_renders_action6_in_model_space(
+    tmp_path,
+) -> None:
+    _write_instruction_files(tmp_path)
+    response = {
+        "probing_strategy": "choose action one",
+        "next_actions": [{"action_id": "ACTION1"}],
     }
-    client = FakeClient([_chat_response(json.dumps(updated_context))])
-    updater = VLLMUpdaterAdapter(
-        VLLMUpdaterConfig(model="fake-vllm", repair_attempts=0),
-        client=client,
+    provider = FakeUpdaterProvider(json.dumps(response))
+    updater = PromptUpdaterAdapter(
+        provider,
+        UpdaterConfig(instruction_dir=str(tmp_path)),
     )
 
-    result = updater.update_agent_game_context(_agent_update_input())
+    updater.update_agent_probing_context(
+        AgentGameContextUpdateInput(
+            previous_context=RoleContext(game="old"),
+            current_observation=_observation(),
+            allowed_actions=(
+                ActionSpec(action_id="ACTION1"),
+                ActionSpec(action_id=GameAction.ACTION6),
+            ),
+            glossary_actions=(
+                ActionSpec(action_id="ACTION1"),
+                ActionSpec(action_id=GameAction.ACTION6),
+            ),
+            context_history=_history_summary("world updated"),
+            action_history=(
+                ActionHistoryEntry(
+                    action=ActionSpec(
+                        action_id=GameAction.ACTION6,
+                        data={"x": 32, "y": 43},
+                        target="the lower middle tile",
+                    ),
+                    controllable=True,
+                    changed_pixel_count=4,
+                    change_summary="Targeted a point.",
+                    action_mode="probing",
+                ),
+            ),
+        )
+    )
 
-    assert "updated goals" in result.game
-    request = client.chat.completions.calls[0]
-    _assert_no_stale_text_prompt_terms(json.dumps(request))
-    text = _text_part(request["messages"][1]["content"])
-    assert "## Current observation" in text
-    image_parts = _image_parts(request["messages"][1]["content"])
-    assert len(image_parts) == 1
-    assert image_parts[0]["image_url"]["url"].startswith("data:image/png;base64,")
-    serialized = json.dumps(request)
-    assert "image_url" in serialized
-    assert "data:image/png;base64," in serialized
+    text = provider.requests[0].text
+    assert 'ACTION6 target="the lower middle tile"' in text
+    assert '{"x": 500, "y": 696}' not in text
+    assert "[changed_pixels=4%]" in text
 
 
-def test_general_updater_uses_text_json_payload() -> None:
-    provider = FakePromptUpdaterProvider()
-    updater = PromptUpdaterAdapter(provider=provider, config=UpdaterConfig())
+def test_general_updater_updates_agent_general_context(tmp_path) -> None:
+    _write_instruction_files(tmp_path)
+    provider = FakeUpdaterProvider(
+        json.dumps({"updated_context": "new general context"})
+    )
+    updater = PromptUpdaterAdapter(
+        provider,
+        UpdaterConfig(instruction_dir=str(tmp_path)),
+    )
 
     result = updater.update_general_knowledge(
         GeneralKnowledgeUpdateInput(
             role="agent",
-            previous_context=RoleContext(general="old general", game="game"),
+            previous_context=RoleContext(general="old K", game="live L"),
             run_id="run-1",
             game_id="game-1",
         )
     )
 
-    assert result.general == "agent-general"
     request = provider.requests[0]
+    assert request.target.role == "agent"
     assert request.target.task == "general"
-    assert isinstance(json.loads(request.text), dict)
-    assert "ARC color glossary" not in request.instructions
+    assert request.output_schema == updated_context_json_schema()
+    assert result == RoleContext(general="new general context", game="live L")
 
 
-def test_updater_output_parsers_accept_expected_json() -> None:
-    assert parse_updated_context_output('{"updated_context": "new"}') == "new"
+def test_agent_game_updater_repairs_invalid_output(tmp_path) -> None:
+    _write_instruction_files(tmp_path)
+    repaired = {
+        "probing_strategy": "repair probing plan",
+        "next_actions": [{"action_id": "ACTION1"}],
+    }
+    provider = FakeUpdaterProvider("{}", json.dumps(repaired))
+    updater = PromptUpdaterAdapter(
+        provider,
+        UpdaterConfig(instruction_dir=str(tmp_path), repair_attempts=1),
+    )
 
-    parsed = parse_agent_game_updated_context_output(
+    result = updater.update_agent_probing_context(
+        AgentGameContextUpdateInput(
+            previous_context=RoleContext(game="old"),
+            current_observation=_observation(),
+            allowed_actions=(ActionSpec(action_id="ACTION1"),),
+            glossary_actions=(ActionSpec(action_id="ACTION1"),),
+            context_history=_history_summary("world repaired"),
+        )
+    )
+
+    assert len(provider.requests) == 2
+    assert json.loads(result.context) == {
+        "probing_strategy": "repair probing plan"
+    }
+
+
+def test_agent_probing_updater_falls_back_after_repair_exhaustion(
+    tmp_path,
+    caplog,
+) -> None:
+    _write_instruction_files(tmp_path)
+    provider = FakeUpdaterProvider("{}")
+    updater = PromptUpdaterAdapter(
+        provider,
+        UpdaterConfig(instruction_dir=str(tmp_path), repair_attempts=0),
+    )
+
+    with caplog.at_level("ERROR"):
+        result = updater.update_agent_probing_context(
+            AgentGameContextUpdateInput(
+                previous_context=RoleContext(
+                    game=json.dumps(
+                        {
+                            "probing_strategy": "keep probing the center",
+                            "policy_strategy": "reach target",
+                        }
+                    )
+                ),
+                current_observation=Observation(
+                    id="obs-64",
+                    step=1,
+                    frame=Image.new("RGB", (64, 64), color=(1, 2, 3)),
+                ),
+                allowed_actions=(ActionSpec(action_id=GameAction.ACTION6),),
+                glossary_actions=(ActionSpec(action_id=GameAction.ACTION6),),
+                context_history=_history_summary("world fallback"),
+                actions_window=2,
+            )
+        )
+
+    assert json.loads(result.context) == {
+        "probing_strategy": "keep probing the center"
+    }
+    assert len(result.next_actions) == 2
+    assert result.next_actions[0].name == "ACTION6"
+    assert result.next_actions[0].data == {"x": 32, "y": 32}
+    assert result.next_actions[0].target == ""
+    assert "agent probing updater structured output repair exhausted" in caplog.text
+
+
+def test_agent_policy_updater_fallback_returns_action_with_empty_previous(
+    tmp_path,
+    caplog,
+) -> None:
+    _write_instruction_files(tmp_path)
+    provider = FakeUpdaterProvider("{}")
+    updater = PromptUpdaterAdapter(
+        provider,
+        UpdaterConfig(instruction_dir=str(tmp_path), repair_attempts=0),
+    )
+
+    with caplog.at_level("ERROR"):
+        result = updater.update_agent_policy_context(
+            AgentGameContextUpdateInput(
+                previous_context=RoleContext(game=""),
+                current_observation=_observation(),
+                allowed_actions=(ActionSpec(action_id="ACTION1"),),
+                glossary_actions=(ActionSpec(action_id="ACTION1"),),
+                context_history=_history_summary("world fallback"),
+            )
+        )
+
+    assert json.loads(result.context) == {"policy_strategy": ""}
+    assert result.next_actions == (ActionSpec(action_id="ACTION1"),)
+    assert result.updater_mode == "policy"
+    assert "agent policy updater structured output repair exhausted" in caplog.text
+
+
+def test_agent_game_updater_uses_only_allowed_actions_for_glossary(
+    tmp_path,
+) -> None:
+    _write_instruction_files(tmp_path)
+    response = {
+        "probing_strategy": "choose action one",
+        "next_actions": [{"action_id": "ACTION1"}],
+    }
+    provider = FakeUpdaterProvider(json.dumps(response))
+    updater = PromptUpdaterAdapter(
+        provider,
+        UpdaterConfig(instruction_dir=str(tmp_path)),
+    )
+
+    updater.update_agent_probing_context(
+        AgentGameContextUpdateInput(
+            previous_context=RoleContext(general="K", game="old"),
+            current_observation=_observation(),
+            allowed_actions=(ActionSpec(action_id="ACTION1"),),
+            glossary_actions=(
+                ActionSpec(action_id="ACTION1"),
+                ActionSpec(action_id="ACTION2"),
+            ),
+            context_history=_history_summary("world updated"),
+        )
+    )
+
+    instructions = provider.requests[0].instructions
+    assert "- `ACTION1`: up." in instructions
+    assert "- `ACTION2`" not in instructions
+
+
+def test_agent_game_parser_rejects_missing_field() -> None:
+    with pytest.raises(UpdaterOutputError, match="missing keys"):
+        parse_agent_game_updated_context_output(
+            json.dumps(
+                {
+                    "next_actions": [{"action_id": "ACTION1"}],
+                }
+            ),
+            mode="policy",
+            allowed_actions=(ActionSpec(action_id="ACTION1"),),
+        )
+
+
+def test_agent_game_schema_uses_next_actions_window() -> None:
+    schema = agent_game_updated_context_json_schema(
+        mode="probing",
+        allowed_actions=(ActionSpec(action_id="ACTION1"),),
+        actions_window=3,
+    )
+
+    assert schema["required"] == ["probing_strategy", "next_actions"]
+    next_actions_schema = schema["properties"]["next_actions"]
+    assert next_actions_schema["minItems"] == 3
+    assert next_actions_schema["maxItems"] == 3
+
+
+def test_agent_game_schema_requires_action6_target_bbox_and_rgb() -> None:
+    schema = agent_game_updated_context_json_schema(
+        mode="probing",
+        allowed_actions=(ActionSpec(action_id=GameAction.ACTION6),),
+    )
+
+    action_schema = schema["properties"]["next_actions"]["items"]
+    assert action_schema["required"] == [
+        "action_id",
+        "target",
+        "bbox",
+        "target_rgb_color",
+    ]
+    assert action_schema["properties"]["target"]["type"] == "string"
+    assert action_schema["properties"]["bbox"]["minItems"] == 4
+    assert action_schema["properties"]["target_rgb_color"]["maxItems"] == 3
+
+
+def test_agent_probing_parser_accepts_summary_and_next_actions() -> None:
+    context, next_actions = parse_agent_game_updated_context_output(
         json.dumps(
             {
-                "updated_context": {
-                    key: f"value {key}" for key in AGENT_GAME_CONTEXT_KEYS
-                }
+                "probing_strategy": "probe action one",
+                "next_actions": [{"action_id": "ACTION1"}],
             }
-        )
-    )
-    assert "value goals" in parsed
-
-
-def test_updater_schemas_include_configured_max_lengths() -> None:
-    general_schema = updated_context_json_schema(general_context_max_chars=123)
-    agent_schema = agent_game_updated_context_json_schema(
-        agent_game_context_max_chars=456,
-        agent_game_context_field_max_chars=78,
+        ),
+        mode="probing",
+        allowed_actions=(ActionSpec(action_id="ACTION1"),),
     )
 
-    assert general_schema["properties"]["updated_context"]["maxLength"] == 123
-    updated_context_schema = agent_schema["properties"]["updated_context"]
-    assert "456 characters" in updated_context_schema["description"]
-    assert (
-        updated_context_schema["properties"]["goals"]["maxLength"]
-        == 78
+    assert json.loads(context) == {"probing_strategy": "probe action one"}
+    assert next_actions[0].name == "ACTION1"
+
+
+def test_agent_probing_parser_accepts_multi_action_window() -> None:
+    _, next_actions = parse_agent_game_updated_context_output(
+        json.dumps(
+            {
+                "probing_strategy": "probe a short sequence",
+                "next_actions": [
+                    {"action_id": "ACTION1"},
+                    {"action_id": "ACTION2"},
+                ],
+            }
+        ),
+        mode="probing",
+        allowed_actions=(
+            ActionSpec(action_id="ACTION1"),
+            ActionSpec(action_id="ACTION2"),
+        ),
+        actions_window=2,
     )
 
+    assert tuple(action.name for action in next_actions) == ("ACTION1", "ACTION2")
 
-def test_updater_parsers_reject_oversized_output() -> None:
-    with pytest.raises(UpdaterOutputError, match="too long"):
-        parse_updated_context_output(
-            '{"updated_context": "abcdef"}',
-            max_chars=5,
-        )
 
-    payload = {
-        "updated_context": {
-            key: ("abcdef" if key == "goals" else f"value {key}")
-            for key in AGENT_GAME_CONTEXT_KEYS
-        }
-    }
-    with pytest.raises(UpdaterOutputError, match="too long"):
+@pytest.mark.parametrize(
+    ("payload", "match"),
+    [
+        (
+            {
+                "probing_strategy": "old shape",
+                "next_action": {"action_id": "ACTION1"},
+            },
+            "unexpected keys",
+        ),
+        (
+            {"probing_strategy": "empty", "next_actions": []},
+            "must not be empty",
+        ),
+        (
+            {
+                "probing_strategy": "too few",
+                "next_actions": [
+                    {"action_id": "ACTION1"},
+                ],
+            },
+            "expected exactly the 2 action window",
+        ),
+        (
+            {
+                "probing_strategy": "too many",
+                "next_actions": [
+                    {"action_id": "ACTION1"},
+                    {"action_id": "ACTION1"},
+                ],
+            },
+            "expected exactly the 1 action window",
+        ),
+        (
+            {
+                "probing_strategy": "invalid action",
+                "next_actions": [{"action_id": "ACTION2"}],
+            },
+            "invalid",
+        ),
+        (
+            {
+                "probing_strategy": "extra",
+                "next_actions": [{"action_id": "ACTION1"}],
+                "extra": "nope",
+            },
+            "unexpected keys",
+        ),
+        (
+            {
+                "probing_strategy": "simple target",
+                "next_actions": [{"action_id": "ACTION1", "target": "a tile"}],
+            },
+            "invalid",
+        ),
+    ],
+)
+def test_agent_game_parser_rejects_invalid_next_actions(
+    payload: dict[str, Any],
+    match: str,
+) -> None:
+    actions_window = 2 if payload.get("probing_strategy") == "too few" else 1
+    with pytest.raises(UpdaterOutputError, match=match):
         parse_agent_game_updated_context_output(
             json.dumps(payload),
-            field_max_chars=5,
+            mode="probing",
+            allowed_actions=(ActionSpec(action_id="ACTION1"),),
+            actions_window=actions_window,
         )
 
 
-def test_vllm_updater_provider_clips_invalid_output_in_repair_prompt() -> None:
-    client = FakeClient([_chat_response('{"updated_context": "ok"}')])
-    provider = VLLMUpdaterProvider(
-        VLLMUpdaterConfig(
-            model="fake-vllm",
-            repair_invalid_output_preview_chars=80,
+def test_agent_game_parser_accepts_action6_bbox_and_rgb_targeting() -> None:
+    _, next_actions = parse_agent_game_updated_context_output(
+        json.dumps(
+            {
+                "probing_strategy": "probe center",
+                "next_actions": [
+                    {
+                        "action_id": "ACTION6",
+                        "target": "the lower left tile",
+                        "bbox": [0, 800, 200, 1000],
+                        "target_rgb_color": [10, 20, 30],
+                    }
+                ],
+            }
         ),
-        client=client,
-    )
-    target = UpdaterContextTarget(
-        role="agent",
-        segment="general",
-        task="general",
-        previous_context=RoleContext(general="old", game="game"),
-    )
-    request = PromptUpdateRequest(
-        target=target,
-        instructions="instructions",
-        text="input",
-        output_schema=updated_context_json_schema(),
-    )
-    invalid_text = "a" * 120 + "TAIL"
-
-    provider.repair_prompt(
-        request,
-        invalid_text=invalid_text,
-        validation_error="bad",
-        attempt=1,
+        mode="probing",
+        allowed_actions=(ActionSpec(action_id=GameAction.ACTION6),),
+        arc_grid_crop_edges=(4, 4, 4, 4),
     )
 
-    repair_text = client.chat.completions.calls[0]["messages"][1]["content"]
-    assert isinstance(repair_text, str)
-    assert "Invalid output preview:" in repair_text
-    assert "omitted" in repair_text
-    assert "TAIL" in repair_text
-    assert invalid_text not in repair_text
+    assert next_actions[0].data == {
+        "bbox": [0, 800, 200, 1000],
+        "target_rgb_color": [10, 20, 30],
+    }
+    assert next_actions[0].target == "the lower left tile"
+
+
+def test_agent_game_parser_rejects_action6_without_target() -> None:
+    with pytest.raises(UpdaterOutputError, match="invalid"):
+        parse_agent_game_updated_context_output(
+            json.dumps(
+                {
+                    "probing_strategy": "probe center",
+                    "next_actions": [
+                        {
+                            "action_id": "ACTION6",
+                            "bbox": [0, 800, 200, 1000],
+                            "target_rgb_color": [10, 20, 30],
+                        }
+                    ],
+                }
+            ),
+            mode="probing",
+            allowed_actions=(ActionSpec(action_id=GameAction.ACTION6),),
+        )
+
+
+def test_agent_game_parser_accepts_top_level_policy_strategy() -> None:
+    context, next_actions = parse_agent_game_updated_context_output(
+        json.dumps(
+            {
+                "policy_strategy": "reach the exit",
+                "next_actions": [{"action_id": "ACTION1"}],
+            }
+        ),
+        mode="policy",
+        allowed_actions=(ActionSpec(action_id="ACTION1"),),
+    )
+
+    assert json.loads(context) == {"policy_strategy": "reach the exit"}
+    assert next_actions[0].name == "ACTION1"
+
+
+def _history_summary(world_description: str) -> AgentContextHistorySummary:
+    return AgentContextHistorySummary(
+        world_description=world_description,
+        action_effects={"ACTION1": "moves up"},
+        updater_mode="probing",
+        probing_evolution="probing evolved",
+        policy_evolution="policy evolved",
+        strategy_summary="strategy evolved",
+    )
+
+
+def _write_instruction_files(path) -> None:
+    (path / "agent_probing_context_updater_prompt.md").write_text(
+        "agent probing instructions",
+        encoding="utf-8",
+    )
+    (path / "agent_policy_context_updater_prompt.md").write_text(
+        "agent policy instructions",
+        encoding="utf-8",
+    )
+    (path / "agent_general_context_updater_prompt.md").write_text(
+        "agent general instructions",
+        encoding="utf-8",
+    )
+
+
+def _observation() -> Observation:
+    return Observation(
+        id="obs-1",
+        step=1,
+        frame=Image.new("RGB", (8, 8), color=(1, 2, 3)),
+    )

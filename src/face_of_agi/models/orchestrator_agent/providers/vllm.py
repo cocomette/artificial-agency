@@ -7,6 +7,7 @@ from typing import Any
 
 from face_of_agi.contracts import ActionSpec
 from face_of_agi.debug.capture import capture_vllm_model_input
+from face_of_agi.models.image_inputs import vllm_image_content
 from face_of_agi.models.orchestrator_agent.adapter import (
     AgentProviderStep,
     AgentToolSpec,
@@ -15,24 +16,21 @@ from face_of_agi.models.orchestrator_agent.adapter import (
     ProviderToolFeedback,
 )
 from face_of_agi.models.orchestrator_agent.config import VLLMOrchestratorAgentConfig
-from face_of_agi.models.image_inputs import (
-    observation_to_cropped_image,
-    vllm_text_image_content,
-)
 from face_of_agi.models.orchestrator_agent.tooling import (
     build_agent_instructions,
     build_decision_prompt,
     final_action_repair_prompt,
     final_action_schema,
     object_get,
+    observation_images,
 )
+from face_of_agi.models.providers.openai import plain
 from face_of_agi.models.providers.vllm import (
     VLLMChatClient,
     chat_message,
     chat_message_content,
     chat_response_metadata,
     json_schema_response_format,
-    plain,
 )
 
 
@@ -75,37 +73,33 @@ class VLLMOrchestratorAgentProvider:
         """Build the initial vLLM chat messages for one X turn."""
 
         self.instructions = build_agent_instructions(
-            glossary_actions=request.glossary_actions,
-            observation_text_config=self.config.observation_text,
+            allowed_actions=request.action_space
         )
         prompt = build_decision_prompt(
             context=request.context,
-            current_observation=request.current_observation,
             action_space=request.action_space,
             recent_action_history=request.recent_action_history,
             recent_action_history_available=(
                 request.recent_action_history_available
             ),
-            action_outcome_evidence=request.action_outcome_evidence,
-            observation_text_config=self.config.observation_text,
         )
-        image = observation_to_cropped_image(
-            request.current_observation,
-            observation_text_config=self.config.observation_text,
-            frame_scale=self.config.frame_scale,
-            size=self.config.input_image_size,
-            resample=self.config.input_image_resample,
+        images = observation_images(
+            current_observation=request.current_observation,
         )
         self.messages = [
             {"role": "system", "content": self.instructions},
             {
                 "role": "user",
-                "content": vllm_text_image_content(
-                    prompt,
-                    (image,),
-                    detail=self.config.input_image_detail,
-                    mime_type=self.config.image_mime_type,
-                ),
+                "content": [
+                    {"type": "text", "text": prompt},
+                    *vllm_image_content(
+                        images,
+                        detail=self.config.input_image_detail,
+                        size=self.config.input_image_size,
+                        resample=self.config.input_image_resample,
+                        mime_type=self.config.image_mime_type,
+                    ),
+                ],
             },
         ]
 
@@ -117,10 +111,7 @@ class VLLMOrchestratorAgentProvider:
         """Call vLLM once and normalize final structured output."""
 
         del tool_specs
-        schema = final_action_schema(
-            action_space,
-            observation_text_config=self.config.observation_text,
-        )
+        schema = final_action_schema(action_space)
         response = self._chat(schema)
         message = chat_message(response)
         self.messages.append(self._assistant_message(message))
@@ -158,7 +149,6 @@ class VLLMOrchestratorAgentProvider:
                     validation_error=validation_error,
                     invalid_text=invalid_text,
                     attempt=attempt,
-                    observation_text_config=self.config.observation_text,
                 ),
             }
         )

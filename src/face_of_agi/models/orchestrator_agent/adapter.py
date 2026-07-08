@@ -9,7 +9,6 @@ from typing import Any, Protocol
 
 from face_of_agi.contracts import (
     ActionHistoryItem,
-    ActionOutcomeEvidence,
     ActionSpec,
     DecisionResult,
     ExperimentToolInvocationResult,
@@ -29,6 +28,7 @@ from face_of_agi.models.orchestrator_agent.tooling import (
     parse_action,
     parse_final_action,
 )
+from face_of_agi.models.providers.vision import resolve_model_vision_profile
 
 
 @dataclass(slots=True)
@@ -41,7 +41,6 @@ class AgentTurnRequest:
     glossary_actions: Sequence[ActionSpec]
     recent_action_history: tuple[ActionHistoryItem, ...] = ()
     recent_action_history_available: bool = True
-    action_outcome_evidence: ActionOutcomeEvidence | None = None
 
 
 @dataclass(slots=True)
@@ -125,6 +124,11 @@ class OrchestratorAgentAdapter:
         self.config = config or OrchestratorAgentConfig()
         self.provider = provider
         self.last_provider_requests: list[Any] = []
+        self.vision_profile = resolve_model_vision_profile(
+            backend=self.provider.backend,
+            model=self.provider.model,
+        )
+        self.coordinate_space = self.vision_profile.coordinate_space
 
     def decide(
         self,
@@ -137,7 +141,6 @@ class OrchestratorAgentAdapter:
         glossary_actions: Sequence[ActionSpec] | None = None,
         first_observation_ref: ObservationRef | None = None,
         recent_action_history_available: bool = True,
-        action_outcome_evidence: ActionOutcomeEvidence | None = None,
     ) -> DecisionResult:
         """Run the provider-neutral X loop until one final action is submitted."""
 
@@ -152,7 +155,6 @@ class OrchestratorAgentAdapter:
             glossary_actions=glossary_actions or action_space,
             recent_action_history=recent_action_history,
             recent_action_history_available=recent_action_history_available,
-            action_outcome_evidence=action_outcome_evidence,
         )
         self.provider.begin(request)
 
@@ -225,11 +227,7 @@ class OrchestratorAgentAdapter:
                     final_action = parse_final_action(
                         response.final_output,
                         action_space,
-                        observation_text_config=getattr(
-                            self.config,
-                            "observation_text",
-                            None,
-                        ),
+                        coordinate_space=self.coordinate_space,
                     )
                 except Exception as exc:
                     raise AgentOutputError(
@@ -341,11 +339,7 @@ class OrchestratorAgentAdapter:
             action = parse_action(
                 args.get("action"),
                 action_space,
-                observation_text_config=getattr(
-                    self.config,
-                    "observation_text",
-                    None,
-                ),
+                coordinate_space=self.coordinate_space,
             )
         return ToolCall(
             tool=provider_call.name,  # type: ignore[arg-type]

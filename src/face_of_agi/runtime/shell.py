@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TextIO
 
+from face_of_agi.agent_creator import AgentCreatorService, AgentCreatorStore
 from face_of_agi.contracts import (
     ContextDocuments,
     GameRunResult,
@@ -26,32 +27,71 @@ from face_of_agi.memory import ExperimentalMemory, SQLiteDatabase, StateMemory
 from face_of_agi.models import (
     ChangeSummaryAdapter,
     ModelRegistry,
+    OllamaChangeSummaryConfig,
+    OllamaHistorizerConfig,
+    OllamaLevelSummaryConfig,
+    OllamaOrchestratorAgentConfig,
+    OpenAIChangeSummaryConfig,
+    OpenAIHistorizerConfig,
+    OpenAILevelSummaryConfig,
+    OpenAIOrchestratorAgentConfig,
+    OpenAIUpdaterConfig,
+    OpenAIWorldModelConfig,
+    OllamaUpdaterConfig,
+    OllamaWorldModelConfig,
     OrchestratorAgentConfig,
+    UpdaterConfig,
     UpdaterTaskRegistry,
     VLLMChangeSummaryConfig,
     VLLMHistorizerConfig,
+    VLLMLevelSummaryConfig,
     VLLMOrchestratorAgentConfig,
     VLLMUpdaterConfig,
+    VLLMWorldModelConfig,
+)
+from face_of_agi.models.agent_creator.config import (
+    OllamaAgentCreatorConfig,
+    VLLMAgentCreatorConfig,
+)
+from face_of_agi.models.agent_creator.providers import (
+    OllamaAgentCreatorAdapter,
+    VLLMAgentCreatorAdapter,
 )
 from face_of_agi.models.orchestrator_agent.providers import (
+    OllamaOrchestratorAgentAdapter,
+    OpenAIOrchestratorAgentAdapter,
     VLLMOrchestratorAgentAdapter,
 )
 from face_of_agi.models.historizer.providers import (
+    OllamaHistorizerAdapter,
+    OpenAIHistorizerAdapter,
     VLLMHistorizerAdapter,
 )
-from face_of_agi.models.updater.providers import VLLMUpdaterAdapter
+from face_of_agi.models.level_summary.providers import (
+    OllamaLevelSummaryAdapter,
+    OpenAILevelSummaryAdapter,
+    VLLMLevelSummaryAdapter,
+)
+from face_of_agi.models.updater.providers import (
+    ConfigurableUpdaterAdapter,
+    HuggingFaceUpdaterAdapter,
+    OllamaUpdaterAdapter,
+    OpenAIUpdaterAdapter,
+    VLLMUpdaterAdapter,
+)
+from face_of_agi.models.world.providers import (
+    OllamaWorldModelAdapter,
+    OpenAIWorldModelAdapter,
+    VLLMWorldModelAdapter,
+)
 from face_of_agi.orchestration import Orchestrator
+from face_of_agi.runtime.agent_creator_paths import (
+    allocate_agent_creator_database_path,
+)
 from face_of_agi.runtime.loop import RuntimeLoop
 from face_of_agi.runtime.parallel import ParallelGameRunSpec, ParallelRuntimeLoop
 
 DEFAULT_DATABASE_PATH = Path("runs/memory.sqlite")
-_ROLE_CONFIG_KEYS_NOT_PROVIDER_OPTIONS = {
-    "input_image_detail",
-    "input_image_size",
-    "input_image_resample",
-    "image_mime_type",
-    "frame_scale",
-}
 
 
 def main() -> None:
@@ -109,6 +149,7 @@ def main() -> None:
     if playback_request is not None:
         environment_config.game_id = playback_request.game_id
         environment_config.use_learned_contexts = False
+        environment_config.agent_creator.use_learned_roles = False
     else:
         environment_config.game_id = _resolve_selected_game_id(environment_config)
     runtime_config = RuntimeConfig(
@@ -118,10 +159,27 @@ def main() -> None:
     model_registry = _build_model_registry(
         agent_config=environment_config.models.agent,
         change_config=environment_config.models.change,
+        world_config=environment_config.models.world,
         historizer_config=environment_config.models.historizer,
+        level_summary_config=environment_config.models.level_summary,
+        agent_creator_config=environment_config.models.agent_creator,
+        agent_creator_role_author_config=(
+            environment_config.models.agent_creator_role_author
+        ),
         shared_vlm_config=environment_config.models.shared_vlm,
-        observation_text_config=environment_config.models.observation_text,
         updater_config=environment_config.models.updater,
+    )
+    agent_creator_service = _maybe_build_agent_creator_service(
+        environment_config.agent_creator.base_learned_roles_file,
+        model_registry,
+        memory_database_path=database_path,
+        batch_size=environment_config.agent_creator.batch_size,
+        max_tool_calls=environment_config.agent_creator.max_tool_calls,
+        max_roles=environment_config.agent_creator.max_roles,
+        strategy_history_window=(
+            environment_config.agent_creator.strategy_history_window
+        ),
+        use_learned_roles=environment_config.agent_creator.use_learned_roles,
     )
     contexts = None
     if playback_request is not None:
@@ -150,6 +208,7 @@ def main() -> None:
             ),
             models=model_registry,
             contexts=contexts,
+            agent_creator_service=agent_creator_service,
         )
     )
 
@@ -162,6 +221,9 @@ def main() -> None:
     except Exception as exc:
         print(f"starter shell failed: {exc}")
         raise SystemExit(1) from exc
+    finally:
+        if agent_creator_service is not None:
+            agent_creator_service.close()
 
     if not isinstance(result, GameRunResult):
         raise RuntimeError("starter shell expected a single-game runtime result")
@@ -211,15 +273,50 @@ def _run_parallel_config(
         )
         for game_index, game_id in selected_games
     )
-    return ParallelRuntimeLoop(
-        _run_parallel_game,
-        trace_output=trace_output,
-    ).run(
-        batch_run_id=batch_run_id,
-        specs=specs,
-        max_parallel_games=base_environment_config.max_parallel_games,
-        max_game_retries=base_environment_config.max_game_retries,
+    creator_role_config = _with_shared_vlm_role_config(
+        base_environment_config.models.agent_creator,
+        base_environment_config.models.shared_vlm,
     )
+    creator_role_author_config = _with_shared_vlm_role_config(
+        base_environment_config.models.agent_creator_role_author,
+        base_environment_config.models.shared_vlm,
+    )
+    shared_ollama_client = _shared_ollama_client(
+        base_environment_config.models.shared_vlm
+    )
+    agent_creator_service = _maybe_build_agent_creator_service(
+        base_environment_config.agent_creator.base_learned_roles_file,
+        _build_agent_creator_registry(
+            agent_creator_config=creator_role_config,
+            agent_creator_role_author_config=creator_role_author_config,
+            ollama_client=shared_ollama_client,
+        ),
+        database_dir=base_database_path.parent,
+        batch_size=base_environment_config.agent_creator.batch_size,
+        max_tool_calls=base_environment_config.agent_creator.max_tool_calls,
+        max_roles=base_environment_config.agent_creator.max_roles,
+        strategy_history_window=(
+            base_environment_config.agent_creator.strategy_history_window
+        ),
+        use_learned_roles=base_environment_config.agent_creator.use_learned_roles,
+    )
+    try:
+        return ParallelRuntimeLoop(
+            lambda spec, output: _run_parallel_game(
+                spec,
+                output,
+                agent_creator_service=agent_creator_service,
+            ),
+            trace_output=trace_output,
+        ).run(
+            batch_run_id=batch_run_id,
+            specs=specs,
+            max_parallel_games=base_environment_config.max_parallel_games,
+            max_game_retries=base_environment_config.max_game_retries,
+        )
+    finally:
+        if agent_creator_service is not None:
+            agent_creator_service.close()
 
 
 def _is_parallel_selection(environment_config: Any) -> bool:
@@ -235,6 +332,8 @@ def _is_parallel_selection(environment_config: Any) -> bool:
 def _run_parallel_game(
     spec: ParallelGameRunSpec,
     trace_output: TextIO,
+    *,
+    agent_creator_service: AgentCreatorService | None,
 ) -> GameRunResult:
     """Run one worker game with fresh adapters and its own SQLite database."""
 
@@ -247,9 +346,14 @@ def _run_parallel_game(
     model_registry = _build_model_registry(
         agent_config=environment_config.models.agent,
         change_config=environment_config.models.change,
+        world_config=environment_config.models.world,
         historizer_config=environment_config.models.historizer,
+        level_summary_config=environment_config.models.level_summary,
+        agent_creator_config=environment_config.models.agent_creator,
+        agent_creator_role_author_config=(
+            environment_config.models.agent_creator_role_author
+        ),
         shared_vlm_config=environment_config.models.shared_vlm,
-        observation_text_config=environment_config.models.observation_text,
         updater_config=environment_config.models.updater,
     )
     runtime = RuntimeLoop(
@@ -260,6 +364,7 @@ def _run_parallel_game(
             ),
             models=model_registry,
             contexts=ContextDocuments(),
+            agent_creator_service=agent_creator_service,
         ),
         trace_output=trace_output,
         live_turn_monitor=spec.live_turn_monitor,
@@ -419,12 +524,16 @@ def _build_orchestrator(
     experimental_memory_turn_buffer: int = 2,
     agent_config: ModelRoleConfig | None = None,
     change_config: ModelRoleConfig | None = None,
+    world_config: ModelRoleConfig | None = None,
     historizer_config: ModelRoleConfig | None = None,
+    level_summary_config: ModelRoleConfig | None = None,
+    agent_creator_config: ModelRoleConfig | None = None,
+    agent_creator_role_author_config: ModelRoleConfig | None = None,
     shared_vlm_config: ModelRoleConfig | None = None,
-    observation_text_config: dict[str, Any] | None = None,
     updater_config: UpdaterRuntimeConfig | None = None,
     contexts: ContextDocuments | None = None,
     models: ModelRegistry | None = None,
+    agent_creator_service: AgentCreatorService | None = None,
 ) -> Orchestrator:
     """Assemble orchestration with persistent SQLite-backed memory."""
 
@@ -436,13 +545,19 @@ def _build_orchestrator(
         or _build_model_registry(
             agent_config=agent_config or ModelRoleConfig(),
             change_config=change_config or ModelRoleConfig(),
+            world_config=world_config or ModelRoleConfig(),
             historizer_config=historizer_config or ModelRoleConfig(),
+            level_summary_config=level_summary_config or ModelRoleConfig(),
+            agent_creator_config=agent_creator_config or ModelRoleConfig(),
+            agent_creator_role_author_config=(
+                agent_creator_role_author_config or ModelRoleConfig()
+            ),
             shared_vlm_config=shared_vlm_config or ModelRoleConfig(),
-            observation_text_config=observation_text_config,
             updater_config=updater_config,
         ),
         contexts=contexts,
         experimental_memory_turn_buffer=experimental_memory_turn_buffer,
+        agent_creator_service=agent_creator_service,
     )
 
 
@@ -450,78 +565,185 @@ def _build_model_registry(
     *,
     agent_config: ModelRoleConfig,
     change_config: ModelRoleConfig,
+    world_config: ModelRoleConfig,
     historizer_config: ModelRoleConfig | None = None,
+    level_summary_config: ModelRoleConfig | None = None,
+    agent_creator_config: ModelRoleConfig | None = None,
+    agent_creator_role_author_config: ModelRoleConfig | None = None,
     shared_vlm_config: ModelRoleConfig | None = None,
-    observation_text_config: dict[str, Any] | None = None,
     updater_config: UpdaterRuntimeConfig | None = None,
 ) -> ModelRegistry:
     """Build model role adapters from starter YAML config."""
 
     shared_vlm_config = shared_vlm_config or ModelRoleConfig()
+    shared_ollama_client = _shared_ollama_client(shared_vlm_config)
     change_role_config = _with_shared_vlm_role_config(
         change_config,
+        shared_vlm_config,
+    )
+    world_role_config = _with_shared_vlm_role_config(
+        world_config,
         shared_vlm_config,
     )
     historizer_role_config = _with_shared_vlm_role_config(
         historizer_config or ModelRoleConfig(),
         shared_vlm_config,
     )
-    observation_text_config = observation_text_config or {}
-    return ModelRegistry(
-        orchestrator_agent=_build_agent(
-            _with_observation_text_config(
-                _with_shared_vlm_role_config(agent_config, shared_vlm_config),
-                observation_text_config,
-            ),
+    level_summary_role_config = _with_shared_vlm_role_config(
+        level_summary_config or ModelRoleConfig(),
+        shared_vlm_config,
+    )
+    agent_creator_registry = _build_agent_creator_registry(
+        agent_creator_config=_with_shared_vlm_role_config(
+            agent_creator_config or ModelRoleConfig(),
+            shared_vlm_config,
         ),
+        agent_creator_role_author_config=_with_shared_vlm_role_config(
+            agent_creator_role_author_config or ModelRoleConfig(),
+            shared_vlm_config,
+        ),
+        ollama_client=shared_ollama_client,
+    )
+    return ModelRegistry(
+        orchestrator_agent=None,
         change_summary_model=_build_change_summary_model(
-            _with_observation_text_config(change_role_config, observation_text_config),
+            change_role_config,
+            ollama_client=shared_ollama_client,
+        ),
+        world_model=_build_world_model(
+            world_role_config,
+            ollama_client=shared_ollama_client,
         ),
         agent_context_historizer_model=_build_historizer_model(
             historizer_role_config,
+            ollama_client=shared_ollama_client,
+        ),
+        level_solution_summarizer=_build_level_summary_model(
+            level_summary_role_config,
+            ollama_client=shared_ollama_client,
+        ),
+        agent_creator_model=agent_creator_registry.agent_creator_model,
+        agent_creator_role_author_model=(
+            agent_creator_registry.agent_creator_role_author_model
         ),
         updater_tasks=_build_updater_tasks(
-            _with_observation_text_updater_config(
-                _with_shared_vlm_updater_config(updater_config, shared_vlm_config),
-                observation_text_config,
-            ),
+            _with_shared_vlm_updater_config(updater_config, shared_vlm_config),
+            ollama_client=shared_ollama_client,
         ),
     )
 
 
 def _build_change_summary_model(
     config: ModelRoleConfig,
+    *,
+    ollama_client: object | None = None,
 ) -> object | None:
     """Build the selected transition change summary adapter."""
 
     if config.backend is None or config.backend == "":
         raise ValueError("models.change.backend is required")
     backend = config.backend.lower()
+    if backend == "openai":
+        _require_model("change", backend, config)
+        return ChangeSummaryAdapter(
+            OpenAIChangeSummaryConfig(
+                **_config_kwargs(config, OpenAIChangeSummaryConfig)
+            )
+        )
+    if backend == "ollama":
+        _require_model("change", backend, config)
+        return ChangeSummaryAdapter(
+            OllamaChangeSummaryConfig(
+                **_config_kwargs(config, OllamaChangeSummaryConfig)
+            ),
+            client=ollama_client,
+        )
     if backend == "vllm":
         _require_role_model("models.change", backend, config)
-        _reject_removed_role_options(
-            config,
-            role_path="models.change",
-            removed={
-                "max_evidence_frames": "max_frames_per_call",
-            },
-        )
         return ChangeSummaryAdapter(
             VLLMChangeSummaryConfig(
                 **_config_kwargs(config, VLLMChangeSummaryConfig)
             )
         )
-    raise ValueError(f"unsupported change backend: {config.backend}; use vllm")
+    if backend in {"huggingface", "huggingface-diffusers", "diffusers"}:
+        raise NotImplementedError(
+            "Hugging Face change summary provider is not implemented yet"
+        )
+    if backend == "configurable":
+        raise NotImplementedError(
+            "Configurable change summary provider is not implemented yet"
+        )
+    raise ValueError(f"unknown change backend: {config.backend}")
+
+
+def _build_world_model(
+    config: ModelRoleConfig,
+    *,
+    ollama_client: object | None = None,
+) -> object | None:
+    """Build the selected agent world-model adapter."""
+
+    if config.backend is None or config.backend == "":
+        raise ValueError("models.world.backend is required")
+    backend = config.backend.lower()
+    if backend == "openai":
+        _require_model("world", backend, config)
+        return OpenAIWorldModelAdapter(
+            OpenAIWorldModelConfig(
+                **_config_kwargs(config, OpenAIWorldModelConfig)
+            )
+        )
+    if backend == "ollama":
+        _require_model("world", backend, config)
+        return OllamaWorldModelAdapter(
+            OllamaWorldModelConfig(
+                **_config_kwargs(config, OllamaWorldModelConfig)
+            ),
+            client=ollama_client,
+        )
+    if backend == "vllm":
+        _require_role_model("models.world", backend, config)
+        return VLLMWorldModelAdapter(
+            VLLMWorldModelConfig(
+                **_config_kwargs(config, VLLMWorldModelConfig)
+            )
+        )
+    if backend in {"huggingface", "huggingface-diffusers", "diffusers"}:
+        raise NotImplementedError(
+            "Hugging Face world model provider is not implemented yet"
+        )
+    if backend == "configurable":
+        raise NotImplementedError(
+            "Configurable world model provider is not implemented yet"
+        )
+    raise ValueError(f"unknown world backend: {config.backend}")
 
 
 def _build_historizer_model(
     config: ModelRoleConfig,
+    *,
+    ollama_client: object | None = None,
 ) -> object | None:
     """Build the selected agent context historizer adapter."""
 
     if config.backend is None or config.backend == "":
-        return None
+        raise ValueError("models.historizer.backend is required")
     backend = config.backend.lower()
+    if backend == "openai":
+        _require_model("historizer", backend, config)
+        return OpenAIHistorizerAdapter(
+            OpenAIHistorizerConfig(
+                **_config_kwargs(config, OpenAIHistorizerConfig)
+            )
+        )
+    if backend == "ollama":
+        _require_model("historizer", backend, config)
+        return OllamaHistorizerAdapter(
+            OllamaHistorizerConfig(
+                **_config_kwargs(config, OllamaHistorizerConfig)
+            ),
+            client=ollama_client,
+        )
     if backend == "vllm":
         _require_role_model("models.historizer", backend, config)
         return VLLMHistorizerAdapter(
@@ -529,17 +751,236 @@ def _build_historizer_model(
                 **_config_kwargs(config, VLLMHistorizerConfig)
             )
         )
-    raise ValueError(f"unsupported historizer backend: {config.backend}; use vllm")
+    if backend in {"huggingface", "huggingface-diffusers", "diffusers"}:
+        raise NotImplementedError(
+            "Hugging Face historizer provider is not implemented yet"
+        )
+    if backend == "configurable":
+        raise NotImplementedError(
+            "Configurable historizer provider is not implemented yet"
+        )
+    raise ValueError(f"unknown historizer backend: {config.backend}")
+
+
+def _build_level_summary_model(
+    config: ModelRoleConfig,
+    *,
+    ollama_client: object | None = None,
+) -> object | None:
+    """Build the selected per-level solution summarizer adapter."""
+
+    if config.backend is None or config.backend == "":
+        raise ValueError("models.level_summary.backend is required")
+    backend = config.backend.lower()
+    if backend == "openai":
+        _require_model("level_summary", backend, config)
+        return OpenAILevelSummaryAdapter(
+            OpenAILevelSummaryConfig(
+                **_config_kwargs(config, OpenAILevelSummaryConfig)
+            )
+        )
+    if backend == "ollama":
+        _require_model("level_summary", backend, config)
+        return OllamaLevelSummaryAdapter(
+            OllamaLevelSummaryConfig(
+                **_config_kwargs(config, OllamaLevelSummaryConfig)
+            ),
+            client=ollama_client,
+        )
+    if backend == "vllm":
+        _require_role_model("models.level_summary", backend, config)
+        return VLLMLevelSummaryAdapter(
+            VLLMLevelSummaryConfig(
+                **_config_kwargs(config, VLLMLevelSummaryConfig)
+            )
+        )
+    if backend in {"huggingface", "huggingface-diffusers", "diffusers"}:
+        raise NotImplementedError(
+            "Hugging Face level summary provider is not implemented yet"
+        )
+    if backend == "configurable":
+        raise NotImplementedError(
+            "Configurable level summary provider is not implemented yet"
+        )
+    raise ValueError(f"unknown level_summary backend: {config.backend}")
+
+
+def _build_agent_creator_model(
+    config: ModelRoleConfig,
+    *,
+    config_key: str = "models.agent_creator",
+    logical_name: str = "agent_creator",
+    ollama_client: object | None = None,
+) -> object:
+    """Build the selected agent creator adapter."""
+
+    if config.backend is None or config.backend == "":
+        raise ValueError(f"{config_key}.backend is required")
+    backend = config.backend.lower()
+    if backend == "ollama":
+        _require_model(logical_name, backend, config)
+        return OllamaAgentCreatorAdapter(
+            OllamaAgentCreatorConfig(
+                **_config_kwargs(config, OllamaAgentCreatorConfig)
+            ),
+            client=ollama_client,
+        )
+    if backend == "vllm":
+        _require_role_model(config_key, backend, config)
+        return VLLMAgentCreatorAdapter(
+            VLLMAgentCreatorConfig(
+                **_config_kwargs(config, VLLMAgentCreatorConfig)
+            )
+        )
+    if backend in {"huggingface", "configurable"}:
+        raise NotImplementedError(
+            f"{backend} {logical_name} provider is not implemented yet"
+        )
+    raise ValueError(f"unknown {logical_name} backend: {config.backend}")
+
+
+def _build_agent_creator_registry(
+    *,
+    agent_creator_config: ModelRoleConfig,
+    agent_creator_role_author_config: ModelRoleConfig,
+    ollama_client: object | None = None,
+) -> ModelRegistry:
+    """Build only the optional agent creator models."""
+
+    creator_enabled = bool(agent_creator_config.backend)
+    author_enabled = bool(agent_creator_role_author_config.backend)
+    if creator_enabled != author_enabled:
+        raise ValueError(
+            "models.agent_creator and models.agent_creator_role_author must "
+            "be configured together"
+        )
+    if not creator_enabled:
+        return ModelRegistry()
+    return ModelRegistry(
+        agent_creator_model=_build_agent_creator_model(
+            agent_creator_config,
+            ollama_client=ollama_client,
+        ),
+        agent_creator_role_author_model=_build_agent_creator_model(
+            agent_creator_role_author_config,
+            config_key="models.agent_creator_role_author",
+            logical_name="agent_creator_role_author",
+            ollama_client=ollama_client,
+        ),
+    )
+
+
+def _maybe_build_agent_creator_service(
+    base_learned_roles_file: str | Path,
+    registry: ModelRegistry,
+    **kwargs: Any,
+) -> AgentCreatorService | None:
+    """Build the creator service when both creator models are configured."""
+
+    if registry.agent_creator_model is None and registry.agent_creator_role_author_model is None:
+        return None
+    return _build_agent_creator_service(
+        base_learned_roles_file,
+        registry.require_agent_creator_model(),
+        registry.require_agent_creator_role_author_model(),
+        **kwargs,
+    )
+
+
+def _build_agent_creator_service(
+    base_learned_roles_file: str | Path,
+    creator_model: object,
+    role_author_model: object,
+    *,
+    memory_database_path: str | Path | None = None,
+    database_dir: str | Path | None = None,
+    batch_size: int,
+    max_tool_calls: int,
+    max_roles: int,
+    strategy_history_window: int,
+    use_learned_roles: bool = True,
+) -> AgentCreatorService:
+    """Build the shared dynamic-role creator service."""
+
+    allocation = allocate_agent_creator_database_path(
+        base_learned_roles_file,
+        memory_database_path=memory_database_path,
+        database_dir=database_dir,
+        copy_latest=use_learned_roles,
+    )
+    if use_learned_roles and allocation.copied_from is None:
+        raise RuntimeError(
+            "agent_creator.use_learned_roles is true, but no learned-role "
+            f"database was found for base {base_learned_roles_file}"
+        )
+    if use_learned_roles:
+        store = AgentCreatorStore(allocation.path)
+        store.initialize_schema()
+        if store.read_latest_complete_role_snapshot() is None:
+            raise RuntimeError(
+                "agent_creator.use_learned_roles is true, but learned-role "
+                f"database {allocation.copied_from} has no active role projection"
+            )
+        store.clear_transient_workflow_state()
+    else:
+        _reset_agent_creator_database(allocation.path)
+    if allocation.copied_from is None:
+        print(
+            "agent creator database:"
+            f" use_learned_roles={use_learned_roles}"
+            f" writing_to={allocation.path}"
+        )
+    else:
+        print(
+            "agent creator database:"
+            f" use_learned_roles={use_learned_roles}"
+            f" loaded_from={allocation.copied_from}"
+            f" writing_to={allocation.path}"
+        )
+    return AgentCreatorService(
+        store=AgentCreatorStore(allocation.path),
+        creator_model=creator_model,
+        role_author_model=role_author_model,
+        batch_size=batch_size,
+        max_tool_calls=max_tool_calls,
+        max_roles=max_roles,
+        strategy_history_window=strategy_history_window,
+    )
+
+
+def _reset_agent_creator_database(database_path: str | Path) -> None:
+    """Remove the learned-role SQLite files before starting a fresh run."""
+
+    path = Path(database_path)
+    candidates = (path, path.with_name(path.name + "-wal"), path.with_name(path.name + "-shm"))
+    for candidate in candidates:
+        if candidate.exists():
+            candidate.unlink()
 
 
 def _build_agent(
     config: ModelRoleConfig,
+    *,
+    ollama_client: object | None = None,
 ) -> object | None:
     """Build the selected X agent adapter."""
 
     if config.backend is None or config.backend == "":
         raise ValueError("models.agent.backend is required")
     backend = config.backend.lower()
+    if backend == "openai":
+        return OpenAIOrchestratorAgentAdapter(
+            OpenAIOrchestratorAgentConfig(
+                **_config_kwargs(config, OpenAIOrchestratorAgentConfig)
+            )
+        )
+    if backend == "ollama":
+        return OllamaOrchestratorAgentAdapter(
+            OllamaOrchestratorAgentConfig(
+                **_config_kwargs(config, OllamaOrchestratorAgentConfig)
+            ),
+            client=ollama_client,
+        )
     if backend == "vllm":
         _require_role_model("models.agent", backend, config)
         return VLLMOrchestratorAgentAdapter(
@@ -547,24 +988,37 @@ def _build_agent(
                 **_config_kwargs(config, VLLMOrchestratorAgentConfig)
             )
         )
-    raise ValueError(f"unsupported agent backend: {config.backend}; use vllm")
+    if backend in {"huggingface", "huggingface-diffusers"}:
+        raise NotImplementedError("Hugging Face Agent X provider is not implemented yet")
+    if backend == "configurable":
+        raise NotImplementedError("Configurable Agent X provider is not implemented yet")
+    raise ValueError(f"unknown agent backend: {config.backend}")
 
 
 def _build_updater_tasks(
     config: UpdaterRuntimeConfig | None,
+    *,
+    ollama_client: object | None = None,
 ) -> UpdaterTaskRegistry:
     """Build configured updater P task adapters."""
 
     if config is None:
         raise ValueError("models.updater config is required")
     return UpdaterTaskRegistry(
-        agent_game_updater=_build_updater_task(
-            "agent",
-            config.agent,
+        agent_probing_updater=_build_updater_task(
+            "agent_probing",
+            config.agent_probing,
+            ollama_client=ollama_client,
+        ),
+        agent_policy_updater=_build_updater_task(
+            "agent_policy",
+            config.agent_policy,
+            ollama_client=ollama_client,
         ),
         general_updater=_build_updater_task(
             "general",
             config.general,
+            ollama_client=ollama_client,
         ),
     )
 
@@ -572,21 +1026,39 @@ def _build_updater_tasks(
 def _build_updater_task(
     task_name: str,
     config: ModelRoleConfig,
+    *,
+    ollama_client: object | None = None,
 ) -> object | None:
     """Build one selected updater P task adapter."""
 
     if config.backend is None or config.backend == "":
         raise ValueError(f"models.updater.{task_name}.backend is required")
     backend = config.backend.lower()
+    updater_config = UpdaterConfig(**_config_kwargs(config, UpdaterConfig))
+    if backend == "openai":
+        _require_prompt_updater_task(task_name, backend)
+        _require_model(f"updater.{task_name}", backend, config)
+        return OpenAIUpdaterAdapter(
+            OpenAIUpdaterConfig(**_config_kwargs(config, OpenAIUpdaterConfig))
+        )
+    if backend == "ollama":
+        _require_prompt_updater_task(task_name, backend)
+        _require_model(f"updater.{task_name}", backend, config)
+        return OllamaUpdaterAdapter(
+            OllamaUpdaterConfig(**_config_kwargs(config, OllamaUpdaterConfig)),
+            client=ollama_client,
+        )
     if backend == "vllm":
         _require_prompt_updater_task(task_name, backend)
         _require_updater_model(task_name, backend, config)
         return VLLMUpdaterAdapter(
             VLLMUpdaterConfig(**_config_kwargs(config, VLLMUpdaterConfig))
         )
-    raise ValueError(
-        f"unsupported updater.{task_name} backend: {config.backend}; use vllm"
-    )
+    if backend in {"huggingface", "huggingface-diffusers"}:
+        return HuggingFaceUpdaterAdapter(updater_config)
+    if backend == "configurable":
+        return ConfigurableUpdaterAdapter(updater_config)
+    raise ValueError(f"unknown updater backend: {config.backend}")
 
 
 def _require_updater_task_config(
@@ -603,10 +1075,23 @@ def _require_updater_task_config(
 def _require_prompt_updater_task(task_name: str, backend: str) -> None:
     """Fail clearly for real updater slots that are not implemented yet."""
 
-    if task_name not in {"agent", "general"}:
+    if task_name not in {"agent_probing", "agent_policy", "general"}:
         raise NotImplementedError(
-            f"{backend} updater is implemented only for agent and general "
-            "prompt tasks"
+            f"{backend} updater is implemented only for agent probing, "
+            "agent policy, and general prompt tasks"
+        )
+
+
+def _require_model(
+    config_name: str,
+    backend: str,
+    config: ModelRoleConfig,
+) -> None:
+    """Require explicit model names for real model providers."""
+
+    if not config.model:
+        raise ValueError(
+            f"models.{config_name}.model is required for backend {backend}"
         )
 
 
@@ -630,17 +1115,20 @@ def _require_role_model(role_path: str, backend: str, config: ModelRoleConfig) -
         raise ValueError(f"{role_path}.model is required for backend {backend}")
 
 
-def _reject_removed_role_options(
-    config: ModelRoleConfig,
-    *,
-    role_path: str,
-    removed: dict[str, str],
-) -> None:
-    """Fail clearly when a role uses renamed runtime option keys."""
+def _shared_ollama_client(config: ModelRoleConfig) -> object | None:
+    """Return one shared Ollama client for local VLM roles when configured."""
 
-    for old_key, new_key in removed.items():
-        if old_key in config.options:
-            raise ValueError(f"{role_path}.{old_key} has been removed; use {new_key}")
+    if (config.backend or "").lower() != "ollama":
+        return None
+    try:
+        import ollama
+    except ImportError:
+        return None
+
+    host = config.options.get("host")
+    if host:
+        return ollama.Client(host=host)
+    return ollama
 
 
 def _with_shared_vlm_role_config(
@@ -650,11 +1138,15 @@ def _with_shared_vlm_role_config(
     """Apply shared local VLM defaults to matching local role configs."""
 
     backend = (config.backend or "").lower()
-    if backend != "vllm":
+    if backend not in {"ollama", "vllm"}:
         return config
     if backend != (shared.backend or "").lower():
         return config
-    shared_options = _shared_vllm_runtime_options(shared)
+    shared_options = (
+        _shared_ollama_runtime_options(shared)
+        if backend == "ollama"
+        else _shared_vllm_runtime_options(shared)
+    )
 
     return ModelRoleConfig(
         backend=config.backend,
@@ -685,62 +1177,53 @@ def _with_shared_vlm_updater_config(
     if config is None:
         return None
     return UpdaterRuntimeConfig(
-        agent=_with_shared_vlm_role_config(config.agent, shared),
+        agent_probing=_with_shared_vlm_role_config(
+            config.agent_probing,
+            shared,
+        ),
+        agent_policy=_with_shared_vlm_role_config(
+            config.agent_policy,
+            shared,
+        ),
         general=_with_shared_vlm_role_config(config.general, shared),
     )
+
+
+def _shared_ollama_runtime_options(config: ModelRoleConfig) -> dict[str, Any]:
+    """Return shared Ollama behavior options without changing role prompts."""
+
+    recognized = {"host", "think", "keep_alive", "options"}
+    options = {
+        key: value
+        for key, value in config.options.items()
+        if key in recognized
+    }
+    generation_options = {
+        key: value
+        for key, value in config.options.items()
+        if key not in recognized
+    }
+    if generation_options:
+        existing_options = options.get("options")
+        if isinstance(existing_options, dict):
+            options["options"] = _deep_merge_dicts(
+                existing_options,
+                generation_options,
+            )
+        elif "options" not in options:
+            options["options"] = generation_options
+    return options
 
 
 def _shared_vllm_runtime_options(config: ModelRoleConfig) -> dict[str, Any]:
     """Return shared vLLM behavior options without changing role prompts."""
 
-    server_keys = {"server", "server_args"}
-    options = {
+    modal_server_keys = {"server", "server_args"}
+    return {
         key: value
         for key, value in config.options.items()
-        if key not in server_keys
+        if key not in modal_server_keys
     }
-    server_options = config.options.get("server")
-    if (
-        "max_context_tokens" not in options
-        and isinstance(server_options, dict)
-        and server_options.get("max_model_len") is not None
-    ):
-        options["max_context_tokens"] = server_options["max_model_len"]
-    return options
-
-
-def _with_observation_text_config(
-    config: ModelRoleConfig,
-    observation_text_config: dict[str, Any],
-) -> ModelRoleConfig:
-    """Apply shared observation text options unless the role overrides them."""
-
-    if not observation_text_config or "observation_text" in config.options:
-        return config
-    return ModelRoleConfig(
-        backend=config.backend,
-        model=config.model,
-        max_tool_calls=config.max_tool_calls,
-        repair_attempts=config.repair_attempts,
-        options={
-            **config.options,
-            "observation_text": dict(observation_text_config),
-        },
-    )
-
-
-def _with_observation_text_updater_config(
-    config: UpdaterRuntimeConfig | None,
-    observation_text_config: dict[str, Any],
-) -> UpdaterRuntimeConfig | None:
-    """Apply shared observation text options to updater task configs."""
-
-    if config is None:
-        return None
-    return UpdaterRuntimeConfig(
-        agent=_with_observation_text_config(config.agent, observation_text_config),
-        general=_with_observation_text_config(config.general, observation_text_config),
-    )
 
 
 def _deep_merge_dicts(
@@ -776,7 +1259,7 @@ def _config_kwargs(config: ModelRoleConfig, config_type: type) -> dict[str, Any]
             continue
         if key in allowed:
             kwargs[key] = value
-        elif "options" in allowed and key not in _ROLE_CONFIG_KEYS_NOT_PROVIDER_OPTIONS:
+        elif "options" in allowed:
             provider_options[key] = value
 
     if "options" in allowed and provider_options:

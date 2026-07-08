@@ -3,68 +3,70 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
-AGENT_CONTEXT_HISTORY_KEYS = (
-    "goals",
-    "game_mechanics",
-    "policy",
-    "history",
-    "extras",
-)
-DEFAULT_FIELD_EVOLUTION_MAX_CHARS = 2000
+from face_of_agi.contracts import ActionHistoryItem, ActionSpec, Observation
+from face_of_agi.models.world.contracts import AgentContextWorldSummary
+
+UpdaterMode = Literal["probing", "policy"]
 
 
 def agent_context_history_json_schema(
-    *,
-    field_evolution_max_chars: int | None = DEFAULT_FIELD_EVOLUTION_MAX_CHARS,
+    allowed_actions: tuple[ActionSpec, ...] = (),
 ) -> dict[str, Any]:
     """Return the provider-neutral historizer output JSON schema."""
 
-    descriptions = {
-        "goals": "How objective and goal hypotheses changed over the context history.",
-        "game_mechanics": "How mechanics/action-effect beliefs changed over time.",
-        "policy": "How action-selection guidance changed over time.",
-        "history": "How learned outcome/progress lessons changed over time.",
-        "extras": "How miscellaneous guidance changed over time.",
-    }
     return {
         "type": "object",
         "properties": {
-            "field_evolution": {
-                "type": "object",
-                "description": (
-                    "Summary of how each agent game-context field evolved "
-                    "across the provided oldest-to-newest context history."
-                ),
-                "properties": {
-                    key: {
-                        "type": "string",
-                        "description": descriptions[key],
-                        **(
-                            {"maxLength": int(field_evolution_max_chars)}
-                            if field_evolution_max_chars is not None
-                            else {}
-                        ),
-                    }
-                    for key in AGENT_CONTEXT_HISTORY_KEYS
-                },
-                "required": list(AGENT_CONTEXT_HISTORY_KEYS),
-                "additionalProperties": False,
+            "probing_evolution": {
+                "type": "string",
+            },
+            "policy_evolution": {
+                "type": "string",
+            },
+            "strategy_summary": {
+                "type": "string",
+            },
+            "updater_mode": {
+                "type": "string",
+                "enum": ["probing", "policy"],
             },
         },
-        "required": ["field_evolution"],
+        "required": [
+            "probing_evolution",
+            "policy_evolution",
+            "strategy_summary",
+            "updater_mode",
+        ],
         "additionalProperties": False,
     }
 
 
 @dataclass(slots=True)
 class AgentContextHistoryInput:
-    """Input for summarizing prior agent game-context evolution."""
+    """Input for summarizing agent context history and selecting update mode."""
 
     game_id: str
     context_window: int
-    contexts: tuple[str, ...]
+    strategy_history: tuple[str, ...]
+    current_world_model: "AgentContextWorldSummary | None" = None
+    previous_world_model: str = ""
+    previous_observation: Observation | None = None
+    current_observation: Observation | None = None
+    action_history: tuple[ActionHistoryItem, ...] = ()
+    allowed_actions: tuple[ActionSpec, ...] = ()
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class AgentContextHistoryDecision:
+    """Historizer output fields and selected update mode."""
+
+    probing_evolution: str
+    policy_evolution: str
+    strategy_summary: str
+    updater_mode: UpdaterMode
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -72,7 +74,13 @@ class AgentContextHistoryInput:
 class AgentContextHistorySummary:
     """Summary of how prior agent game-context fields evolved."""
 
-    field_evolution: dict[str, str]
+    world_description: str
+    action_effects: dict[str, str]
+    updater_mode: UpdaterMode
+    probing_evolution: str = ""
+    policy_evolution: str = ""
+    strategy_summary: str = ""
+    special_events: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -80,9 +88,13 @@ class AgentContextHistorySummary:
         """Return an explicit summary for unavailable context history."""
 
         return cls(
-            field_evolution={
-                key: "not available" for key in AGENT_CONTEXT_HISTORY_KEYS
-            },
+            world_description="not available",
+            probing_evolution="not available",
+            policy_evolution="not available",
+            strategy_summary="not available",
+            action_effects={},
+            special_events="not available",
+            updater_mode="probing",
             metadata={"available": False},
         )
 
@@ -136,11 +148,11 @@ class PromptHistorizerProvider(Protocol):
 
 
 class AgentContextHistorizerModel(Protocol):
-    """Model role that summarizes prior agent-context field evolution."""
+    """Model role that summarizes agent-context history."""
 
     def summarize_agent_context_history(
         self,
         history_input: AgentContextHistoryInput,
     ) -> AgentContextHistorySummary:
-        """Return a field-evolution summary."""
+        """Return a history summary and next updater mode."""
         ...
