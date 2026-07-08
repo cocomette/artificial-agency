@@ -22,11 +22,17 @@ point where the agent may affect the environment.
 ## Frame Unroll Buffer
 
 `FrameUnrollBuffer` is the ordered list of frames extracted from the current
-environment response. The buffer is processed one frame at a time.
+environment response after consecutive duplicate raw frames are filtered. The
+buffer is processed one frame at a time.
 
 If the response contains one frame, the buffer has one controllable frame. If
 the response contains multiple frames, all frames except the last are
 non-controllable animation frames.
+
+Duplicate filtering is local to one environment response. For each consecutive
+identical run, orchestration keeps the rightmost frame and drops earlier
+identical frames. The final incoming frame is always retained, so the buffer
+always has a controllable final frame.
 
 ## Frame Turn
 

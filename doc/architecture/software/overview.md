@@ -1,6 +1,6 @@
 # Software Architecture Overview
 
-This folder describes the current software architecture for the ARC-AGI-3
+This folder describes the target software architecture for the ARC-AGI-3
 agent runtime. It refines the higher-level direction from
 [`../system_architecture.md`](../system_architecture.md) and the concrete stack
 choices from [`../techstack.md`](../techstack.md).
@@ -8,7 +8,9 @@ choices from [`../techstack.md`](../techstack.md).
 The architecture is modular, but not peer-to-peer. The orchestration layer is
 the middle man for the running program. It owns the main execution loop,
 communicates with the ARC-AGI environment through the environment adapter,
-calls model roles, and reads and writes SQLite-backed memory.
+calls the orchestrator agent, runs world model predictions for the current
+frame flow, maintains learned world and agent contexts, and reads and writes
+SQLite-backed memory.
 
 ## Module Map
 
@@ -30,18 +32,20 @@ side effects during a game step.
 That means:
 
 - environment frames flow into orchestration before any model sees them
-- model roles receive typed inputs composed by orchestration
+- world context flows into updater inputs through orchestration, and relevant
+  summaries reach Agent X through the updated agent context
+- world prediction outputs return to orchestration before being stored
 - updater context outputs return to orchestration before becoming active
 - SQLite reads and writes are coordinated by orchestration, not by model adapters
-- only orchestration submits final actions to the ARC-AGI environment
+- only orchestration submits the final action to the ARC-AGI environment
 - the main loop is owned by orchestration
 
 `M` is the durable source of truth for committed run state. During a turn,
-orchestration may hold live Python objects for current observations, traces,
-transition summaries, and role contexts. Those objects are the in-turn working
-state owned by orchestration; they are not a separate memory domain. When the
-turn boundary is reached, orchestration writes the authoritative result back
-to `M`.
+orchestration may hold live Python objects for the current observations,
+trace, committed prediction results, and role contexts. Those objects are the
+in-turn working state owned by orchestration; they are not a separate memory
+domain. When the turn boundary is reached, orchestration writes the
+authoritative result back to `M`.
 
 The runtime module may start the program and assemble dependencies, but it
 should not become a second controller for the game loop.
@@ -51,21 +55,20 @@ should not become a second controller for the game loop.
 At each frame turn, orchestration:
 
 1. reads the current observation and action space from the environment module
-2. loads or prewrites the current frame state in persistent memory `M`
-3. composes live working context for the orchestrator agent role
-4. either synthesizes `NONE` for animation-unroll frames or calls Agent `X` on
-   controllable final frames
+2. loads or hydrates the relevant persistent memory `M` and rolling
+   experimental memory `E`
+3. composes live working contexts for the world and orchestrator agent roles;
+   dormant goal context may still be persisted but is not used by the loop
+4. either synthesizes `NONE` for animation-unroll frames or calls the
+   orchestrator agent `X` on controllable final frames
 5. receives one final frame action from `X` or the synthetic animation decision
-6. submits that action to ARC only on controllable final frames
-7. resolves the observed next frame
-8. calls the change summary model on the observed transition
-9. summarizes recent agent context history when a historizer is configured
-10. invokes updater `P` with the live transition, trace, action history, and
-    update quantities
-11. applies updater-returned context documents to live working context
-12. persists the frame transition, trace, metrics, action history entry, and
-    current context into `M`
-13. clears per-turn transient state and advances to the next frame
-
-The current runtime exposes no real world or goal model providers. Agent tool
-contracts remain provider-neutral, but the configured tool list is empty.
+6. runs world predictions for updater evidence
+7. submits that action to the ARC-AGI environment only on controllable final
+   frames; animation-unroll frames use synthetic `NONE`
+8. invokes updater role `P` with the live transition, compact action history,
+   world predictions, current contexts, transition timing, and score/progress
+   metadata
+9. applies updater-returned context documents to the live working contexts
+10. persists the frame transition, predictions, trace, transition timing,
+   score/progress metadata, and current context documents into `M`
+11. clears or expires `E` for the completed step

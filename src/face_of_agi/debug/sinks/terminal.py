@@ -17,15 +17,14 @@ from rich.text import Text
 from rich.theme import Theme
 
 from face_of_agi.contracts import (
-    ActionHistoryItem,
-    ActionHistoryResetMarker,
-    ActionHistoryScoreAdvanceMarker,
     ActionSpec,
+    ActionHistoryEntry,
     AgentTrace,
     FrameTurnContext,
     GameRunResult,
     Observation,
     ObservationRef,
+    PostDecisionPredictions,
     RoleContext,
     ToolCall,
     ToolName,
@@ -42,10 +41,9 @@ from face_of_agi.debug.events import (
     DebugEvent,
     EnvironmentStepRecorded,
     FrameDecisionRecorded,
-    FrameTurnCompleted,
     FrameTurnStarted,
     MStatePersisted,
-    ModelCallCompleted,
+    PostDecisionPredictionsRecorded,
     RunStarted,
     RunStopped,
     ToolModelInputCaptured,
@@ -97,6 +95,8 @@ class DebugTrace:
                     "run": "bold cyan",
                     "frame": "bold blue",
                     "agent": "bold magenta",
+                    "world": "bold green",
+                    "goal": "bold yellow",
                     "updater": "bold bright_blue",
                     "memory": "bold bright_black",
                     "warning": "bold red",
@@ -166,6 +166,7 @@ class DebugTrace:
         elif isinstance(event, AgentFrameworkInputCaptured):
             self.agent_framework_input(
                 context=event.context,
+                history_anchor_observation=event.history_anchor_observation,
                 current_observation=event.current_observation,
                 action_space=event.action_space,
                 recent_action_history=event.recent_action_history,
@@ -201,6 +202,8 @@ class DebugTrace:
                 result=event.result,
                 experiment_ref=event.experiment_ref,
             )
+        elif isinstance(event, PostDecisionPredictionsRecorded):
+            self.post_decision_predictions(event.predictions)
         elif isinstance(event, EnvironmentStepRecorded):
             self.environment_step(
                 action=event.action,
@@ -213,10 +216,6 @@ class DebugTrace:
             self.updater_provider_output(role=event.role, adapter=event.adapter)
         elif isinstance(event, MStatePersisted):
             self.persisted_state(record_id=event.record_id, turn_id=event.turn_id)
-        elif isinstance(event, ModelCallCompleted):
-            return
-        elif isinstance(event, FrameTurnCompleted):
-            return
         elif isinstance(event, RunStopped):
             self.stop(event.result)
         else:
@@ -233,12 +232,7 @@ class DebugTrace:
             {
                 "run_id": run_id,
                 "game_id": game_id,
-                "level_action_budget": getattr(
-                    config,
-                    "max_actions_per_level",
-                    None,
-                ),
-                "game_level_cap": getattr(config, "max_levels_per_game", None),
+                "action_budget": getattr(config, "max_actions_per_level", None),
                 "debug_trace": getattr(config, "debug_trace", None),
                 "debug_keep_all_m_states": getattr(
                     config,
@@ -303,9 +297,10 @@ class DebugTrace:
         self,
         *,
         context: RoleContext,
+        history_anchor_observation: Observation,
         current_observation: Observation,
         action_space: Sequence[ActionSpec],
-        recent_action_history: Sequence[ActionHistoryItem],
+        recent_action_history: Sequence[ActionHistoryEntry],
         tool_runtime: Any | None,
     ) -> None:
         """Print the provider-neutral input handed to Agent X."""
@@ -316,10 +311,17 @@ class DebugTrace:
         payload: dict[str, Any] = {
             "role": "agent_x",
             "context": _role_context_payload(context),
+            "history_anchor_observation": _observation_payload(
+                history_anchor_observation
+            ),
             "current_observation": _observation_payload(current_observation),
             "action_space": [_action_payload(action) for action in action_space],
             "recent_action_history": [
-                _action_history_payload(item) for item in recent_action_history
+                {
+                    "action": _action_payload(entry.action),
+                    "controllable": entry.controllable,
+                }
+                for entry in recent_action_history
             ],
         }
         if tool_runtime is not None:
@@ -447,6 +449,26 @@ class DebugTrace:
                 "result": _tool_result_summary(result),
             },
             style=role,
+        )
+
+    def post_decision_predictions(
+        self,
+        predictions: PostDecisionPredictions,
+    ) -> None:
+        """Print post-decision prediction summaries."""
+
+        if not self.verbose_enabled():
+            return
+
+        self._json_panel(
+            "Post-decision predictions",
+            {
+                "world_prediction": _tool_result_summary(
+                    predictions.world_prediction
+                ),
+                "goal_prediction": _tool_result_summary(predictions.goal_prediction),
+            },
+            style="world",
         )
 
     def environment_step(
@@ -619,36 +641,7 @@ def _action_payload(action: ActionSpec | None) -> dict[str, Any] | None:
     return {
         "action_id": action.name,
         "data": action.data,
-        "target": action.target,
         "requires_data": action.is_complex(),
-    }
-
-
-def _action_history_payload(item: ActionHistoryItem) -> dict[str, Any]:
-    if isinstance(item, ActionHistoryResetMarker):
-        return {
-            "type": "game_reset",
-            "reason": item.reason,
-            "restart_count": item.restart_count,
-        }
-    if isinstance(item, ActionHistoryScoreAdvanceMarker):
-        return {
-            "type": "score_advance",
-            "previous_score": item.previous_score,
-            "new_score": item.new_score,
-            "delta": item.delta,
-        }
-    return {
-        "action": _action_payload(item.action),
-        "controllable": item.controllable,
-        "changed_pixel_count": item.changed_pixel_count,
-        "changed_cell_percent": item.changed_cell_percent,
-        "completed_levels": item.completed_levels,
-        "action_count": item.action_count,
-        "skipped_intermediate_animation_frame_count": (
-            item.skipped_intermediate_animation_frame_count
-        ),
-        "change_summary": item.change_summary,
     }
 
 
@@ -663,17 +656,14 @@ def _tool_result_summary(result: ToolResult | None) -> dict[str, Any] | None:
         "action": result.action,
         "explanation": result.explanation,
         "metadata": result.metadata,
-        "output": result.output,
+        "predicted_description": result.predicted_description,
     }
 
 
 def _format_action(action: ActionSpec) -> str:
-    suffix = ""
-    if action.target is not None and action.target.strip():
-        suffix = f" target={action.target.strip()!r}"
     if action.data:
-        return f"{action.name} {action.data}{suffix}"
-    return action.name + suffix
+        return f"{action.name} {action.data}"
+    return action.name
 
 
 def _display_scalar(value: Any) -> str:

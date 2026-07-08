@@ -10,8 +10,10 @@ import streamlit as st
 
 from debug.dashboard.model_inputs import (
     MODEL_INPUT_SLOTS,
+    PredictionOverlay,
     ProviderOutput,
     SentImage,
+    prediction_overlay,
     provider_output,
     records_for_slot,
     sent_images,
@@ -19,11 +21,11 @@ from debug.dashboard.model_inputs import (
 )
 
 _SENT_IMAGE_COLUMNS = 2
-_SENT_IMAGE_PREVIEW_SIZE = (1024, 1024)
+_SENT_IMAGE_PREVIEW_SIZE = (256, 256)
 
 
 def render_model_inputs(records: list[dict[str, Any]]) -> None:
-    """Render model-call subtabs for raw provider inputs."""
+    """Render six model-call subtabs for raw provider inputs."""
 
     if not records:
         st.info("No model input debug records captured for this turn.")
@@ -85,12 +87,16 @@ def _render_sent_image(image: SentImage) -> None:
     if image.image is None:
         st.warning(f"{image.label}: {image.error or 'image unavailable'}")
         return
+    width, height = image.image.size
     preview_width, preview_height = _SENT_IMAGE_PREVIEW_SIZE
     preview = image.image.resize(
         _SENT_IMAGE_PREVIEW_SIZE,
         Image.Resampling.NEAREST,
     )
-    st.caption(f"{image.label} | preview {preview_width} x {preview_height} px")
+    st.caption(
+        f"{image.label} | source {width} x {height} px | "
+        f"preview {preview_width} x {preview_height} px"
+    )
     st.image(preview, width=preview_width)
 
 
@@ -100,14 +106,37 @@ def _render_provider_output(record: dict[str, Any], *, slot: str) -> None:
         if not output.available:
             st.info("No provider output captured for this record.")
             return
+        if slot in {"world", "goal"}:
+            _render_prediction_overlay(
+                prediction_overlay(record, display_size=_SENT_IMAGE_PREVIEW_SIZE)
+            )
         _render_provider_output_payload(output)
 
 
-def _render_provider_output_payload(output: ProviderOutput) -> None:
-    if output.thinking is not None:
-        st.write("Thinking trace")
-        st.code(output.thinking, language="text")
+def _render_prediction_overlay(overlay: PredictionOverlay) -> None:
+    if overlay.image is not None:
+        width, height = overlay.image.size
+        source_width, source_height = overlay.source_size or overlay.image.size
+        st.write("Predicted bounding boxes")
+        st.image(
+            overlay.image,
+            caption=(
+                "Overlay image: first decoded provider input image "
+                f"({overlay.source_label or 'input frame'}) | "
+                f"source {source_width} x {source_height} px | "
+                f"preview {width} x {height} px | "
+                f"{overlay.drawn_count}/{overlay.area_count} boxes"
+            ),
+            width=width,
+        )
 
+    if overlay.warnings:
+        with st.expander("BBox overlay warnings", expanded=False):
+            for warning in overlay.warnings:
+                st.warning(warning)
+
+
+def _render_provider_output_payload(output: ProviderOutput) -> None:
     if output.parsed_json is not None:
         st.write("Parsed output")
         st.json(output.parsed_json)

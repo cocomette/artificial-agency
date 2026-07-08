@@ -5,9 +5,27 @@ The source implementation lives in
 `GameLoopStateMachine`. `Orchestrator` wires dependencies and invokes this
 component; it does not own the state-machine internals.
 
+## Implementation Shape
+
+The concrete implementation keeps `state_machine.py` as the coordinator and
+splits behavior into state-machine concepts:
+
+- `lifecycle.py`: run start, lifecycle checks, reset/stop, and finish behavior
+- `actions/steps.py`: ordered frame-turn step actions
+- `actions/context_updates.py`: updater actions
+- `actions/post_decision_predictions.py`: world prediction action
+- `actions/metrics.py`: action timing and progress metrics
+- `persistence.py`: M-state and model-input debug persistence actions
+- `session.py`: mutable `GameLoopSession` and immutable `FrameTurnSnapshot`
+- `helpers.py`: small frame, action, validation, and history helpers
+
+`run()` has one entry point after `start_run(...)` initializes the session, and
+one exit path through `finish_run(...)` after a terminal lifecycle state sets
+`session.running` to false.
+
 ## Invariants
 
-- Agent `X` is called only on controllable final frames.
+- `X` is called only on controllable final frames.
 - Non-final buffer frames synthesize the internal `NONE` action in
   orchestration without calling `X`.
 - Final buffer frames expose the real action list from the environment.
@@ -17,8 +35,9 @@ component; it does not own the state-machine internals.
 - The ARC environment is called only after a final controllable frame.
 - Every ARC frame is persisted as real state in `M`, including animation
   frames.
+- Agent X tool calls, when configured, must be routed through orchestration and
+  persisted in `E` before reuse.
 - The updater boundary runs after every frame decision.
-- The change summary boundary runs before updater context updates.
 
 ## States
 
@@ -37,15 +56,20 @@ Normalize the latest environment response into a `FrameUnrollBuffer`.
 If the environment returns one frame, the buffer has one controllable
 `FrameTurn`. If it returns multiple frames, all frames except the last are
 non-controllable `FrameTurn`s with synthetic `NONE` as their only action.
+Consecutive duplicate raw frames are filtered while loading the buffer: a frame
+is kept when it differs from the next incoming frame, and the last incoming
+frame is always kept.
 
 ### `ENTER_FRAME_TURN`
 
-Load or prewrite the current frame context in state memory `M`.
+Load or persist the current frame context from state memory `M`.
 
 The current frame must be represented by a stable memory reference before it is
-used in a trace. The first observation for the run remains available as a
-stable reference for `X` on controllable frames. The previous frame reference,
-when present, is the immediately prior frame turn processed by orchestration.
+used in predictions or a trace. The first observation for the run remains
+available as a stable reference for `X` on controllable frames. The previous
+frame reference, when present, is the immediately prior frame turn processed by
+orchestration; it may be an animation `NONE` turn or a real environment-action
+turn.
 
 ### `BUILD_DECISION_INPUT`
 
@@ -54,20 +78,21 @@ For controllable final frames, compose the input for `X`:
 - agent role context
 - first observation reference, previous frame reference, and current frame
   reference
-- first, previous, and current observations as `ObservationText`
+- current frame payload for active perception
 - bounded recent action history from prior frame turns
-- empty tool policy for the current vLLM-only runtime
 - action space for this frame turn
 - frame control metadata such as `controllable` and buffer position
 
 The recent action history is bounded by runtime config and includes both
-synthetic `NONE` animation decisions and real environment actions.
+synthetic `NONE` animation decisions and real environment actions. The
+model-facing prompt receives only prior action payloads plus controllability;
+full frame history and richer transition metadata stay outside the prompt.
 
 For non-final frames, orchestration does not build `X` input.
 
 ### `CALL_X`
 
-Call Agent `X` only for controllable final frames.
+Call the orchestrator agent model `X` only for controllable final frames.
 
 Decision contract:
 
@@ -75,53 +100,47 @@ Decision contract:
 
 ### `SYNTHESIZE_NONE`
 
-For non-controllable animation frames, orchestration creates the frame decision
-directly:
+For non-controllable animation frames, orchestration creates the frame
+decision directly:
 
 - final action is synthetic `NONE`
+- no `AgentToolRuntime` is created
 - no `X` provider call is made
 - the trace is marked as orchestration-generated
 
-### `RESOLVE_NEXT_SNAPSHOT`
+### `RUN_POST_DECISION_PREDICTIONS`
 
-For non-final frames:
+Run world predictions after a frame decision is available.
 
-- use the orchestration-synthesized `NONE`
-- do not call the environment
-- compare the current frame to the next buffered frame
+This state runs on both orchestration-synthesized animation decisions and
+Agent-X-selected controllable decisions:
 
-For final frames:
+- world prediction receives the current frame reference, current frame, and
+  chosen action, including synthetic `NONE` for animation frames
 
-- require `X` to return one action from the real environment action space
-- submit that action to the ARC environment adapter
-- receive the next `EnvironmentObservationBundle`
-- compare the current frame to the first relevant new frame
-
-### `SUMMARIZE_CHANGE`
-
-Run the change summary model on the observed transition. The prompt is
-text-only and uses `ObservationText` plus component deltas.
-
-The resulting summary and cropped changed-cell count become action history and
-updater evidence.
-
-### `SUMMARIZE_AGENT_CONTEXT_HISTORY`
-
-Run the agent context historizer when configured. It summarizes recent context
-revisions for updater input.
+The output is a description prediction artifact carried separately for updater
+input and persistence. The goal prediction field remains optional and unset in
+normal runtime.
 
 ### `RUN_UPDATER`
 
-Run updater `P` after each frame decision.
+Run the updater boundary after each frame decision.
 
 For non-final frames, the actual next frame is `buffer[index + 1]`.
 
 For final frames, the actual next frame is the first frame of the newly
 received environment response.
 
-The updater input is the current frame, observed next frame, decision trace,
-change summary, recent action history, context history, current context, and
-update quantities.
+The transition-level update object contains the current frame, decision trace,
+world predictions when present, transition timing, score/progress metadata, and
+the actual next frame. Timing and score/progress metadata are used by Agent X's
+prompt updater and persistence, not by the world prompt updater.
+
+Agent X's prompt updater receives compact action history plus progress
+feedback, not the live `AgentTrace`. The world prompt updater consumes the
+world prediction. Predictions are carried separately as transition artifacts
+and become durable replay data when orchestration later persists the turn into
+`M`.
 
 The updater returns revised context documents. Orchestration applies them to
 the live working `ContextDocuments` before persistence and before later model
@@ -134,11 +153,17 @@ Persist the frame turn into `M`:
 - current observed frame
 - frame control mode
 - decision trace from `X` or the orchestration-synthesized animation decision
+- world prediction when present; dormant goal prediction remains unset
 - real action if one was submitted
 - synthetic `NONE` decision if this was an animation frame
-- transition summary and turn metrics
-- current agent context after updater output has been applied
+- transition timing and score/progress metadata
+- transition metadata
+- current world, goal, and agent context documents after updater output has
+  been applied
 - references needed for replay and inspection
+
+Temporary tool outputs remain in `E` unless orchestration explicitly commits a
+selected artifact into `M`.
 
 ### `ADVANCE`
 

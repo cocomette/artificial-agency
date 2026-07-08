@@ -2,7 +2,7 @@
 
 from typing import Any
 
-__all__ = ["ParallelRuntimeLoop", "RuntimeLoop"]
+__all__ = ["RuntimeLoop"]
 
 
 def __getattr__(name: str) -> Any:
@@ -12,8 +12,4 @@ def __getattr__(name: str) -> Any:
         from face_of_agi.runtime.loop import RuntimeLoop
 
         return RuntimeLoop
-    if name == "ParallelRuntimeLoop":
-        from face_of_agi.runtime.parallel import ParallelRuntimeLoop
-
-        return ParallelRuntimeLoop
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

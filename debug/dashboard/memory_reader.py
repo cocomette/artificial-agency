@@ -16,53 +16,6 @@ from typing import Any
 from urllib.parse import quote
 
 FRAME_PAYLOAD_TYPE = "face_of_agi.frame.png_base64.v1"
-SQLITE_DATABASE_SUFFIXES = (".sqlite", ".sqlite3", ".db")
-
-
-def list_sqlite_database_files(database_folder: str | Path) -> list[Path]:
-    """Return SQLite database files directly inside a dashboard folder."""
-
-    folder = Path(database_folder)
-    if not folder.exists():
-        raise FileNotFoundError(f"memory database folder not found: {folder}")
-    if not folder.is_dir():
-        raise NotADirectoryError(f"memory database folder is not a directory: {folder}")
-
-    return sorted(
-        path
-        for path in folder.iterdir()
-        if path.is_file() and path.suffix in SQLITE_DATABASE_SUFFIXES
-    )
-
-
-def load_scoring_memory_rows(database_path: str | Path) -> list[dict[str, Any]]:
-    """Load minimal M-state fields needed for dashboard scoring."""
-
-    rows = _query_rows(
-        database_path,
-        """
-        SELECT id, game_id, run_id, turn_metrics_json, metadata_json, created_at
-        FROM m_states
-        ORDER BY id
-        """,
-    )
-    scoring_rows: list[dict[str, Any]] = []
-    turn_counters: dict[tuple[str, str], int] = {}
-    for row in rows:
-        metadata = _load_json(row["metadata_json"])
-        key = (str(row["run_id"]), str(row["game_id"]))
-        turn_counters[key] = turn_counters.get(key, 0) + 1
-        scoring_rows.append(
-            {
-                "id": int(row["id"]),
-                "game_id": str(row["game_id"]),
-                "run_id": str(row["run_id"]),
-                "turn_id": int(metadata.get("turn_id") or turn_counters[key]),
-                "turn_metrics": _load_optional_json(row["turn_metrics_json"]),
-                "created_at": str(row["created_at"]),
-            }
-        )
-    return scoring_rows
 
 
 def load_m_states(database_path: str | Path) -> list[dict[str, Any]]:
@@ -81,8 +34,12 @@ def load_m_states(database_path: str | Path) -> list[dict[str, Any]]:
             "frame_count": int(row["frame_count"]),
             "current_observation": _load_json(row["current_observation_json"]),
             "chosen_action": _load_optional_json(row["chosen_action_json"]),
+            "world_context": _load_json(row["world_context_json"]),
+            "goal_context": _load_json(row["goal_context_json"]),
             "agent_context": _load_json(row["agent_context_json"]),
             "agent_trace": _load_optional_json(row["agent_trace_json"]),
+            "world_prediction": _load_optional_json(row["world_prediction_json"]),
+            "goal_prediction": _load_optional_json(row["goal_prediction_json"]),
             "turn_metrics": _load_optional_json(
                 _row_value(row, "turn_metrics_json")
             ),
@@ -318,6 +275,19 @@ def observation_image(observation: dict[str, Any] | None) -> Any | None:
     if frames:
         return image_from_payload(frames[-1])
     return None
+
+
+def tool_result_image(result: dict[str, Any] | None) -> Any | None:
+    """Return the predicted visual frame for a ToolResult payload."""
+
+    payload = _dict(result)
+    return image_from_payload(payload.get("predicted_observation"))
+
+
+def predicted_description(result: dict[str, Any] | None) -> Any | None:
+    """Return a ToolResult structured description payload when present."""
+
+    return _dict(result).get("predicted_description")
 
 
 def action_label(action: Any) -> str:

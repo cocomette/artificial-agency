@@ -8,16 +8,64 @@ final database schema.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
+import math
 from pathlib import Path
-from typing import Any, Literal, TypeAlias
+from typing import Any, Literal, TypeAlias, TypedDict
 
 from arcengine import FrameDataRaw, GameAction, GameState
 
 MemoryDomain = Literal["state", "experimental"]
-ToolName = str
+ToolName = Literal["world", "goal"]
 ActionId: TypeAlias = GameAction | str
 FrameControlReason = Literal["animation_unroll", "real_environment_turn"]
+VisualCoordinateSpace = Literal["pixel", "normalized_1000"]
+
+
+BBox: TypeAlias = list[float]
+
+
+class DescriptionArea(TypedDict):
+    """One structured visual area description produced by S or G."""
+
+    bbox_2d: BBox
+    description: str
+
+
+DescriptionPrediction = list[DescriptionArea]
+
+
+class DescriptionPredictionError(RuntimeError):
+    """Raised when a description prediction violates the shared contract."""
+
 NONE_ACTION_ID = "NONE"
+
+BBOX_SCHEMA: dict[str, Any] = {
+    "type": "array",
+    "description": "Visual coordinates in [x0, y0, x1, y1] order.",
+    "items": {"type": "number"},
+    "minItems": 4,
+    "maxItems": 4,
+}
+
+DESCRIPTION_SCHEMA: dict[str, Any] = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "bbox_2d": BBOX_SCHEMA,
+            "description": {
+                "type": "string",
+                "description": (
+                    "Concise expected next-frame change for the currently "
+                    "bounded visible image area."
+                ),
+            },
+        },
+        "required": ["bbox_2d", "description"],
+        "additionalProperties": False,
+    },
+}
 
 
 @dataclass(slots=True)
@@ -30,7 +78,6 @@ class ActionSpec:
 
     action_id: ActionId
     data: dict[str, Any] | None = None
-    target: str | None = None
 
     @classmethod
     def none(cls) -> "ActionSpec":
@@ -66,15 +113,12 @@ class FrameControlMode:
     reason: FrameControlReason
 
     @classmethod
-    def animation_unroll(
-        cls,
-        allowed_actions: tuple[ActionSpec, ...],
-    ) -> "FrameControlMode":
+    def animation_unroll(cls) -> "FrameControlMode":
         """Return the control mode for non-final unrolled frames."""
 
         return cls(
             controllable=False,
-            allowed_actions=allowed_actions,
+            allowed_actions=(ActionSpec.none(),),
             reason="animation_unroll",
         )
 
@@ -113,6 +157,144 @@ class Observation:
         return 1
 
 
+def parse_description_prediction(
+    text: str,
+    *,
+    image_size: tuple[int, int] | None,
+    coordinate_space: VisualCoordinateSpace = "pixel",
+) -> DescriptionPrediction:
+    """Parse provider JSON text into a validated description prediction."""
+
+    try:
+        parsed = json.loads(_strip_json_fence(text.strip()))
+    except json.JSONDecodeError as exc:
+        raise DescriptionPredictionError(
+            "description prediction was not valid JSON"
+        ) from exc
+    return validate_description_prediction(
+        parsed,
+        image_size=image_size,
+        coordinate_space=coordinate_space,
+    )
+
+
+def validate_description_prediction(
+    value: Any,
+    *,
+    image_size: tuple[int, int] | None = None,
+    coordinate_space: VisualCoordinateSpace = "pixel",
+) -> DescriptionPrediction:
+    """Return a normalized description prediction or raise."""
+
+    if isinstance(value, dict) and isinstance(value.get("items"), list):
+        value = value["items"]
+    if not isinstance(value, list):
+        raise DescriptionPredictionError("description prediction must be a JSON array")
+
+    prediction: DescriptionPrediction = []
+    errors: list[str] = []
+    for index, item in enumerate(value, start=1):
+        if not isinstance(item, dict):
+            errors.append(f"item {index}: expected object")
+            continue
+        description = item.get("description")
+        if not isinstance(description, str) or not description.strip():
+            errors.append(f"item {index}: missing non-empty description")
+            continue
+        bbox, bbox_error = _validated_bbox(
+            item.get("bbox_2d"),
+            label=f"item {index} bbox_2d",
+            image_size=image_size,
+            coordinate_space=coordinate_space,
+        )
+        if bbox_error is not None:
+            errors.append(bbox_error)
+            continue
+        unexpected_keys = sorted(set(item) - {"bbox_2d", "description"})
+        if unexpected_keys:
+            errors.append(
+                f"item {index}: unexpected keys {', '.join(unexpected_keys)}"
+            )
+            continue
+        prediction.append({"bbox_2d": bbox, "description": description.strip()})
+
+    if errors:
+        raise DescriptionPredictionError("; ".join(errors))
+    return prediction
+
+
+def _validated_bbox(
+    value: Any,
+    *,
+    label: str,
+    image_size: tuple[int, int] | None,
+    coordinate_space: VisualCoordinateSpace,
+) -> tuple[BBox | None, str | None]:
+    if not isinstance(value, list):
+        return None, f"{label}: expected array [x0, y0, x1, y1]"
+    if len(value) != 4:
+        return None, f"{label}: expected 4 coordinates [x0, y0, x1, y1]"
+
+    bbox: BBox = []
+    for index, raw in enumerate(value):
+        if (
+            isinstance(raw, bool)
+            or not isinstance(raw, (int, float))
+            or not math.isfinite(float(raw))
+        ):
+            return None, f"{label}[{index}]: expected number"
+        bbox.append(float(raw))
+    if image_size is not None:
+        bbox = _bbox_in_pixel_space(
+            bbox,
+            image_size=image_size,
+            coordinate_space=coordinate_space,
+        )
+    x0, y0, x1, y1 = bbox
+    if x1 < x0 or y1 < y0:
+        return None, f"{label}: bottom-right must be greater than top-left"
+    if image_size is not None:
+        width, height = image_size
+        if not 0 <= x0 <= width or not 0 <= x1 <= width:
+            return None, f"{label}: x coordinates outside image width {width}"
+        if not 0 <= y0 <= height or not 0 <= y1 <= height:
+            return None, f"{label}: y coordinates outside image height {height}"
+    return bbox, None
+
+
+def _bbox_in_pixel_space(
+    bbox: BBox,
+    *,
+    image_size: tuple[int, int],
+    coordinate_space: VisualCoordinateSpace,
+) -> BBox:
+    if coordinate_space == "pixel":
+        return bbox
+
+    width, height = image_size
+    x0, y0, x1, y1 = bbox
+    return [
+        _clamp(x0 * width / 1000, width),
+        _clamp(y0 * height / 1000, height),
+        _clamp(x1 * width / 1000, width),
+        _clamp(y1 * height / 1000, height),
+    ]
+
+
+def _clamp(value: float, size: int) -> float:
+    return max(0.0, min(round(value), float(size)))
+
+
+def _strip_json_fence(text: str) -> str:
+    if text.startswith("```json"):
+        text = text.removeprefix("```json").strip()
+    if text.startswith("```"):
+        text = text.removeprefix("```").strip()
+    if text.endswith("```"):
+        text = text.removesuffix("```").strip()
+    return text
+
+
 @dataclass(slots=True)
 class FrameTurnContext:
     """One unrolled frame pass through orchestration."""
@@ -126,8 +308,9 @@ class FrameTurnContext:
     frame_count: int
     control_mode: FrameControlMode
     current_source_state_id: int | None = None
+    previous_source_state_id: int | None = None
     previous_observation_ref: ObservationRef | None = None
-    recent_action_history: tuple["ActionHistoryItem", ...] = ()
+    recent_action_history: tuple["ActionHistoryEntry", ...] = ()
 
 
 @dataclass(slots=True)
@@ -139,22 +322,30 @@ class FrameSourceRef:
 
 
 @dataclass(slots=True)
+class PostDecisionPredictions:
+    """Committed predictions produced after X chooses a frame action."""
+
+    world_prediction: "PredictionResult | None" = None
+    goal_prediction: "PredictionResult | None" = None
+
+
+@dataclass(slots=True)
 class UpdaterFrameTransitionInput:
     """Updater input for an observed frame transition."""
 
     current_observation_ref: ObservationRef
     actual_next_observation_ref: ObservationRef | None
     decision_trace: "AgentTrace"
+    previous_observation: Observation
     actual_next_observation: Observation | None = None
+    post_decision_predictions: PostDecisionPredictions = field(
+        default_factory=PostDecisionPredictions
+    )
     turn_metrics: "TurnMetrics" = field(
         default_factory=lambda: TurnMetrics()
     )
     submitted_action: ActionSpec | None = None
     synthetic_none_action: ActionSpec | None = None
-    action_history_entry: "ActionHistoryEntry | None" = None
-    action_history_score_advance_marker: (
-        ActionHistoryScoreAdvanceMarker | None
-    ) = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -184,56 +375,10 @@ class ObservationRef:
 
 @dataclass(slots=True)
 class ActionHistoryEntry:
-    """Persisted raw frame-turn action and compact outcome signal."""
+    """Compact prior frame-turn action exposed to Agent X."""
 
     action: ActionSpec
     controllable: bool
-    changed_pixel_count: int
-    change_summary: str
-    changed_cell_percent: float | None = None
-    completed_levels: int | None = None
-    action_count: int | None = None
-    skipped_intermediate_animation_frame_count: int = 0
-
-
-@dataclass(slots=True)
-class ActionHistoryResetMarker:
-    """Prompt-facing marker for an environment reset between action rows."""
-
-    reason: str
-    restart_count: int
-
-
-@dataclass(slots=True)
-class ActionHistoryScoreAdvanceMarker:
-    """Prompt-facing marker for a score/progress advance between action rows."""
-
-    previous_score: float | None
-    new_score: float
-    delta: float | None
-
-
-ActionHistoryItem: TypeAlias = (
-    ActionHistoryEntry
-    | ActionHistoryResetMarker
-    | ActionHistoryScoreAdvanceMarker
-)
-
-
-@dataclass(slots=True)
-class ActionOutcomeEvidence:
-    """Deterministic low-information action evidence for model prompts."""
-
-    suppression_threshold: int = 0
-    # Prompt-facing action-choice labels, not necessarily whole action classes.
-    suppressed_actions: tuple[str, ...] = ()
-    suppression_reason: str = ""
-    suppression_disabled_reason: str = ""
-    latest_repeated_action: str = ""
-    latest_repeated_action_count: int = 0
-    latest_same_action_zero_changed_pixel_turn_count: int = 0
-    stagnation_warning_threshold: int = 0
-    stagnation_warning: bool = False
 
 
 @dataclass(slots=True)
@@ -247,16 +392,20 @@ class ToolCall:
 
 @dataclass(slots=True)
 class ToolResult:
-    """Generic Agent X tool output."""
+    """Prediction or tool output carrying a description artifact."""
 
     id: str
     tool: ToolName
-    output: Any
+    predicted_description: DescriptionPrediction
     source_observation_ref: ObservationRef
     source_state_id: int | None = None
     action: ActionSpec | None = None
     explanation: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+PredictionCall: TypeAlias = ToolCall
+PredictionResult: TypeAlias = ToolResult
 
 
 @dataclass(slots=True)
@@ -301,8 +450,10 @@ class RoleContext:
 
 @dataclass(slots=True)
 class ContextDocuments:
-    """Context documents for the agent role."""
+    """Context documents for the world, goal, and agent roles."""
 
+    world: RoleContext = field(default_factory=RoleContext)
+    goal: RoleContext = field(default_factory=RoleContext)
     agent: RoleContext = field(default_factory=RoleContext)
 
 
@@ -321,7 +472,6 @@ class RuntimeConfig:
     run_id: str
     database_path: str | Path | None = None
     game_ids: tuple[str, ...] = ()
-    deadline_monotonic: float | None = None
 
 
 @dataclass(slots=True)
@@ -336,25 +486,17 @@ class MStateRecord:
     frame_count: int
     current_observation: dict[str, Any]
     chosen_action: dict[str, Any] | None
+    world_context: RoleContext
+    goal_context: RoleContext
     agent_context: RoleContext
     agent_trace: dict[str, Any] | None
+    world_prediction: dict[str, Any] | None
+    goal_prediction: dict[str, Any] | None
     metadata: dict[str, Any]
     created_at: str
     turn_metrics: TurnMetrics = field(
         default_factory=TurnMetrics
     )
-
-
-@dataclass(slots=True)
-class RunMetadataRecord:
-    """One durable run-level metadata row stored with memory."""
-
-    id: int
-    game_id: str
-    run_id: str
-    kind: str
-    metadata: dict[str, Any]
-    created_at: str
 
 
 @dataclass(slots=True)
@@ -395,38 +537,3 @@ class GameRunResult:
     step_count: int = 0
     completed_levels: int = 0
     last_state: GameState | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(slots=True)
-class ParallelGameRunFailure:
-    """Captured failure for one game inside a parallel runtime batch."""
-
-    game_index: int
-    game_id: str
-    run_id: str
-    database_path: str
-    exception_type: str
-    message: str
-    attempt_count: int = 1
-
-
-@dataclass(slots=True)
-class ParallelGameRunSuccess:
-    """Captured success metadata for one game inside a parallel runtime batch."""
-
-    game_index: int
-    game_id: str
-    run_id: str
-    database_path: str
-    result: GameRunResult
-    attempt_count: int = 1
-
-
-@dataclass(slots=True)
-class ParallelGameRunResult:
-    """Aggregate result for a parallel multi-game runtime batch."""
-
-    batch_run_id: str
-    successes: tuple[ParallelGameRunSuccess, ...] = ()
-    failures: tuple[ParallelGameRunFailure, ...] = ()

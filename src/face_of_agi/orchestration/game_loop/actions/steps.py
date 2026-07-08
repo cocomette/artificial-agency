@@ -2,54 +2,42 @@
 
 from __future__ import annotations
 
-import copy
 from collections.abc import Callable
-from time import perf_counter
-from typing import Any
 
 from face_of_agi.contracts import (
-    ActionHistoryScoreAdvanceMarker,
     ContextDocuments,
     DecisionResult,
     FrameTurnContext,
-    Observation,
+    PostDecisionPredictions,
     UpdaterFrameTransitionInput,
 )
 from face_of_agi.memory import StateMemory
-from face_of_agi.models.adapters import (
-    AgentContextHistorizerModel,
-    OrchestratorAgentModel,
-)
-from face_of_agi.models.change import ChangeSummaryModel, ChangeSummaryResult
-from face_of_agi.models.historizer import AgentContextHistorySummary
+from face_of_agi.models.adapters import OrchestratorAgentModel
 from face_of_agi.models.orchestrator_agent import AgentToolRuntime
 from face_of_agi.models.updater import UpdaterTaskRegistry
 from face_of_agi.debug.bus import DebugBus
 from face_of_agi.debug.events import (
     EnvironmentStepRecorded,
     FrameTurnStarted,
-    ModelCallCompleted,
+    PostDecisionPredictionsRecorded,
 )
 from face_of_agi.orchestration.game_loop.actions.context_updates import (
     apply_context_updates,
-    summarize_agent_context_history as build_agent_context_history_summary,
 )
 from face_of_agi.orchestration.game_loop.actions.metrics import (
     effective_trace_cost_seconds,
     turn_metrics,
 )
+from face_of_agi.orchestration.game_loop.actions.post_decision_predictions import (
+    PostDecisionPredictionRunner,
+)
 from face_of_agi.orchestration.game_loop.helpers import (
+    agent_history_window,
     build_action_history_entry,
-    bounded_agent_action_history,
     decide_frame_turn,
     frame_control_mode,
     unroll_observation,
     validate_decision,
-)
-from face_of_agi.orchestration.game_loop.fallbacks import (
-    fallback_change_summary_result,
-    fallback_decision_result,
-    model_observation_text_config,
 )
 from face_of_agi.orchestration.game_loop.persistence import (
     persist_turn,
@@ -72,12 +60,7 @@ def load_frame_buffer_if_needed(session: GameLoopSession) -> None:
 
     if session.frame_buffer and session.frame_index < len(session.frame_buffer):
         return
-    session.frame_buffer = unroll_observation(
-        session.latest_environment_observation,
-        animation_keyframe_pixel_threshold=(
-            session.environment_config.animation_keyframe_pixel_threshold
-        ),
-    )
+    session.frame_buffer = unroll_observation(session.latest_environment_observation)
     session.frame_index = 0
 
 
@@ -100,30 +83,31 @@ def enter_frame_turn(
     )
     current_ref = session.current_ref_for(current_observation)
     turn_id = session.frame_turn_count + 1
-    source_state = None
-    if state_memory is not None:
-        try:
-            source_state = state_memory.prewrite_frame_turn_source(
-                run_id=session.config.run_id,
-                game_id=session.game_id,
-                turn_id=turn_id,
-                current_observation=current_observation,
-                frame_index=session.frame_index,
-                frame_count=frame_count,
-                control_mode=control_mode,
-                contexts=contexts,
-            )
-        except Exception:
-            source_state = None
+    source_state = (
+        state_memory.prewrite_frame_turn_source(
+            run_id=session.config.run_id,
+            game_id=session.game_id,
+            turn_id=turn_id,
+            current_observation=current_observation,
+            frame_index=session.frame_index,
+            frame_count=frame_count,
+            control_mode=control_mode,
+            contexts=contexts,
+        )
+        if state_memory is not None
+        else None
+    )
 
     if session.first_observation is None:
         session.first_observation = current_observation
         session.first_observation_ref = current_ref
     if session.first_observation_ref is None:
         raise RuntimeError("frame turn is missing the first observation ref")
-    recent_history = bounded_agent_action_history(
+    history_anchor_observation, recent_history = agent_history_window(
         session.action_history,
-        window=session.environment_config.agent_action_history_window,
+        session.action_history_observations,
+        first_observation=session.first_observation,
+        window=session.environment_config.action_history_window,
     )
 
     session.current = FrameTurnSnapshot(
@@ -132,12 +116,14 @@ def enter_frame_turn(
         turn_id=turn_id,
         observation=current_observation,
         observation_ref=current_ref,
+        history_anchor_observation=history_anchor_observation,
         source_state_id=source_state.id if source_state is not None else None,
         frame_index=session.frame_index,
         frame_count=frame_count,
         control_mode=control_mode,
         first_observation_ref=session.first_observation_ref,
         previous_observation_ref=session.previous_observation_ref,
+        previous_source_state_id=session.previous_source_state_id,
         recent_action_history=recent_history,
     )
     frame_context = session.current.to_frame_context()
@@ -189,14 +175,9 @@ def decide(
         contexts=contexts,
         debug=debug,
         frame_context=frame_context,
-        recent_action_history_available=(
-            session.environment_config.agent_action_history_window != 0
-        ),
         tool_runtime=session.tool_runtime,
+        history_anchor_observation=current.history_anchor_observation,
         turn_id=current.turn_id,
-        action_suppression_zero_changed_pixel_turns=(
-            session.environment_config.action_suppression_zero_changed_pixel_turns
-        ),
     )
     session.decision = decision
     session.decision_duration_seconds = decision_duration_seconds
@@ -209,23 +190,7 @@ def decide(
 
     if current.control_mode is None:
         raise RuntimeError("current frame snapshot is missing control mode")
-    try:
-        validate_decision(decision.final_action, control_mode=current.control_mode)
-    except Exception as exc:
-        decision = fallback_decision_result(
-            frame_context=frame_context,
-            turn_id=current.turn_id,
-            action_space=current.control_mode.allowed_actions,
-            error=exc,
-            observation_text_config=model_observation_text_config(agent),
-        )
-        session.decision = decision
-        session.trace_cost_seconds = effective_trace_cost_seconds(
-            decision=decision,
-            wall_clock_seconds=decision_duration_seconds,
-        )
-        session.last_decision = decision
-        validate_decision(decision.final_action, control_mode=current.control_mode)
+    validate_decision(decision.final_action, control_mode=current.control_mode)
     write_frame_trace(
         debug=debug,
         frame_turn=session.frame_turn_count,
@@ -235,16 +200,47 @@ def decide(
     )
 
 
-def resolve_next_snapshot(session: GameLoopSession, *, debug: DebugBus) -> None:
-    """Resolve the observed next frame and assemble transition data."""
+def run_post_decision_predictions(
+    session: GameLoopSession,
+    *,
+    contexts: ContextDocuments,
+    runner: PostDecisionPredictionRunner,
+    debug: DebugBus,
+) -> None:
+    """Run world predictions for the current session turn."""
 
     current = require_current(session)
     decision = require_decision(session)
     if current.control_mode is None:
         raise RuntimeError("current frame snapshot is missing control mode")
+    with runtime_timing.span(
+        "game_loop.post_decision_predictions",
+        turn_id=current.turn_id,
+        step=current.observation.step,
+        controllable=current.control_mode.controllable,
+    ):
+        session.predictions = _run_post_decision_predictions(
+            frame_context=current.to_frame_context(),
+            turn_id=current.turn_id,
+            current=current,
+            decision=decision,
+            contexts=contexts,
+            runner=runner,
+            debug=debug,
+        )
+    debug.emit(PostDecisionPredictionsRecorded(session.predictions))
+
+
+def resolve_next_snapshot(session: GameLoopSession, *, debug: DebugBus) -> None:
+    """Resolve the observed next frame and assemble transition data."""
+
+    current = require_current(session)
+    decision = require_decision(session)
+    predictions = require_predictions(session)
+    if current.control_mode is None:
+        raise RuntimeError("current frame snapshot is missing control mode")
 
     if current.control_mode.controllable:
-        previous_evidence_observation = snapshot_observation(current.observation)
         session.real_step_count += 1
         with runtime_timing.span(
             "game_loop.environment_step",
@@ -261,21 +257,10 @@ def resolve_next_snapshot(session: GameLoopSession, *, debug: DebugBus) -> None:
                 remaining_actions=session.remaining_actions,
             )
         )
-        next_frame_buffer = unroll_observation(
-            next_observation,
-            animation_keyframe_pixel_threshold=(
-                session.environment_config.animation_keyframe_pixel_threshold
-            ),
-            anchor_frame=previous_evidence_observation.frame,
-        )
-        session.transition_frame_observations = (
-            previous_evidence_observation,
-            *next_frame_buffer,
-        )
-        next_frame = next_frame_buffer[-1]
-        session.next_frame_buffer = (next_frame,)
+        next_frame_buffer = unroll_observation(next_observation)
+        next_frame = next_frame_buffer[0]
         next_frame_index = 0
-        next_frame_count = 1
+        next_frame_count = len(next_frame_buffer)
         next_control_mode = None
     else:
         next_frame_index = session.frame_index + 1
@@ -286,10 +271,6 @@ def resolve_next_snapshot(session: GameLoopSession, *, debug: DebugBus) -> None:
             frame_count=next_frame_count,
             real_actions=session.real_actions,
         )
-        session.transition_frame_observations = (
-            current.observation,
-            next_frame,
-        )
 
     next_ref = session.current_ref_for(next_frame)
     session.turn_metrics = turn_metrics(
@@ -297,13 +278,15 @@ def resolve_next_snapshot(session: GameLoopSession, *, debug: DebugBus) -> None:
         trace_cost_seconds=session.trace_cost_seconds,
         cumulative_time_cost=float(session.real_step_count),
     )
-    score_advance_marker = build_score_advance_marker(
-        previous_score=session.last_observed_cumulative_score,
-        new_score=session.turn_metrics.cumulative_score,
+    history_entry = build_action_history_entry(
+        frame_context=current.to_frame_context(),
+        final_action=decision.final_action,
     )
-    next_recent_history = bounded_agent_action_history(
-        session.action_history,
-        window=session.environment_config.agent_action_history_window,
+    next_history_anchor_observation, next_recent_history = agent_history_window(
+        (*session.action_history, history_entry),
+        (*session.action_history_observations, current.observation),
+        first_observation=session.first_observation,
+        window=session.environment_config.action_history_window,
     )
     session.next = FrameTurnSnapshot(
         run_id=session.config.run_id,
@@ -311,19 +294,23 @@ def resolve_next_snapshot(session: GameLoopSession, *, debug: DebugBus) -> None:
         turn_id=current.turn_id + 1,
         observation=next_frame,
         observation_ref=next_ref,
+        history_anchor_observation=next_history_anchor_observation,
         source_state_id=None,
         frame_index=next_frame_index,
         frame_count=next_frame_count,
         control_mode=next_control_mode,
         first_observation_ref=current.first_observation_ref,
         previous_observation_ref=current.observation_ref,
+        previous_source_state_id=current.source_state_id,
         recent_action_history=next_recent_history,
     )
     session.update_input = UpdaterFrameTransitionInput(
         current_observation_ref=current.observation_ref,
         actual_next_observation_ref=next_ref,
         decision_trace=decision.trace,
+        previous_observation=current.observation,
         actual_next_observation=next_frame,
+        post_decision_predictions=predictions,
         turn_metrics=session.turn_metrics,
         submitted_action=(
             decision.final_action if current.control_mode.controllable else None
@@ -331,126 +318,7 @@ def resolve_next_snapshot(session: GameLoopSession, *, debug: DebugBus) -> None:
         synthetic_none_action=(
             None if current.control_mode.controllable else decision.final_action
         ),
-        action_history_score_advance_marker=score_advance_marker,
         metadata={"controllable": current.control_mode.controllable},
-    )
-
-
-def summarize_change(
-    session: GameLoopSession,
-    *,
-    change_model: ChangeSummaryModel,
-    debug: DebugBus,
-) -> None:
-    """Summarize the observed frame transition for compact action history."""
-
-    result = summarize_change_model(
-        session,
-        change_model=change_model,
-        debug=debug,
-    )
-    capture_change_summary_inputs(
-        session,
-        change_model=change_model,
-        debug=debug,
-    )
-    attach_change_summary(
-        session,
-        result=result,
-    )
-
-
-def summarize_change_model(
-    session: GameLoopSession,
-    *,
-    change_model: ChangeSummaryModel,
-    debug: DebugBus | None = None,
-) -> ChangeSummaryResult:
-    """Run the change-summary model without mutating turn state."""
-
-    current = require_current(session)
-    next_snapshot = require_next(session)
-    decision = require_decision(session)
-    frame_context = current.to_frame_context()
-    frame_observations = transition_frame_observations(session)
-    started_at = perf_counter()
-    with runtime_timing.span(
-        "game_loop.change_summary",
-        turn_id=current.turn_id,
-        step=current.observation.step,
-    ):
-        try:
-            return change_model.summarize(
-                frame_observations[0],
-                frame_observations[-1],
-                decision.final_action,
-                glossary_actions=frame_context.control_mode.allowed_actions,
-                frame_observations=frame_observations,
-            )
-        except Exception as exc:
-            return fallback_change_summary_result(
-                observations=frame_observations,
-                error=exc,
-                observation_text_config=model_observation_text_config(change_model),
-            )
-        finally:
-            if debug is not None:
-                debug.emit(
-                    ModelCallCompleted(
-                        role="change",
-                        duration_seconds=perf_counter() - started_at,
-                    )
-                )
-
-
-def capture_change_summary_inputs(
-    session: GameLoopSession,
-    *,
-    change_model: ChangeSummaryModel,
-    debug: DebugBus,
-) -> None:
-    """Drain debug provider captures for the current change-summary call."""
-
-    current = require_current(session)
-    frame_context = current.to_frame_context()
-    debug.capture_model_inputs(frame_context, current.turn_id, change_model)
-
-
-def attach_change_summary(
-    session: GameLoopSession,
-    *,
-    result: ChangeSummaryResult,
-) -> None:
-    """Attach a completed change summary to the pending updater input."""
-
-    current = require_current(session)
-    next_snapshot = require_next(session)
-    decision = require_decision(session)
-    update_input = require_update_input(session)
-    frame_context = current.to_frame_context()
-    update_input.action_history_entry = build_action_history_entry(
-        frame_context=frame_context,
-        final_action=decision.final_action,
-        next_observation=next_snapshot.observation,
-        changed_pixel_count=result.changed_pixel_count,
-        change_summary=result.summary,
-        changed_cell_percent=result.changed_cell_percent,
-        completed_levels=_completed_levels_after_transition(session),
-        action_count=_current_level_action_count(session),
-    )
-
-
-def _completed_levels_after_transition(session: GameLoopSession) -> int:
-    metrics = session.turn_metrics
-    if metrics is not None and metrics.cumulative_score is not None:
-        return int(metrics.cumulative_score)
-    return int(session.completed_levels)
-
-
-def _current_level_action_count(session: GameLoopSession) -> int:
-    return max(
-        0,
-        session.environment_config.max_actions_per_level - session.remaining_actions,
     )
 
 
@@ -458,7 +326,6 @@ def run_updaters(
     session: GameLoopSession,
     *,
     contexts: ContextDocuments,
-    agent_context_history: AgentContextHistorySummary,
     updater_tasks: UpdaterTaskRegistry,
     state_memory: StateMemory | None,
     debug: DebugBus,
@@ -467,7 +334,6 @@ def run_updaters(
 
     current = require_current(session)
     update_input = require_update_input(session)
-    environment_config = session.environment_config
     with runtime_timing.span(
         "game_loop.apply_context_updates",
         turn_id=current.turn_id,
@@ -480,50 +346,8 @@ def run_updaters(
             debug=debug,
             state_memory=state_memory,
             frame_context=current.to_frame_context(),
-            prior_action_history=session.action_history,
-            agent_updater_action_history_window=(
-                environment_config.agent_updater_action_history_window
-            ),
-            agent_context_history=agent_context_history,
-            action_suppression_zero_changed_pixel_turns=(
-                environment_config.action_suppression_zero_changed_pixel_turns
-            ),
-            updater_stagnation_warning_zero_changed_pixel_turns=(
-                environment_config.updater_stagnation_warning_zero_changed_pixel_turns
-            ),
-            game_last_started_turns_ago=max(
-                0,
-                current.turn_id - session.game_start_turn_id,
-            ),
-            score_last_advanced_turns_ago=score_last_advanced_turns_ago(
-                session,
-                current_turn_id=current.turn_id,
-                update_input=update_input,
-            ),
-            game_start_reason=session.game_start_reason,
-            game_restart_count=session.game_restart_count,
             turn_id=current.turn_id,
         )
-
-
-def summarize_agent_context_history(
-    session: GameLoopSession,
-    *,
-    state_memory: StateMemory | None,
-    agent_context_historizer: AgentContextHistorizerModel | None,
-    debug: DebugBus | None = None,
-) -> AgentContextHistorySummary:
-    """Run the agent-context historizer for the current frame turn."""
-
-    current = require_current(session)
-    return build_agent_context_history_summary(
-        state_memory=state_memory,
-        frame_context=current.to_frame_context(),
-        historizer=agent_context_historizer,
-        context_window=session.environment_config.agent_context_history_window,
-        turn_id=current.turn_id,
-        debug=debug,
-    )
 
 
 def persist(
@@ -547,30 +371,25 @@ def advance(session: GameLoopSession) -> None:
     """Advance run/session cursors after the current turn is committed."""
 
     current = require_current(session)
-    next_snapshot = require_next(session)
+    decision = require_decision(session)
     if current.control_mode is None:
         raise RuntimeError("current frame snapshot is missing control mode")
 
-    update_input = require_update_input(session)
-    if update_input.action_history_entry is None:
-        raise RuntimeError("frame turn is missing a change-summarized history entry")
-    session.action_history.append(update_input.action_history_entry)
-    if update_input.action_history_score_advance_marker is not None:
-        session.action_history.append(update_input.action_history_score_advance_marker)
-        session.last_score_advance_turn_id = current.turn_id
-    if update_input.turn_metrics.cumulative_score is not None:
-        session.last_observed_cumulative_score = float(
-            update_input.turn_metrics.cumulative_score
+    session.action_history.append(
+        build_action_history_entry(
+            frame_context=current.to_frame_context(),
+            final_action=decision.final_action,
         )
+    )
+    session.action_history_observations.append(current.observation)
     session.previous_observation_ref = current.observation_ref
+    session.previous_source_state_id = current.source_state_id
 
     if current.control_mode.controllable:
         if session.next_environment_observation is None:
             raise RuntimeError("controllable turn is missing next observation")
         session.latest_environment_observation = session.next_environment_observation
-        if not session.next_frame_buffer:
-            raise RuntimeError("controllable turn is missing next frame buffer")
-        session.frame_buffer = session.next_frame_buffer
+        session.frame_buffer = ()
         session.frame_index = 0
     else:
         session.frame_index += 1
@@ -587,54 +406,10 @@ def clear_turn_outputs(session: GameLoopSession) -> None:
     session.decision = None
     session.decision_duration_seconds = None
     session.trace_cost_seconds = None
+    session.predictions = None
     session.turn_metrics = None
     session.update_input = None
     session.next_environment_observation = None
-    session.next_frame_buffer = ()
-    session.transition_frame_observations = ()
-
-
-def build_score_advance_marker(
-    *,
-    previous_score: float | None,
-    new_score: float | None,
-) -> ActionHistoryScoreAdvanceMarker | None:
-    """Return a score marker for the current-run score state."""
-
-    if new_score is None:
-        return None
-    current = float(new_score)
-    if previous_score is None:
-        if current <= 0.0:
-            return None
-        return ActionHistoryScoreAdvanceMarker(
-            previous_score=None,
-            new_score=current,
-            delta=None,
-        )
-    previous = float(previous_score)
-    if current <= previous:
-        return None
-    return ActionHistoryScoreAdvanceMarker(
-        previous_score=previous,
-        new_score=current,
-        delta=current - previous,
-    )
-
-
-def score_last_advanced_turns_ago(
-    session: GameLoopSession,
-    *,
-    current_turn_id: int,
-    update_input: UpdaterFrameTransitionInput,
-) -> int | None:
-    """Return the frame-turn distance since the last score marker."""
-
-    if update_input.action_history_score_advance_marker is not None:
-        return 0
-    if session.last_score_advance_turn_id is None:
-        return None
-    return max(0, current_turn_id - session.last_score_advance_turn_id)
 
 
 def require_current(session: GameLoopSession) -> FrameTurnSnapshot:
@@ -643,16 +418,16 @@ def require_current(session: GameLoopSession) -> FrameTurnSnapshot:
     return session.current
 
 
-def require_next(session: GameLoopSession) -> FrameTurnSnapshot:
-    if session.next is None:
-        raise RuntimeError("game-loop session is missing the next turn")
-    return session.next
-
-
 def require_decision(session: GameLoopSession) -> DecisionResult:
     if session.decision is None:
         raise RuntimeError("game-loop session is missing the frame decision")
     return session.decision
+
+
+def require_predictions(session: GameLoopSession) -> PostDecisionPredictions:
+    if session.predictions is None:
+        raise RuntimeError("game-loop session is missing post-decision predictions")
+    return session.predictions
 
 
 def require_update_input(session: GameLoopSession) -> UpdaterFrameTransitionInput:
@@ -661,48 +436,24 @@ def require_update_input(session: GameLoopSession) -> UpdaterFrameTransitionInpu
     return session.update_input
 
 
-def transition_frame_observations(
-    session: GameLoopSession,
-) -> tuple[Observation, ...]:
-    """Return oldest-to-newest frame evidence for the current transition."""
+def _run_post_decision_predictions(
+    *,
+    frame_context: FrameTurnContext,
+    turn_id: int,
+    current: FrameTurnSnapshot,
+    decision: DecisionResult,
+    contexts: ContextDocuments,
+    runner: PostDecisionPredictionRunner,
+    debug: DebugBus,
+) -> PostDecisionPredictions:
+    """Run S predictions after X chooses a frame action."""
 
-    if session.transition_frame_observations:
-        return session.transition_frame_observations
-    current = require_current(session)
-    next_snapshot = require_next(session)
-    return (current.observation, next_snapshot.observation)
-
-
-def snapshot_observation(observation: Observation) -> Observation:
-    """Return an observation copy insulated from environment frame mutation."""
-
-    if observation.frames:
-        frames = tuple(_copy_frame(frame) for frame in observation.frames)
-        frame = (
-            _copy_frame(observation.frame)
-            if observation.frame is not None
-            else frames[-1]
-        )
-    else:
-        frame = _copy_frame(observation.frame)
-        frames = (frame,) if frame is not None else ()
-    return Observation(
-        id=observation.id,
-        step=observation.step,
-        frame=frame,
-        frames=frames,
-        raw_frame_data=observation.raw_frame_data,
-        metadata=dict(observation.metadata),
+    predictions = runner.predict(
+        current_observation_ref=current.observation_ref,
+        current_source_state_id=current.source_state_id,
+        current_observation=current.observation,
+        final_action=decision.final_action,
+        world_context=contexts.world,
     )
-
-
-def _copy_frame(frame: Any) -> Any:
-    if frame is None:
-        return None
-    copy_method = getattr(frame, "copy", None)
-    if callable(copy_method):
-        try:
-            return copy_method()
-        except TypeError:
-            pass
-    return copy.deepcopy(frame)
+    debug.capture_model_inputs(frame_context, turn_id, runner.world_model)
+    return predictions

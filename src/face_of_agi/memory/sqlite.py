@@ -12,7 +12,6 @@ from face_of_agi.contracts import (
     EExperimentRecord,
     MStateRecord,
     ObservationRef,
-    RunMetadataRecord,
     TurnMetrics,
     RoleContext,
 )
@@ -30,8 +29,12 @@ _CURRENT_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
         "frame_count",
         "current_observation_json",
         "chosen_action_json",
+        "world_context_json",
+        "goal_context_json",
         "agent_context_json",
         "agent_trace_json",
+        "world_prediction_json",
+        "goal_prediction_json",
         "turn_metrics_json",
         "metadata_json",
         "created_at",
@@ -62,14 +65,6 @@ _CURRENT_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
         "attempt",
         "request_json",
         "usage_json",
-        "metadata_json",
-        "created_at",
-    ),
-    "run_metadata": (
-        "id",
-        "game_id",
-        "run_id",
-        "kind",
         "metadata_json",
         "created_at",
     ),
@@ -108,8 +103,12 @@ class SQLiteDatabase:
                     frame_count INTEGER NOT NULL,
                     current_observation_json TEXT NOT NULL,
                     chosen_action_json TEXT,
+                    world_context_json TEXT NOT NULL,
+                    goal_context_json TEXT NOT NULL,
                     agent_context_json TEXT NOT NULL,
                     agent_trace_json TEXT,
+                    world_prediction_json TEXT,
+                    goal_prediction_json TEXT,
                     turn_metrics_json TEXT NOT NULL DEFAULT '{}',
                     metadata_json TEXT NOT NULL,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -145,84 +144,9 @@ class SQLiteDatabase:
                     metadata_json TEXT NOT NULL,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
-
-                CREATE TABLE IF NOT EXISTS run_metadata (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    game_id TEXT NOT NULL,
-                    run_id TEXT NOT NULL,
-                    kind TEXT NOT NULL,
-                    metadata_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                );
                 """
             )
             self._require_current_schema(connection)
-
-    def write_run_metadata(
-        self,
-        *,
-        game_id: str,
-        run_id: str,
-        kind: str,
-        metadata: dict[str, Any] | None = None,
-    ) -> RunMetadataRecord:
-        """Write one run-level metadata row."""
-
-        with self.connect() as connection:
-            cursor = connection.execute(
-                """
-                INSERT INTO run_metadata (
-                    game_id,
-                    run_id,
-                    kind,
-                    metadata_json
-                )
-                VALUES (?, ?, ?, ?)
-                """,
-                (
-                    game_id,
-                    run_id,
-                    kind,
-                    _to_json(metadata or {}),
-                ),
-            )
-            record_id = int(cursor.lastrowid)
-            row = connection.execute(
-                "SELECT * FROM run_metadata WHERE id = ?",
-                (record_id,),
-            ).fetchone()
-
-        return self._row_to_run_metadata(row)
-
-    def list_run_metadata(
-        self,
-        *,
-        run_id: str | None = None,
-        game_id: str | None = None,
-        kind: str | None = None,
-    ) -> list[RunMetadataRecord]:
-        """List run-level metadata rows, optionally filtered."""
-
-        clauses: list[str] = []
-        values: list[str] = []
-        if run_id is not None:
-            clauses.append("run_id = ?")
-            values.append(run_id)
-        if game_id is not None:
-            clauses.append("game_id = ?")
-            values.append(game_id)
-        if kind is not None:
-            clauses.append("kind = ?")
-            values.append(kind)
-
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        with self.connect() as connection:
-            rows = connection.execute(
-                f"SELECT * FROM run_metadata {where} ORDER BY id",
-                values,
-            ).fetchall()
-
-        return [self._row_to_run_metadata(row) for row in rows]
 
     def write_m_state(
         self,
@@ -234,8 +158,12 @@ class SQLiteDatabase:
         frame_count: int,
         current_observation: Any,
         chosen_action: Any,
+        world_context: RoleContext,
+        goal_context: RoleContext,
         agent_context: RoleContext,
         agent_trace: Any,
+        world_prediction: Any | None = None,
+        goal_prediction: Any | None = None,
         turn_metrics: TurnMetrics | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> MStateRecord:
@@ -253,12 +181,16 @@ class SQLiteDatabase:
                         frame_count,
                         current_observation_json,
                         chosen_action_json,
+                        world_context_json,
+                        goal_context_json,
                         agent_context_json,
                         agent_trace_json,
+                        world_prediction_json,
+                        goal_prediction_json,
                         turn_metrics_json,
                         metadata_json
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         game_id,
@@ -268,8 +200,12 @@ class SQLiteDatabase:
                         frame_count,
                         _to_json(current_observation),
                         _to_json(chosen_action),
+                        _to_json(world_context),
+                        _to_json(goal_context),
                         _to_json(agent_context),
                         _to_json(agent_trace),
+                        _to_nullable_json(world_prediction),
+                        _to_nullable_json(goal_prediction),
                         _to_json(turn_metrics or TurnMetrics()),
                         _to_json(metadata or {}),
                     ),
@@ -291,6 +227,8 @@ class SQLiteDatabase:
         frame_index: int,
         frame_count: int,
         current_observation: Any,
+        world_context: RoleContext,
+        goal_context: RoleContext,
         agent_context: RoleContext,
         metadata: dict[str, Any] | None = None,
     ) -> MStateRecord:
@@ -307,12 +245,16 @@ class SQLiteDatabase:
                     frame_count,
                     current_observation_json,
                     chosen_action_json,
+                    world_context_json,
+                    goal_context_json,
                     agent_context_json,
                     agent_trace_json,
+                    world_prediction_json,
+                    goal_prediction_json,
                     turn_metrics_json,
                     metadata_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, NULL, NULL, NULL, ?, ?)
                 """,
                 (
                     game_id,
@@ -321,6 +263,8 @@ class SQLiteDatabase:
                     frame_index,
                     frame_count,
                     _to_json(current_observation),
+                    _to_json(world_context),
+                    _to_json(goal_context),
                     _to_json(agent_context),
                     _to_json(TurnMetrics()),
                     _to_json(metadata or {}),
@@ -339,8 +283,12 @@ class SQLiteDatabase:
         *,
         state_id: int,
         chosen_action: Any,
+        world_context: RoleContext,
+        goal_context: RoleContext,
         agent_context: RoleContext,
         agent_trace: Any,
+        world_prediction: Any | None = None,
+        goal_prediction: Any | None = None,
         turn_metrics: TurnMetrics | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> MStateRecord:
@@ -352,16 +300,24 @@ class SQLiteDatabase:
                 UPDATE m_states
                 SET
                     chosen_action_json = ?,
+                    world_context_json = ?,
+                    goal_context_json = ?,
                     agent_context_json = ?,
                     agent_trace_json = ?,
+                    world_prediction_json = ?,
+                    goal_prediction_json = ?,
                     turn_metrics_json = ?,
                     metadata_json = ?
                 WHERE id = ?
                 """,
                 (
                     _to_json(chosen_action),
+                    _to_json(world_context),
+                    _to_json(goal_context),
                     _to_json(agent_context),
                     _to_json(agent_trace),
+                    _to_nullable_json(world_prediction),
+                    _to_nullable_json(goal_prediction),
                     _to_json(turn_metrics or TurnMetrics()),
                     _to_json(metadata or {}),
                     state_id,
@@ -402,7 +358,7 @@ class SQLiteDatabase:
         with self.connect() as connection:
             row = connection.execute(
                 """
-                SELECT agent_context_json
+                SELECT world_context_json, goal_context_json, agent_context_json
                 FROM m_states
                 WHERE chosen_action_json IS NOT NULL
                   AND agent_trace_json IS NOT NULL
@@ -414,6 +370,12 @@ class SQLiteDatabase:
         if row is None:
             return ContextDocuments()
         return ContextDocuments(
+            world=RoleContext(
+                general=_role_context_from_json(row["world_context_json"]).general
+            ),
+            goal=RoleContext(
+                general=_role_context_from_json(row["goal_context_json"]).general
+            ),
             agent=RoleContext(
                 general=_role_context_from_json(row["agent_context_json"]).general
             ),
@@ -423,6 +385,8 @@ class SQLiteDatabase:
         self,
         *,
         state_id: int,
+        world_context: RoleContext,
+        goal_context: RoleContext,
         agent_context: RoleContext,
     ) -> MStateRecord:
         """Update stored contexts on an existing complete M state row."""
@@ -432,10 +396,14 @@ class SQLiteDatabase:
                 """
                 UPDATE m_states
                 SET
+                    world_context_json = ?,
+                    goal_context_json = ?,
                     agent_context_json = ?
                 WHERE id = ?
                 """,
                 (
+                    _to_json(world_context),
+                    _to_json(goal_context),
                     _to_json(agent_context),
                     state_id,
                 ),
@@ -508,39 +476,6 @@ class SQLiteDatabase:
         if row is None:
             return None
         return self._row_to_m_state(row)
-
-    def read_recent_agent_game_contexts_before(
-        self,
-        *,
-        game_id: str,
-        run_id: str,
-        state_id: int,
-        limit: int,
-    ) -> tuple[str, ...]:
-        """Return recent same-run complete agent game contexts before a state id."""
-
-        if limit <= 0:
-            return ()
-        with self.connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT agent_context_json
-                FROM m_states
-                WHERE game_id = ?
-                  AND run_id = ?
-                  AND id < ?
-                  AND chosen_action_json IS NOT NULL
-                  AND agent_trace_json IS NOT NULL
-                ORDER BY id DESC
-                LIMIT ?
-                """,
-                (game_id, run_id, state_id, limit),
-            ).fetchall()
-
-        return tuple(
-            _role_context_from_json(row["agent_context_json"]).game
-            for row in rows
-        )
 
     def cleanup_m_states_keep_latest_per_game(self) -> None:
         """Keep only the newest M state row for each game."""
@@ -824,19 +759,8 @@ class SQLiteDatabase:
                 DELETE FROM model_input_debug_records;
                 DELETE FROM m_states;
                 DELETE FROM e_experiments;
-                DELETE FROM run_metadata;
                 """
             )
-
-    def _row_to_run_metadata(self, row: sqlite3.Row) -> RunMetadataRecord:
-        return RunMetadataRecord(
-            id=int(row["id"]),
-            game_id=str(row["game_id"]),
-            run_id=str(row["run_id"]),
-            kind=str(row["kind"]),
-            metadata=from_memory_jsonable(json.loads(str(row["metadata_json"]))),
-            created_at=str(row["created_at"]),
-        )
 
     def _row_to_m_state(self, row: sqlite3.Row) -> MStateRecord:
         return MStateRecord(
@@ -850,8 +774,12 @@ class SQLiteDatabase:
                 json.loads(str(row["current_observation_json"]))
             ),
             chosen_action=_from_nullable_json(row["chosen_action_json"]),
+            world_context=_role_context_from_json(row["world_context_json"]),
+            goal_context=_role_context_from_json(row["goal_context_json"]),
             agent_context=_role_context_from_json(row["agent_context_json"]),
             agent_trace=_from_nullable_json(row["agent_trace_json"]),
+            world_prediction=_from_nullable_json(row["world_prediction_json"]),
+            goal_prediction=_from_nullable_json(row["goal_prediction_json"]),
             metadata=from_memory_jsonable(json.loads(str(row["metadata_json"]))),
             created_at=str(row["created_at"]),
             turn_metrics=_turn_metrics_from_json(

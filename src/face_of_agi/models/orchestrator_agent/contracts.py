@@ -5,13 +5,11 @@ from __future__ import annotations
 from typing import Any, Protocol, Sequence
 
 from face_of_agi.contracts import (
-    ActionHistoryItem,
-    ActionOutcomeEvidence,
+    ActionHistoryEntry,
     ActionSpec,
     DecisionResult,
     ExperimentToolInvocationResult,
     Observation,
-    ObservationRef,
     RoleContext,
     ToolCall,
     ToolName,
@@ -51,15 +49,11 @@ class OrchestratorAgentModel(Protocol):
     def decide(
         self,
         context: RoleContext,
+        history_anchor_observation: Observation,
         current_observation: Observation,
         action_space: Sequence[ActionSpec],
         tool_runtime: AgentToolRuntime | None = None,
-        recent_action_history: tuple[ActionHistoryItem, ...] = (),
-        *,
-        glossary_actions: Sequence[ActionSpec],
-        first_observation_ref: ObservationRef | None = None,
-        recent_action_history_available: bool = True,
-        action_outcome_evidence: ActionOutcomeEvidence | None = None,
+        recent_action_history: tuple[ActionHistoryEntry, ...] = (),
     ) -> DecisionResult:
         """Return one final action and its decision trace."""
         ...

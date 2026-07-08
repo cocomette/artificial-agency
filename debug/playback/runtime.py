@@ -7,8 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from face_of_agi.contracts import (
-    ActionHistoryItem,
-    ActionOutcomeEvidence,
+    ActionHistoryEntry,
     ActionSpec,
     AgentTrace,
     ContextDocuments,
@@ -26,6 +25,7 @@ from face_of_agi.models.orchestrator_agent import AgentToolRuntime
 from face_of_agi.models.updater import (
     AgentGameContextUpdateInput,
     GeneralKnowledgeUpdateInput,
+    WorldGameContextUpdateInput,
 )
 
 
@@ -154,29 +154,22 @@ class PlaybackAgent:
     def decide(
         self,
         context: RoleContext,
+        history_anchor_observation: Observation,
         current_observation: Observation,
         action_space: Sequence[ActionSpec],
         tool_runtime: AgentToolRuntime | None = None,
-        recent_action_history: tuple[ActionHistoryItem, ...] = (),
-        *,
-        glossary_actions: Sequence[ActionSpec],
-        first_observation_ref: ObservationRef | None = None,
-        recent_action_history_available: bool = True,
-        action_outcome_evidence: ActionOutcomeEvidence | None = None,
+        recent_action_history: tuple[ActionHistoryEntry, ...] = (),
     ) -> DecisionResult:
         """Return a stored replay decision or delegate to live Agent X."""
 
         if not self.timeline.active():
             return self.live_agent.decide(
                 context=context,
+                history_anchor_observation=history_anchor_observation,
                 current_observation=current_observation,
                 action_space=action_space,
                 tool_runtime=tool_runtime,
                 recent_action_history=recent_action_history,
-                glossary_actions=glossary_actions,
-                first_observation_ref=first_observation_ref,
-                recent_action_history_available=recent_action_history_available,
-                action_outcome_evidence=action_outcome_evidence,
             )
 
         row = self.timeline.current()
@@ -193,11 +186,61 @@ class PlaybackAgent:
         trace = _agent_trace_from_payload(
             row.agent_trace,
             final_action=final_action,
+            history_anchor_observation=history_anchor_observation,
             current_observation=current_observation,
-            first_observation_ref=first_observation_ref,
             source_state_id=source_state_id,
         )
         return DecisionResult(final_action=final_action, trace=trace)
+
+
+class PlaybackWorldModel:
+    """World model wrapper that returns stored prediction artifacts."""
+
+    def __init__(self, *, timeline: PlaybackTimeline, live_model: Any) -> None:
+        self.timeline = timeline
+        self.live_model = live_model
+        self.provider = _capture_target(live_model)
+        self._provider = live_model
+
+    def predict(
+        self,
+        context: RoleContext,
+        action: ActionSpec,
+        observation: Observation,
+    ) -> ToolResult:
+        """Return a stored world prediction or delegate to the live model."""
+
+        if not self.timeline.active():
+            return self.live_model.predict(context, action, observation)
+
+        row = self.timeline.current()
+        _require_recorded_action(row, action)
+        return _tool_result_from_payload(
+            row.world_prediction,
+            tool="world",
+            observation=observation,
+            action=action,
+        )
+
+
+class PlaybackWorldUpdater:
+    """World updater wrapper that applies stored post-turn contexts."""
+
+    def __init__(self, *, timeline: PlaybackTimeline, live_updater: Any) -> None:
+        self.timeline = timeline
+        self.live_updater = live_updater
+        self.provider = _capture_target(live_updater)
+        self._provider = live_updater
+
+    def update_world_game_context(
+        self,
+        update_input: WorldGameContextUpdateInput,
+    ) -> RoleContext:
+        """Return stored context during replay, otherwise delegate."""
+
+        if not self.timeline.active():
+            return self.live_updater.update_world_game_context(update_input)
+        return self.timeline.current().world_context
 
 
 class PlaybackAgentUpdater:
@@ -213,7 +256,7 @@ class PlaybackAgentUpdater:
         self,
         update_input: AgentGameContextUpdateInput,
     ) -> RoleContext:
-        """Return stored game context during replay, otherwise delegate."""
+        """Return stored context during replay, otherwise delegate."""
 
         if not self.timeline.active():
             return self.live_updater.update_agent_game_context(update_input)
@@ -245,15 +288,21 @@ def _wrap_models(
 ) -> ModelRegistry:
     live_updaters = live_models.require_updater_tasks()
     return ModelRegistry(
-        agent_context_historizer_model=(
-            live_models.agent_context_historizer_model
+        world_prediction_model=PlaybackWorldModel(
+            timeline=timeline,
+            live_model=live_models.require_world_prediction_model(),
         ),
-        change_summary_model=live_models.require_change_summary_model(),
+        goal_prediction_model=live_models.goal_prediction_model,
         orchestrator_agent=PlaybackAgent(
             timeline=timeline,
             live_agent=live_models.require_orchestrator_agent(),
         ),
         updater_tasks=UpdaterTaskRegistry(
+            world_game_updater=PlaybackWorldUpdater(
+                timeline=timeline,
+                live_updater=live_updaters.require_world_game_updater(),
+            ),
+            goal_game_updater=live_updaters.goal_game_updater,
             agent_game_updater=PlaybackAgentUpdater(
                 timeline=timeline,
                 live_updater=live_updaters.require_agent_game_updater(),
@@ -277,6 +326,8 @@ def _require_replayable_row(row: MStateRecord) -> None:
         raise PlaybackError(f"playback turn {turn_id} is missing chosen_action")
     if row.agent_trace is None:
         raise PlaybackError(f"playback turn {turn_id} is missing agent_trace")
+    if row.world_prediction is None:
+        raise PlaybackError(f"playback turn {turn_id} is missing world_prediction")
     _record_controllable(row)
 
 
@@ -324,6 +375,21 @@ def _action_from_payload(
     )
 
 
+def _require_recorded_action(row: MStateRecord, action: ActionSpec) -> None:
+    recorded_name = _action_name(row.chosen_action)
+    if recorded_name != action.name:
+        raise PlaybackError(
+            f"playback turn {_record_turn_id(row)} expected recorded action "
+            f"{recorded_name!r}, got {action.name!r}"
+        )
+    recorded_data = _optional_dict(_dict(row.chosen_action).get("data"))
+    if recorded_data is not None and recorded_data != action.data:
+        raise PlaybackError(
+            f"playback turn {_record_turn_id(row)} action data changed from "
+            f"{recorded_data!r} to {action.data!r}"
+        )
+
+
 def _action_name(payload: Any) -> str:
     raw = str(_dict(payload).get("action_id") or "")
     if raw.startswith("<GameAction.") and ":" in raw:
@@ -339,19 +405,16 @@ def _agent_trace_from_payload(
     payload: Any,
     *,
     final_action: ActionSpec,
+    history_anchor_observation: Observation,
     current_observation: Observation,
-    first_observation_ref: ObservationRef | None,
     source_state_id: int | None,
 ) -> AgentTrace:
     trace = _dict(payload)
+    first_ref = ObservationRef(memory="state", id=history_anchor_observation.id)
     current_ref = ObservationRef(memory="state", id=current_observation.id)
     return AgentTrace(
         step=current_observation.step,
-        first_observation_ref=(
-            _observation_ref_from_payload(trace.get("first_observation_ref"))
-            or first_observation_ref
-            or current_ref
-        ),
+        first_observation_ref=first_ref,
         current_observation_ref=current_ref,
         final_action=final_action,
         tool_calls=[
@@ -361,7 +424,7 @@ def _agent_trace_from_payload(
         tool_results=[
             _tool_result_from_payload(
                 result,
-                tool=str(_dict(result).get("tool") or "tool"),
+                tool=str(_dict(result).get("tool") or "world"),
                 observation=current_observation,
                 source_state_id=source_state_id,
             )
@@ -372,17 +435,6 @@ def _agent_trace_from_payload(
     )
 
 
-def _observation_ref_from_payload(payload: Any) -> ObservationRef | None:
-    value = _dict(payload)
-    ref_id = value.get("id")
-    if ref_id is None:
-        return None
-    memory = str(value.get("memory") or "state")
-    if memory not in {"state", "experimental"}:
-        memory = "state"
-    return ObservationRef(memory=memory, id=str(ref_id))  # type: ignore[arg-type]
-
-
 def _tool_call_from_payload(
     payload: Any,
     *,
@@ -390,7 +442,7 @@ def _tool_call_from_payload(
 ) -> ToolCall:
     value = _dict(payload)
     return ToolCall(
-        tool=str(value.get("tool") or "tool"),
+        tool=str(value.get("tool") or "world"),  # type: ignore[arg-type]
         source_state_id=_optional_int(source_state_id, value.get("source_state_id")),
         action=_unvalidated_action(value.get("action")),
     )
@@ -409,8 +461,8 @@ def _tool_result_from_payload(
         raise PlaybackError(f"recorded {tool} prediction is missing")
     return ToolResult(
         id=str(value.get("id") or f"playback-{tool}-{observation.id}"),
-        tool=tool,
-        output=value.get("output"),
+        tool=tool,  # type: ignore[arg-type]
+        predicted_description=value.get("predicted_description") or [],
         source_observation_ref=ObservationRef(memory="state", id=observation.id),
         source_state_id=_optional_int(source_state_id, value.get("source_state_id")),
         action=action or _unvalidated_action(value.get("action")),

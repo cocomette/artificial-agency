@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from face_of_agi.contracts import (
-    ActionHistoryItem,
+    ActionHistoryEntry,
     ActionSpec,
     DecisionResult,
     EnvironmentInfo,
@@ -14,6 +14,7 @@ from face_of_agi.contracts import (
     GameRunResult,
     Observation,
     ObservationRef,
+    PostDecisionPredictions,
     RuntimeConfig,
     TurnMetrics,
     UpdaterFrameTransitionInput,
@@ -32,13 +33,15 @@ class FrameTurnSnapshot:
     turn_id: int
     observation: Observation
     observation_ref: ObservationRef
+    history_anchor_observation: Observation
     source_state_id: int | None
     frame_index: int
     frame_count: int
     control_mode: FrameControlMode | None
     first_observation_ref: ObservationRef
     previous_observation_ref: ObservationRef | None = None
-    recent_action_history: tuple[ActionHistoryItem, ...] = ()
+    previous_source_state_id: int | None = None
+    recent_action_history: tuple[ActionHistoryEntry, ...] = ()
 
     def to_frame_context(self) -> FrameTurnContext:
         """Return the existing shared contract used by model/update boundaries."""
@@ -56,6 +59,7 @@ class FrameTurnSnapshot:
             frame_count=self.frame_count,
             control_mode=self.control_mode,
             previous_observation_ref=self.previous_observation_ref,
+            previous_source_state_id=self.previous_source_state_id,
             recent_action_history=self.recent_action_history,
         )
 
@@ -80,25 +84,21 @@ class GameLoopSession:
     decision: DecisionResult | None = None
     decision_duration_seconds: float | None = None
     trace_cost_seconds: float | None = None
+    predictions: PostDecisionPredictions | None = None
     turn_metrics: TurnMetrics | None = None
     update_input: UpdaterFrameTransitionInput | None = None
     next_environment_observation: Observation | None = None
-    next_frame_buffer: tuple[Observation, ...] = ()
-    transition_frame_observations: tuple[Observation, ...] = ()
     real_step_count: int = 0
     frame_turn_count: int = 0
-    game_start_turn_id: int = 1
-    game_start_reason: str = "initial_start"
-    game_restart_count: int = 0
     completed_levels: int = 0
     last_completed_levels: int = 0
-    last_observed_cumulative_score: float | None = None
-    last_score_advance_turn_id: int | None = None
     first_observation: Observation | None = None
     first_observation_ref: ObservationRef | None = None
     previous_observation_ref: ObservationRef | None = None
+    previous_source_state_id: int | None = None
     last_decision: DecisionResult | None = None
-    action_history: list[ActionHistoryItem] = field(default_factory=list)
+    action_history: list[ActionHistoryEntry] = field(default_factory=list)
+    action_history_observations: list[Observation] = field(default_factory=list)
     state_record_ids: list[int] = field(default_factory=list)
     running: bool = True
     process_turn: bool = True

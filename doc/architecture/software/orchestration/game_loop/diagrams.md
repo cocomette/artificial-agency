@@ -9,14 +9,20 @@ flowchart TD
     Enter --> Control{Controllable final frame?}
     Control -- yes --> Build[BUILD_X_INPUT]
     Build --> CallX[CALL_X]
-    CallX --> Resolve[RESOLVE_NEXT_SNAPSHOT]
+    CallX --> ValidateReal[Require real environment action]
     Control -- no --> Synthetic[SYNTHESIZE_NONE]
-    Synthetic --> Resolve
+    Synthetic --> PredictBuffered["RUN_WORLD_PREDICTION<br/>S with NONE"]
 
-    Resolve --> Change[SUMMARIZE_CHANGE]
-    Change --> Hist[SUMMARIZE_AGENT_CONTEXT_HISTORY]
-    Hist --> Update[RUN_UPDATER]
-    Update --> Persist[PERSIST_TURN]
+    PredictBuffered --> SkipEnv[Skip environment step]
+    SkipEnv --> UpdateBuffered["RUN_UPDATER<br/>actual = next buffered frame"]
+
+    ValidateReal --> Predict["RUN_WORLD_PREDICTION<br/>S from current frame"]
+    Predict --> StepEnv["Call environment.step(action)"]
+    StepEnv --> NewBundle[Receive next EnvironmentObservationBundle]
+    NewBundle --> UpdateFresh["RUN_UPDATER<br/>actual = first new frame"]
+
+    UpdateBuffered --> Persist[PERSIST_TURN]
+    UpdateFresh --> Persist
     Persist --> MoreFrames{More frames in buffer?}
 
     MoreFrames -- yes --> Enter
@@ -36,9 +42,7 @@ sequenceDiagram
     participant Env as Environment Adapter
     participant Orch as Orchestration
     participant M as State Memory M
-    participant X as Agent X
-    participant C as Change Summary
-    participant H as Historizer
+    participant X as Orchestrator Agent X
     participant P as Updater P
 
     Orch->>Env: reset or step(real action)
@@ -46,26 +50,23 @@ sequenceDiagram
     Orch->>Orch: load FrameUnrollBuffer
 
     loop each FrameTurn in buffer
-        Orch->>M: prewrite or load current real frame
+        Orch->>M: persist or load current real frame
 
         alt non-final frame
             Orch->>Orch: synthesize DecisionResult(final_action=NONE)
+            Orch->>Orch: run world prediction
             Orch->>Orch: skip environment step
-            Orch->>Orch: actual next = next buffered frame
+            Orch->>P: compare current frame with next buffered frame
         else final frame
-            Orch->>X: decide(text observations, context, action_space)
+            Orch->>X: decide(agent context, frame, action_space)
             X-->>Orch: DecisionResult(final_action=real action)
+            Orch->>Orch: run world prediction
             Orch->>Env: step(real action)
             Env-->>Orch: next EnvironmentObservationBundle
-            Orch->>Orch: actual next = first new frame
+            Orch->>P: compare description predictions and final frame with first new frame
         end
 
-        Orch->>C: summarize transition text
-        C-->>Orch: ChangeSummaryResult
-        Orch->>H: summarize recent context history
-        H-->>Orch: AgentContextHistorySummary
-        Orch->>P: update agent context
         P-->>Orch: update result
-        Orch->>M: persist trace, summary, metrics, context
+        Orch->>M: persist trace, transition, update refs
     end
 ```

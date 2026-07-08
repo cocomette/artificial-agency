@@ -4,27 +4,34 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from face_of_agi.models.change.contracts import ChangeSummaryModel
-from face_of_agi.models.historizer.contracts import AgentContextHistorizerModel
+from face_of_agi.models.goal.contracts import GoalPredictionModel
 from face_of_agi.models.orchestrator_agent.contracts import OrchestratorAgentModel
 from face_of_agi.models.updater.contracts import UpdaterTaskRegistry
+from face_of_agi.models.world.contracts import WorldPredictionModel
 
 
 @dataclass(slots=True)
 class ModelRegistry:
     """Small registry for injected model role implementations."""
 
-    agent_context_historizer_model: AgentContextHistorizerModel | None = None
+    world_prediction_model: WorldPredictionModel | None = None
+    goal_prediction_model: GoalPredictionModel | None = None
     orchestrator_agent: OrchestratorAgentModel | None = None
-    change_summary_model: ChangeSummaryModel | None = None
     updater_tasks: UpdaterTaskRegistry | None = None
 
-    def require_agent_context_historizer_model(self) -> AgentContextHistorizerModel:
-        """Return the agent context historizer, failing early if not wired."""
+    def require_world_prediction_model(self) -> WorldPredictionModel:
+        """Return the world prediction role, failing early if it was not wired."""
 
-        if self.agent_context_historizer_model is None:
-            raise RuntimeError("agent context historizer model is not registered")
-        return self.agent_context_historizer_model
+        if self.world_prediction_model is None:
+            raise RuntimeError("world prediction model is not registered")
+        return self.world_prediction_model
+
+    def require_goal_prediction_model(self) -> GoalPredictionModel:
+        """Return the goal prediction role, failing early if it was not wired."""
+
+        if self.goal_prediction_model is None:
+            raise RuntimeError("goal prediction model is not registered")
+        return self.goal_prediction_model
 
     def require_orchestrator_agent(self) -> OrchestratorAgentModel:
         """Return the X agent role, failing early if it was not wired."""
@@ -32,13 +39,6 @@ class ModelRegistry:
         if self.orchestrator_agent is None:
             raise RuntimeError("orchestrator agent model is not registered")
         return self.orchestrator_agent
-
-    def require_change_summary_model(self) -> ChangeSummaryModel:
-        """Return the change summary role, failing early if it was not wired."""
-
-        if self.change_summary_model is None:
-            raise RuntimeError("change summary model is not registered")
-        return self.change_summary_model
 
     def require_updater_tasks(self) -> UpdaterTaskRegistry:
         """Return updater task registry, failing early if it was not wired."""
@@ -49,9 +49,9 @@ class ModelRegistry:
 
 
 __all__ = [
-    "ChangeSummaryModel",
-    "AgentContextHistorizerModel",
+    "GoalPredictionModel",
     "ModelRegistry",
     "OrchestratorAgentModel",
     "UpdaterTaskRegistry",
+    "WorldPredictionModel",
 ]

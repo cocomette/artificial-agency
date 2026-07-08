@@ -7,42 +7,36 @@ flowchart TB
     Registry["ModelRegistry"]
 
     X["models/orchestrator_agent\nX"]
-    Change["models/change\ntransition summary"]
-    Historizer["models/historizer\ncontext history"]
+    S["models/world\nS"]
+    G["models/goal\nG"]
+    D["models/description\nshared S/G capability"]
     P["models/updater\nP"]
-    Text["models/observation_text\nARC grid serializer"]
-    Images["models/image_inputs\ncropped PNG attachments"]
 
-    XAdapter["vLLM X adapter"]
-    ChangeAdapter["vLLM change adapter"]
-    HAdapter["vLLM historizer adapter"]
-    PAdapter["vLLM updater adapter"]
-    VLLM["vLLM OpenAI-compatible\nChat Completions"]
+    XAdapter["X adapter"]
+    SAdapter["S adapter"]
+    GAdapter["G adapter"]
+    PAdapter["P adapter"]
 
-    Registry --> X --> XAdapter --> VLLM
-    Registry --> Change --> ChangeAdapter --> VLLM
-    Registry --> Historizer --> HAdapter --> VLLM
-    Registry --> P --> PAdapter --> VLLM
-    Text --> XAdapter
-    Text --> ChangeAdapter
-    Text --> PAdapter
-    Images --> XAdapter
-    Images --> ChangeAdapter
-    Images --> PAdapter
+    XBackend["LLM / agent SDK /\ntool-calling model"]
+    SBackend["VLM / world predictor /\nneural model"]
+    GBackend["VLM or LLM /\ngoal reasoner"]
+    PBackend["LLM updater /\nLoRA updater"]
+
+    Registry --> X --> XAdapter --> XBackend
+    Registry --> S --> SAdapter --> D --> SBackend
+    Registry -. dormant .-> G --> GAdapter --> D --> GBackend
+    Registry --> P --> PAdapter --> PBackend
 ```
 
-The role contracts remain provider-neutral. The only real backend implementation
-is vLLM.
+Backends are role-specific. Two roles may share a provider as an
+implementation choice, but that is not an architectural dependency.
 
-## Frame-Consuming Request Flow
+## Committed Prediction Roles
 
 ```mermaid
 flowchart LR
-    Obs["ARC 64x64 integer grid"] --> Text["ObservationText"]
-    Obs --> Images["cropped image data URL"]
-    Text --> Prompt["text content part"]
-    Images --> Prompt
-    Prompt --> VLLM["vLLM multimodal chat request"]
-    VLLM --> Parser["role output parser"]
-    Parser --> Orch["orchestration"]
+    X["Orchestrator Agent X"] -->|"final action"| Orch["Orchestration"]
+    Orch -->|"world prediction after decision"| S["World Model S"]
+    S -->|"committed prediction"| Orch
+    Orch -->|"world prediction for updater and M"| P["Updater / Memory"]
 ```

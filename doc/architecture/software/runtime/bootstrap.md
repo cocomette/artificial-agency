@@ -17,3 +17,8 @@ starts.
 
 Runtime can decide how the process starts. It should not decide how each game
 step proceeds once orchestration has started.
+
+Debug playback is a startup-only wrapper around model role wiring. When
+explicit playback flags are present, runtime may load persisted debug rows and
+install debug-only role wrappers before invoking orchestration; the game-loop
+state machine remains the owner of step execution.

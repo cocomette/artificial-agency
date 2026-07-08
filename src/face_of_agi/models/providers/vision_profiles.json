@@ -1,0 +1,20 @@
+{
+  "ollama": {
+    "gemma4:e4b": "normalized_1000",
+    "gemma4:26b": "normalized_1000",
+    "qwen3.5": "normalized_1000",
+    "qwen3.5:122b": "normalized_1000",
+    "qwen3.6": "normalized_1000",
+    "qwen3.6:35b": "normalized_1000",
+    "qwen3.6:27b": "normalized_1000",
+    "qwen3.6:latest": "normalized_1000"
+  },
+  "openai": {
+    "gpt-5-nano": "normalized_1000",
+    "gpt-5.5": "normalized_1000"
+  },
+  "vllm": {
+    "qwen/qwen3.5-122b-a10b-gptq-int4": "normalized_1000",
+    "qwen/qwen3.6-35b-a3b-fp8": "normalized_1000"
+  }
+}

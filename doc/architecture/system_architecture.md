@@ -4,7 +4,11 @@
 
 This document describes a high-level, swappable architecture for an ARC-AGI-3 agent based on the whiteboard design and provided description.
 
-The core idea is to run an online-learning agent over a turn-based game environment. The environment returns visual frames as observations. The agent chooses actions. During each real environment step, the agent can call a world model and a goal model as tools, store temporary simulations in experimental memory, then emit one final action to apply to the game. After the environment advances, an updater model updates the game-specific context documents used by the world model, goal model, and agent.
+The core idea is to run an online-learning agent over a turn-based game
+environment. The environment returns visual frames as observations. Agent `X`
+chooses actions using its own context plus the maintained world `S` and goal
+`G` contexts. `S` and `G` produce predictions for each frame flow, and updater
+`P` revises the game-specific context documents used by `S`, `G`, and `X`.
 
 The initial implementation should use VLMs and text context updates. The architecture must allow replacing any VLM with a custom neural network later, including loss-based LoRA updates.
 
@@ -38,9 +42,9 @@ The agent architecture should not hard-code meanings such as up, down, left, rig
 
 Indices:
 
-- `i`: game index. It is used only for game-specific quantities.
+- `i`: game index. It is used only for game-specific values.
 - `t`: real environment step within game `i`.
-- `k`: temporary tool-call or simulation index within one agent decision step.
+- `k`: temporary future-tool or simulation index within one agent decision step.
 - `m`: model role, where `m ∈ {S, G, X}`.
 
 Model-role superscripts:
@@ -56,8 +60,11 @@ Core objects:
 - `A_{i,t}`: real action applied in game `i` at step `t`.
 - `T^X_{i,t}`: full agent trace for game `i` at step `t`.
 - `M_i`: persistent state memory for game `i`.
-- `E_{i,t}`: temporary experimental memory used only during the agent decision at step `t`.
-- `Q^X_{i,t}`: reward/update quantity packet passed to the agent updater. This is not collapsed into a final scalar reward.
+- `E_{i,t}`: temporary experimental memory reserved for Agent X tool outputs at
+  step `t` when tools are configured.
+- `H_{i,t}`: transition timing metadata for game `i` at step `t`.
+- `cumulative_score_{i,t}`: cumulative environment progress when exposed by the
+  environment; in the current ARC runtime this is completed levels so far.
 
 Context notation:
 
@@ -93,16 +100,17 @@ The environment is treated as the only source of ground-truth transitions.
 
 ### 2. Orchestration Layer
 
-The central controller that connects the environment, memory, tools, agent, and updater.
+The central controller that connects the environment, memory, model roles,
+agent, and updater.
 
 Responsibilities:
 
 - Reset and step the environment.
 - Maintain state memory `M_i`.
-- Maintain per-step experimental memory `E_{i,t}`.
+- Maintain per-step experimental memory `E_{i,t}` for tool outputs.
 - Compose model contexts `C^m_{i,t}` from fixed game-agnostic documents `K^m` and mutable game-specific documents `L^m_{i,t}`.
-- Route tool calls from the agent to the world model `S` or goal model `G`.
-- Return tool outputs immediately to the agent context.
+- Run world predictions for updater evidence; goal prediction code is dormant
+  in normal runtime.
 - Submit the final agent action to the environment.
 - Run the updater `P` after each real environment step.
 - Reset experimental memory at the end of each real step.
@@ -112,17 +120,17 @@ Responsibilities:
 
 All models should be accessed through small adapter interfaces rather than direct calls.
 
-Required model roles:
+Model roles:
 
 - World model `S`
-- Goal model `G`
+- Goal model `G` (dormant in normal runtime)
 - Agent `X`
 - Updater `P`
 
 Initial backend:
 
-- VLMs for all roles.
-- VLM plus image generator for models that need to return image predictions.
+- VLMs for active roles.
+- Description-producing model calls for world predictions.
 
 Future backends:
 
@@ -141,17 +149,19 @@ The world model predicts how the environment changes.
 Conceptual form:
 
 ```text
-S(C^S_{i,t}, A, O_ref) -> O_hat^S
+S(C^S_{i,t}, A, O_ref) -> D_hat^S
 ```
 
 Where:
 
 - `C^S_{i,t} = K^S + L^S_{i,t}`.
 - `A` is a proposed action.
-- `O_ref` is an observation reference resolved from state memory `M_i` or experimental memory `E_{i,t}`.
-- `O_hat^S` is the predicted next observation.
+- `O_ref` is the current observation reference resolved from state memory `M_i`.
+- `D_hat^S` is a structured description prediction for the next visual state.
 
-The output should be stored as a prediction object, including the predicted frame or image and any text explanation needed by the updater.
+The output is stored as a prediction object containing a `predicted_description`
+that follows `DescriptionPrediction`, plus any text explanation or metadata
+needed by the updater.
 
 ### Goal Model `G`
 
@@ -160,66 +170,69 @@ The goal model represents hypotheses about the game objective and progress.
 Conceptual form:
 
 ```text
-G(C^G_{i,t}, A, O_ref) -> O_hat^G
+G(C^G_{i,t}, O_ref) -> D_hat^G
 ```
 
 Where:
 
 - `C^G_{i,t} = K^G + L^G_{i,t}`.
-- `A` is a proposed action.
-- `O_ref` is an observation reference resolved from state memory `M_i` or experimental memory `E_{i,t}`.
-- `O_hat^G` is a goal-relevant predicted or desired observation.
+- `O_ref` is the current observation reference resolved from state memory `M_i`.
+- `D_hat^G` is a structured description prediction for the goal-relevant
+  visual state.
 
-The goal model should support reasoning about what the agent is trying to achieve, why that hypothesis changed, and what visual or reward evidence supports it.
+The goal model should support reasoning about what the agent is trying to
+achieve, why that hypothesis changed, and what visual or progress evidence
+supports it.
 
 ### Agent `X`
 
-The agent is the decision model. It reasons, calls tools, chains tool calls, and eventually returns one real action.
+The agent is the decision model. It reasons over the visible frames and action
+space, then returns one real action.
 
 Conceptual form:
 
 ```text
-X(C^X_{i,t}, O_{i,0}, O_{i,t}, action_space_{i,t}, tools={S,G}) -> A_{i,t}, T^X_{i,t}
+X(C^X_{i,t}, O^anchor_{i,t}, O_{i,t}, action_space_{i,t}) -> A_{i,t}, T^X_{i,t}
 ```
 
 Where:
 
 - `C^X_{i,t} = K^X + L^X_{i,t}`.
-- `O_{i,0}` is the first observation frame of the current game.
+- `L^S_{i,t}` is maintained by the world updater and summarized into `C^X`
+  by the agent updater.
+- `O^anchor_{i,t}` is the observation frame before the oldest visible recent
+  action, or `O_{i,0}` when no recent history is visible.
 - `O_{i,t}` is the current observation frame.
 - `action_space_{i,t}` is the current set of valid environment actions.
 - X also receives a bounded recent action history from prior frame turns:
   compact metadata with turn, step, observation reference, action,
   controllability, control reason, and optional reasoning summary.
-- `S` and `G` are callable tools, not embedded logic.
 - `A_{i,t}` is the final real action selected for the environment.
 - `T^X_{i,t}` is the full agent trace for the current step.
 
-The agent may call `S` and `G` any number of times before producing the final action. Each tool call must include:
+World calls include a candidate action and goal calls use the current
+observation. Their outputs become updater evidence and durable replay data.
 
 ```text
-{
-  tool: "world" | "goal",
+PredictionCall = {
+  tool: "world",
   action: ActionSpec,
-  observation_ref: ObservationRef
+  source_state_id: int
+}
+
+PredictionCall = {
+  tool: "goal",
+  source_state_id: int
 }
 ```
 
-The `observation_ref` may point to:
+The `source_state_id` points to the current frame source row in committed
+state memory. Agent X tools should use memory references rather than inline
+frames.
 
-- the first observation `O_{i,0}` in state memory,
-- the current observation `O_{i,t}` in state memory,
-- a past real observation in state memory,
-- or an intermediate output in experimental memory `E_{i,t}`.
-
-The agent immediately receives each tool result in its active context before deciding whether to call another tool or output the final action.
-The result is also referenceable. This lets the agent build experimental tree
-paths by asking orchestration to call `S` or `G` against prior prediction ids
-instead of carrying the whole imagined path in context.
-Every experiment-loop tool input must be a memory reference. `X` may see the
-predicted frame in its active context, but the next tool call must pass the
-reference id so orchestration can resolve the exact persisted frame from `M_i`
-or `E_{i,t}`.
+Tool outputs may become referenceable through `E_{i,t}` when a concrete tool
+is introduced. Every experiment-loop tool input should be a memory reference so
+orchestration can resolve the exact persisted artifact from `M_i` or `E_{i,t}`.
 
 ### Updater `P`
 
@@ -227,33 +240,53 @@ The updater performs online context updates after the real environment step.
 
 It updates text context documents initially. Later, the same role can trigger loss-based updates such as LoRA.
 
-World/goal update form:
+World update form:
 
 ```text
-P(O_hat^m, O_{i,t+1}, L^m_{i,t}) -> L^m_{i,t+1},     m ∈ {S, G}
+P(D_hat^S, O_{i,t+1}, A_{i,t}, L^S_{i,t}) -> L^S_{i,t+1}
+```
+
+Goal update form:
+
+```text
+P(D_hat^G, O_{i,t+1}, L^G_{i,t}) -> L^G_{i,t+1}
 ```
 
 Agent update form:
 
 ```text
-P(Q^X_{i,t}, T^X_{i,t}, L^X_{i,t}, O_{i,0}, O_{i,t}, O_{i,t+1}) -> L^X_{i,t+1}
+P(action_history, L^S_{i,t}, L^G_{i,t}, O_{i,t}, O_{i,t+1},
+  H_{i,t}, cumulative_score_{i,t}, word_count(L^X_{i,t}), L^X_{i,t})
+  -> L^X_{i,t+1}
 ```
 
 Where:
 
-- `O_hat^m` is a committed world-model or goal-model prediction produced by
-  orchestration after the final action is selected.
+- `D_hat^m` is a world-model or goal-model description prediction produced by
+  orchestration.
 - `O_{i,t+1}` is the real next observation.
-- `Q^X_{i,t}` is the packet of reward/update quantities, not a final scalar reward.
-- `T^X_{i,t}` is the full agent trace, including tool calls and final action.
+- `A_{i,t}` is the submitted real action or synthetic `NONE` action used by
+  the world updater.
+- `action_history` is bounded prior actions plus the submitted real action or
+  synthetic `NONE` action that produced the current frame.
+- `H_{i,t}` is transition timing, such as elapsed real steps and Agent X
+  decision duration.
+- `cumulative_score_{i,t}` is cumulative environment progress metadata when
+  available.
+- `word_count(L^X_{i,t})` is compactness feedback for Agent X's prompt updater;
+  lower is better when useful strategy is preserved.
 
-At the software boundary, orchestration packages these quantities into
-role-specific updater inputs: a shared world/goal context update input and a
-separate agent context update input. These inputs are built from
-orchestration-managed live transition objects and references. The updater does
-not read or write memory directly; it returns updated context documents to
-orchestration, which applies them to the working contexts and persists the
-resulting authoritative state into `M_i`.
+At the software boundary, orchestration packages role-specific updater inputs.
+World and goal prompt updaters receive only their previous game context, the
+role-specific prediction, and current observation frame; the world updater also
+receives the selected real action or synthetic `NONE` action. Agent X's prompt
+updater receives compact action history, observed frames, transition timing,
+score/progress metadata, and agent context word count. World and goal prompt
+updaters do not receive timing metadata. The
+updater does not read or write memory
+directly and does not receive a precomputed scoring formula. It returns
+updated context documents to orchestration, which applies them to the working
+contexts and persists the resulting authoritative state into `M_i`.
 
 The updater should preserve the distinction between:
 
@@ -272,10 +305,11 @@ Stores:
 M_i = {
   observations: O_{i,0}...O_{i,t},
   actions: A_{i,0}...A_{i,t},
-  world_predictions: O_hat^S,
-  goal_predictions: O_hat^G,
+  world_predictions: D_hat^S,
+  goal_predictions: D_hat^G,
   agent_traces: T^X_{i,0}...T^X_{i,t},
-  reward_update_quantities: Q^X_{i,0}...Q^X_{i,t},
+  transition_timing: H_{i,0}...H_{i,t},
+  cumulative_scores: cumulative_score_{i,0}...cumulative_score_{i,t},
   contexts: {
     K^S, K^G, K^X,
     L^S_{i,0}...L^S_{i,t},
@@ -291,26 +325,22 @@ The implementation should allow observations and predictions to be referenced by
 
 ### Experimental Memory `E_{i,t}`
 
-Temporary memory for simulations during one agent decision step.
+Temporary memory reserved for Agent X tool outputs when tools are configured.
 
 Stores:
 
 ```text
 E_{i,t} = {
-  world_tool_outputs: O_hat^{S,E}_{i,t,0}...O_hat^{S,E}_{i,t,k},
-  goal_tool_outputs: O_hat^{G,E}_{i,t,0}...O_hat^{G,E}_{i,t,k}
+  tool_outputs: D_hat^{E}_{i,t,0}...D_hat^{E}_{i,t,k}
 }
 ```
 
-Experimental memory is reset after the real environment step and after the updater has used the relevant tool outputs.
+Experimental memory is pruned as a rolling buffer after frame turns. It is not
+used for current world predictions.
 
-This memory exists so the agent can chain simulations and refer to intermediate model outputs before committing to a real action.
-The orchestrator agent can reuse `E_{i,t}` records by reference id to branch
-from earlier world or goal predictions. It can also request experiments from
-past real states stored in `M_i`; orchestration resolves those references and
-keeps the distinction between real and imagined records.
-Every world or goal tool output is persisted in `E_{i,t}` before it is exposed
-as a reusable reference to the agent.
+This memory exists so Agent X tools can store temporary outputs before a real
+action is committed. World predictions are stored with the frame turn in `M_i`;
+goal prediction storage remains dormant and unset in normal runtime.
 
 ## Context Structure
 
@@ -328,7 +358,7 @@ Examples of content:
 
 - General instructions for the model role.
 - General knowledge about how to interpret observations and actions.
-- General policies for using predictions, goals, and tool calls.
+- General policies for using predictions and goals.
 
 Updated only after finishing a game.
 
@@ -338,9 +368,11 @@ Updated during a single game.
 
 For `L^S_{i,t}`, store current hypotheses about how the game dynamics work, tested transitions, prediction failures, and revised mechanics.
 
-For `L^G_{i,t}`, store current hypotheses about the objective, visible evidence for progress, reward evidence, and why the goal hypothesis changed.
+For `L^G_{i,t}`, store current hypotheses about the objective, visible evidence
+for progress, score/progress evidence, and why the goal hypothesis changed.
 
-For `L^X_{i,t}`, store current action and tool-use strategy, mistakes from prior steps, useful tool-call patterns, and current policy guidance.
+For `L^X_{i,t}`, store current action strategy, mistakes from prior steps, and
+current policy guidance.
 
 ## Data Contracts
 
@@ -390,32 +422,55 @@ ObservationRef = {
 }
 ```
 
-For decision-time agent calls, state-memory refs should be limited to the first
-observation, immediately previous frame-turn observation, current observation,
-and any past real states explicitly exposed by the orchestrator through the
-current context. Experimental refs can point to temporary predictions created
-during the current decision step.
+For decision-time agent calls, state-memory refs should be limited to the
+history-anchor observation, current observation, and any past real states
+explicitly exposed by the orchestrator through the current context.
+Experimental refs can point to temporary predictions created during the current
+decision step.
 
-### ToolCall
+### DescriptionPrediction
+
+World predictions use the same description schema as `DESCRIPTION_SCHEMA` in
+`tests/e2e/core.py`. The dormant goal prediction adapter uses the same schema
+when called directly:
 
 ```text
-ToolCall = {
-  tool: "world" | "goal",
-  action: ActionSpec,
-  observation_ref: ObservationRef
+DescriptionPrediction = list[DescriptionArea]
+
+DescriptionArea = {
+  bbox_2d: [x0: number, y0: number, x1: number, y1: number],
+  description: string
 }
 ```
 
-### ToolResult
+`DescriptionPrediction` is a top-level array. Each item has exactly `bbox_2d`
+and `description`; each `bbox_2d` is exactly four numbers in `[x0, y0, x1, y1]`
+order. The schema allows overlapping areas when the areas describe meaningfully
+different visual concepts.
+
+### PredictionCall
 
 ```text
-ToolResult = {
+PredictionCall = {
+  tool: "world",
+  action: optional ActionSpec,
+  source_state_id: int
+}
+```
+
+`action` is required for world predictions. The goal prediction contract is
+dormant in normal runtime.
+
+### PredictionResult
+
+```text
+PredictionResult = {
   id: string,
   tool: "world" | "goal",
-  predicted_observation: image_or_grid_64x64,
+  predicted_description: DescriptionPrediction,
   explanation: optional text,
   source_observation_ref: ObservationRef,
-  action: ActionSpec
+  action: optional ActionSpec
 }
 ```
 
@@ -433,42 +488,31 @@ AgentTrace = {
 }
 ```
 
-The full trace `T^X_{i,t}` should be passed to the updater, because the updater for the agent needs to improve how the agent uses tools and chooses actions.
+The full trace `T^X_{i,t}` is persisted for replay and debug inspection. The
+agent prompt updater receives compact action history instead of the full trace.
+`tool_calls` and `tool_results` are dormant future-extension fields in the
+current runtime.
 
-### RewardUpdateQuantities
+### TransitionTiming
 
-The agent updater receives selected individual quantities that would go into a
-reward calculation, rather than a final scalar reward. Orchestration may retain
-additional internal quantities for computing future fields.
+Agent updater input includes timing as turn metrics, not as an
+optimization value. It also includes the current agent context word count as a
+compactness reward that the updater should minimize when possible.
 
 ```text
-RewardUpdateQuantities = {
-  prediction_error: optional float,          # internal D^S baseline; not sent to updater prompts
-  prediction_error_delta: optional float,    # prior prediction error minus current prediction error
-  goal_distance: optional float,             # D^G: distance from current/next state to inferred goal
-  time_cost: optional float,                 # cumulative real environment steps spent
-  trace_cost: optional float,                # wall-clock time spent deciding
-  score_delta: optional float,               # raw environment score/progress change, if available
-  notes: optional text
+TransitionTiming = {
+  elapsed_real_steps: optional number,
+  frame_turn_index: optional number,
+  decision_duration_seconds: optional number
 }
 ```
 
-The updater system prompt should explain how to use the fields it receives:
-
-- `prediction_error_delta`: detect whether the agent is finding outcomes the
-  world model predicts better than before; higher positive values mean the
-  prediction error is falling faster and are the learning-improvement signal.
-- `goal_distance`: update whether the action appeared to move toward or away
-  from the inferred goal; higher values mean less goal-following and more
-  exploration.
-- `time_cost`: prefer strategies that make progress in fewer real environment
-  steps; this is cumulative pressure as real actions are spent.
-- `trace_cost`: discourage slow decisions when they do not improve action quality.
-- `score_delta`: use direct game feedback, when available, as evidence for goal and policy updates.
-
-Updater prompts receive `prediction_error_delta` rather than raw
-`prediction_error`. The raw prediction error may still be retained by
-orchestration/memory to compute the next delta.
+`cumulative_score` is persisted separately as raw environment progress metadata
+when the environment exposes it. Orchestration does not compute prediction
+discrepancy, goal-distance metrics, or a separate scoring value for updater input; the
+updater models compare
+their role-specific prediction evidence, actual observations, compact action
+history, timing, score/progress metadata, and context-size feedback directly.
 
 ## Main Game Loop
 
@@ -499,42 +543,28 @@ for each environment step t:
     first observation O_{i,0}
     current observation O_{i,t}
     current action_space_{i,t}
-    callable tool interfaces for S and G
-
-  while X requests a tool call:
-    parse ToolCall(tool, action, observation_ref)
-    resolve observation_ref from allowed state refs in M_i or E_{i,t}
-    reject inline frame inputs that are not memory references
-
-    if tool == world:
-      run S(C^S_{i,t}, action, referenced_observation)
-      store result in E_{i,t}
-      return result and reference id immediately to X
-
-    if tool == goal:
-      run G(C^G_{i,t}, action, referenced_observation)
-      store result in E_{i,t}
-      return result and reference id immediately to X
 
   receive final action A_{i,t} and trace T^X_{i,t} from X
 
-  run committed post-decision predictions:
-    O_hat^S = S(C^S_{i,t}, A_{i,t}, O_{i,t})
-    O_hat^G = G(C^G_{i,t}, O_{i,t})
+  run world prediction:
+    D_hat^S = S(C^S_{i,t}, A_{i,t}, O_{i,t})
 
   execute real environment step:
     O_{i,t+1} = env.step(A_{i,t}.action_id, data=A_{i,t}.data, reasoning=trace_summary)
 
-  compute or extract reward/update quantities:
-    Q^X_{i,t} = RewardUpdateQuantities(...)
+  assemble turn metrics:
+    H_{i,t} = TransitionTiming(...)
+    cumulative_score_{i,t} = cumulative environment progress when available
+    agent_context_word_count = word count of L^X_{i,t}
 
   store transition in M_i:
-    O_{i,t}, A_{i,t}, O_{i,t+1}, T^X_{i,t}, O_hat^S, O_hat^G, E_{i,t}, Q^X_{i,t}
+    O_{i,t}, A_{i,t}, O_{i,t+1}, T^X_{i,t}, D_hat^S, D_hat^G, E_{i,t}, H_{i,t}, cumulative_score_{i,t}
 
   run updater P:
-    update L^S_{i,t} -> L^S_{i,t+1}
-    update L^G_{i,t} -> L^G_{i,t+1}
-    update L^X_{i,t} -> L^X_{i,t+1} using Q^X_{i,t}, not a scalar reward
+    update L^S_{i,t} -> L^S_{i,t+1} using D_hat^S, O_{i,t+1}, and A_{i,t}
+    update L^G_{i,t} -> L^G_{i,t+1} using D_hat^G and O_{i,t+1}
+    update L^X_{i,t} -> L^X_{i,t+1} using compact action history,
+      observations, current world/goal contexts, and turn metrics
 
   clear E_{i,t}
 
@@ -552,11 +582,9 @@ The updater should run after each real step, not after every simulated tool call
 Inputs:
 
 - Current world context `L^S_{i,t}`.
-- Source observation `O_{i,t}`.
 - Real action `A_{i,t}`.
-- World predictions from the agent trace.
 - Real next observation `O_{i,t+1}`.
-- Prediction discrepancy `D^S` if computed.
+- Committed world description prediction for the chosen action.
 
 Output:
 
@@ -573,10 +601,8 @@ Purpose:
 Inputs:
 
 - Current goal context `L^G_{i,t}`.
-- First, current, and next observations.
-- Goal-model outputs from the agent trace.
-- Reward/update quantities `Q^X_{i,t}`.
-- Goal discrepancy `D^G` if computed.
+- Real next observation `O_{i,t+1}`.
+- Committed goal description prediction for the transition.
 
 Output:
 
@@ -593,13 +619,13 @@ Purpose:
 Inputs:
 
 - Current agent context `L^X_{i,t}`.
-- Full trace `T^X_{i,t}`.
-- First observation `O_{i,0}`.
 - Current observation `O_{i,t}`.
 - Real next observation `O_{i,t+1}`.
-- Real action `A_{i,t}`.
-- Tool calls and results.
-- Reward/update quantities `Q^X_{i,t}`.
+- Compact action history including real action `A_{i,t}` or synthetic `NONE`.
+- Current-turn world game context.
+- Previous-turn world game context when available.
+- Transition timing `H_{i,t}`.
+- Score/progress evidence when available.
 
 Output:
 
@@ -608,23 +634,16 @@ Output:
 Purpose:
 
 - Improve how the agent chooses actions.
-- Improve how it uses the world and goal tools.
+- Improve how it uses world prediction feedback.
 - Record mistakes and useful patterns from the current step.
 - Adjust strategy under the current game hypothesis.
 
-## Loss and Update Signals
+## Transition Evidence
 
-The architecture should store discrepancy and reward-update terms, but keep their exact definitions pluggable.
-
-Core quantities:
-
-```text
-D^S = distance(O_hat^S, O_{i,t+1})
-D^G = goal-model discrepancy or goal distance
-Q^X_{i,t} = {D^S, ΔD^S, D^G, time_cost, trace_cost, score_delta, ...}
-```
-
-`Q^X_{i,t}` is passed to the agent updater as structured evidence. The updater should decide how those quantities change `L^X_{i,t+1}` based on its system prompt. The implementation should not require a single scalar reward.
+The architecture stores the evidence needed by updater `P`, but it does not
+define a deterministic scoring module or executed scoring formula. Agent X's
+updater compares action history, actual observations, transition timing, and
+raw score/progress metadata directly.
 
 ## Software Architecture View
 
@@ -645,17 +664,14 @@ Orchestration Layer
   |-- compose C^X_{i,t} --> Agent X
   |                     |
   |                     | sees O_{i,0}, O_{i,t}, action_space
-  |                     | tool call: S or G with action + observation_ref
-  |                     v
-  |                  Tool Router
+  |
+  |-- world prediction runner
   |                     |
-  |                     |-- C^S_{i,t} --> World Model S --> predicted observation
-  |                     |
-  |                     |-- C^G_{i,t} --> Goal Model G  --> goal-relevant prediction
+  |                     |-- C^S_{i,t} --> World Model S --> predicted_description
   |
   |-- final action --> Environment Adapter
   |
-  |-- transition + trace + Q^X_{i,t} --> Updater P
+  |-- turn metrics + action history --> Updater P
                               |
                               |-- update L^S_{i,t} -> L^S_{i,t+1}
                               |-- update L^G_{i,t} -> L^G_{i,t+1}
@@ -684,51 +700,49 @@ No model should call the ARC-AGI-3 environment directly.
 Each model adapter should expose one role-specific call:
 
 ```text
-WorldModel.predict(context, action, observation_ref) -> ToolResult
-GoalModel.predict(context, action, observation_ref) -> ToolResult
+WorldModel.predict(context, action, observation_ref) -> PredictionResult
+GoalModel.predict(context, observation_ref) -> PredictionResult
 Agent.act(
   context,
+  history_anchor_observation,
   current_observation,
-  tools,
   action_space
 ) -> AgentTrace + ActionSpec
 Updater.update(update_packet) -> UpdatedContexts
 ```
 
-The rest of the system should not depend on whether the implementation is a VLM, VLM plus image generator, LoRA-updated model, or custom network.
+The rest of the system should not depend on whether the implementation is a
+VLM, LoRA-updated model, or custom network.
 
 ### Memory Boundary
 
 Memory should store objects and return references.
 
-The decision-time agent should receive only the first, immediately previous,
-and current frame-turn observations as images. Duplicate observations may be
-omitted from the image list when those roles point to the same observation.
+The decision-time agent should receive only the history-anchor and current
+frame-turn observations as images. The history anchor is the observation frame
+that precedes the oldest action in the bounded recent action history, or the
+initial run observation when no recent history is visible.
 Full frame history remains in state memory for logging, updater use, and
 future training, but it should not be copied into the agent context. X may
-receive a bounded recent action history as compact metadata; this does not
-include prior frame payloads beyond the single previous frame-turn
-observation.
+receive a bounded recent action history as compact metadata.
 
-Tool calls should pass observation references. This avoids copying full histories into model contexts and matches the intended state-memory and experimental-memory split.
-Orchestration reads both `M_i` and `E_{i,t}` to resolve those references, then
-writes new tool outputs back to `E_{i,t}` or committed run records back to
-`M_i`.
-The resolved frame used as model input must be the exact persisted object
-behind the reference, even when the agent context contains a visual copy of the
-same prediction.
+Agent X tool calls should pass memory references. This avoids copying
+full histories into model contexts and matches the intended state-memory and
+experimental-memory split. World predictions use the current committed frame
+source selected by orchestration.
 
 ## Minimal Runtime Sequence
 
 1. Start game and store `O_{i,0}`.
-2. Build `C^X_{i,t}`, `C^S_{i,t}`, and `C^G_{i,t}`.
-3. Give the agent only `O_{i,0}`, `O_{i,t}`, the current action space, and tool interfaces.
-4. Agent reasons and calls `S` and `G` as tools.
-5. Store tool outputs in `E_{i,t}` and immediately return them with reference ids to the agent.
-6. Agent emits one final valid action.
-7. Environment advances one step.
-8. Store the real transition and trace in `M_i`.
-9. Compute or extract `Q^X_{i,t}` and pass it to the updater.
+2. Build `C^X_{i,t}` and `C^S_{i,t}`.
+3. Give the agent `C^X`, `O_{i,0}`, `O_{i,t}`, and
+   the current action space.
+4. Agent emits one final valid action.
+5. Run world prediction.
+6. Environment advances one step.
+7. Store the real transition, trace, and predictions in `M_i`.
+9. Assemble turn metrics and agent context word count for Agent X's prompt
+   updater.
 10. Updater revises `L^S_{i,t}`, `L^G_{i,t}`, and `L^X_{i,t}`.
 11. Clear `E_{i,t}`.
 12. Repeat until the game is finished.

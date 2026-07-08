@@ -7,6 +7,12 @@ orchestration.
 
 - During the frame/game loop, role-specific updater tasks return
   `L^S_i,t+1`, `L^G_i,t+1`, and `L^X_i,t+1`.
+- The world game-context updater provider returns `updated_context` as a
+  complete map keyed by `world_understanding`, `RESET`, `ACTION1` through
+  `ACTION7`, and `NONE`; the adapter serializes that map into `L^S` text.
+- The agent game-context updater provider returns `updated_context` as a
+  complete map keyed by `goals`, `game_mechanics`, `policy`, `history`, and
+  `extras`; the adapter serializes that map into `L^X` text.
 - At end-of-run, the shared general updater task returns `K^S`, `K^G`, and
   `K^X` through three role-specific invocations.
 
@@ -24,9 +30,8 @@ calls.
 The updater does not own a separate memory store and does not write directly
 to SQLite.
 
-Reward/update quantities are persisted by orchestration with the committed
-frame-turn state. They remain inputs to updater `P`; updater backends do not
-compute or mutate the reward packet.
+Turn metrics are persisted by orchestration with the committed frame-turn
+state. Updater backends do not compute or mutate those runtime facts.
 
 ## Scope Rule
 

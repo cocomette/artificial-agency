@@ -11,7 +11,7 @@ import yaml
 DEFAULT_CONFIG_DIR = Path("src/face_of_agi/runtime/configs")
 CONFIG_SUFFIXES = {".yaml", ".yml"}
 REQUIRED_TOP_LEVEL_KEYS = {"game_index", "max_actions_per_level", "models"}
-REQUIRED_UPDATER_SLOTS = {"agent", "general"}
+REQUIRED_UPDATER_SLOTS = {"world", "agent", "general"}
 
 
 @dataclass(frozen=True)
@@ -39,15 +39,6 @@ def list_config_files(
     directory = config_dir_path(config_dir, root=root)
     if not directory.exists():
         return []
-    if not _allows_nested_config_paths(config_dir, root=root):
-        return sorted(
-            [
-                path
-                for path in directory.iterdir()
-                if path.is_file() and path.suffix in CONFIG_SUFFIXES
-            ],
-            key=lambda path: path.name,
-        )
     return sorted(
         [
             path
@@ -190,8 +181,6 @@ def safe_config_path(
     except ValueError as exc:
         raise ValueError(f"config path must stay within {base_dir}") from exc
 
-    if not _allows_nested_config_paths(config_dir, root=root) and len(relative.parts) != 1:
-        raise ValueError("config files must be direct children of the config directory")
     if any(part in {"", ".", ".."} for part in relative.parts):
         raise ValueError("config path must stay within the config directory")
     if candidate.suffix not in CONFIG_SUFFIXES:
@@ -217,17 +206,6 @@ def _starts_with_default_config_dir(path: Path) -> bool:
     parts = path.parts
     default_parts = DEFAULT_CONFIG_DIR.parts
     return parts[: len(default_parts)] == default_parts
-
-
-def _allows_nested_config_paths(
-    config_dir: str | Path,
-    *,
-    root: str | Path | None = None,
-) -> bool:
-    return config_dir_path(config_dir, root=root) == config_dir_path(
-        DEFAULT_CONFIG_DIR,
-        root=root,
-    )
 
 
 def _with_trailing_newline(text: str) -> str:

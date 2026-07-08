@@ -1,86 +1,79 @@
 # Models Overview
 
-The models module owns provider-neutral model role boundaries. It contains
-model-specific folders, contracts, configs, and adapters, while keeping the
-runtime orchestration boundary independent of the vLLM transport details.
+The models module owns provider-neutral model role boundaries. It should
+contain model-specific folders, contracts, configs, and adapters, while
+keeping backend details swappable.
 
-The implemented real model roles are:
+The target model roles are:
 
 - orchestrator agent `X`
-- transition change summary model
-- agent context historizer
+- world prediction model `S`
+- goal prediction model `G`
 - updater `P`
 
-The current real backend for every implemented model role is vLLM through its
-OpenAI-compatible Chat Completions API. The `openai` Python SDK is used only as
-the HTTP client for that vLLM endpoint; there is no OpenAI model provider.
-Ollama, HuggingFace, and Diffusers provider paths are not part of the current
-runtime.
+World `S` is the active prediction role in normal runtime. Goal `G` remains in
+the source tree as a dormant role contract, but runtime assembly does not build
+or call it. Maintained world context is fed to updater `P`, which revises
+Agent `X` context for later decisions. Model roles do not own persistence.
 
 ## Target Folder Intent
 
-The source tree keeps model roles separate:
+The source tree should keep model roles separate:
 
 - `models/orchestrator_agent`: decision model `X`
-- `models/change`: transition change summary model
-- `models/historizer`: agent context history summary model
+- `models/world`: world prediction model `S`
+- `models/goal`: goal prediction model `G`
 - `models/updater`: updater model `P`
-- `models/observation_text.py`: shared ARC-grid-to-text serialization
+- `models/description`: shared structured description capability used by
+  world and goal
 
-Each role exposes a provider-neutral contract to orchestration. vLLM adapters
-live inside role-local `providers/` folders and translate between the framework
-shape and the vLLM request shape. `models/providers/` is the final provider-call
-layer: it owns OpenAI-compatible Chat Completions request assembly, the actual
-vLLM call, and raw response normalization. It should not own role concepts such
-as `AgentTrace`, updater tasks, or instruction-folder selection.
+Each role exposes a provider-neutral contract to orchestration. Provider
+adapters may live at a shared capability boundary when roles use the same
+provider/output contract. `models/providers/` is the final provider-call layer:
+it owns provider SDK/runtime request assembly, the actual provider call, and
+raw response normalization. It should not own role concepts such as
+`PredictionResult`, `AgentTrace`, updater tasks, or instruction-folder
+selection.
 
-Provider-neutral contracts are intentionally kept even though the only real
-backend is vLLM. That keeps orchestration from branching on concrete provider
-objects and preserves clear role boundaries.
+Current provider layout:
 
-## Observation Contract
+- `models/orchestrator_agent/providers`: `openai`, `ollama`, plus an
+  unsupported `configurable` placeholder
+- `models/description/providers`: description-producing OpenAI/Ollama/vLLM
+  providers shared by world and dormant goal
+- `models/updater/providers`: real text-backed `openai`, `ollama`, and `vllm` providers
+  for world/agent game-context updater tasks and the shared general updater
+  task, plus dormant goal updater support and an unsupported `configurable`
+  placeholder; runtime wires the active updater task slots from these providers
 
-Implemented frame-consuming vLLM roles receive `ObservationText` plus cropped
-PNG image attachments for the same ARC cells. The serializer accepts native 2D
-ARC integer grids only, crops to original
-coordinates `x=3..60` and `y=3..60`, optionally prints cropped rows with
-original `0..63` coordinate labels and uppercase ARC symbols `0..F`, lists
-4-connected same-symbol components unless disabled by config or the per-frame
-overflow budget is exceeded, falls back from verbose component `runs=` geometry
-to compact component fields before omitting components, optionally groups
-same-symbol same-shape components, and emits component-level deltas for frame
-bundles and change prompts.
-Component IDs are frame-local; if either adjacent frame omits components, delta
-text keeps only adjacent changed-cell counts and does not emit component IDs.
-Observation-facing role instructions include a static ARC symbol color
-glossary. Prompts still treat the serialized symbols and coordinates as
-authoritative.
+Adapters can point to local VLMs, custom neural networks, LoRA-updated models,
+or hybrid backends without changing orchestration.
 
-SQLite memory remains unchanged. Observation text is computed on demand while
-building prompts, and cropped image payloads are computed at the vLLM adapter
-boundary. Debug model-input capture stores the raw provider request including
-image data URLs; terminal debug rendering sanitizes those data URLs.
+## Backend Notes
 
-Long retained transition bundles can be summarized in balanced overlapping
-chunks. Each chunk sends images for the serialized frames it contains. When
-multiple chunk summaries are produced, the optional final change reducer sees
-ordered partial summaries, deterministic changed-cell metrics, action context,
-row-only first/final/boundary keyframes, and cropped images for those selected
-keyframes.
-
-## Current Backend Notes
+World and dormant goal adapters share the `models/description` capability.
+Role adapters provide the role spec, instruction folder, and
+action-conditioning rule; shared description providers translate prompt/image
+requests into OpenAI, Ollama, or vLLM
+calls and normalize responses into provider-neutral `PredictionResult` values
+that updater `P` uses to improve future role contexts.
 
 Each prompt-backed role call combines immutable role instructions with mutable
-context. Agent `X` uses
-`models/orchestrator_agent/instructions/system_prompt.md` as its immutable
-instruction. Change, historizer, and updater roles use their role-local
-instruction files. Mutable context remains ordinary text supplied through the
-role contracts.
+context. Agent `X` uses `models/orchestrator_agent/instructions/system_prompt.md`
+as its immutable instruction and carries its mutable `K + L` context in the
+Markdown user prompt. Agent X provider calls use one shared step loop that
+sends the final action schema through the provider structured-output field
+with each step and handles any future generic tool calls before accepting final
+structured output. World `S` and goal `G`
+use their role-local `instructions/instruction_prompt*.md` files as provider
+instruction/system content. The mutable role context remains `K + L` and is
+supplied through `RoleContext.composed()` in the user payload. World user
+payloads also include the committed action because `S` is action-conditioned.
+The implementation-facing model input/output reference lives in
+[`inputs.md`](inputs.md) and [`outputs.md`](outputs.md).
 
-New Agent `X` ACTION6 outputs are validated against the active serialized crop:
-with the default `crop_cells=3`, valid new coordinates are `x/y=3..60`.
-Historical ACTION6 rows remain rendered as recorded original ARC grid data.
-Cropped-frame changed counts are used for model-facing transition evidence and
-no-change suppression. New ACTION6 outputs include both visible cropped ARC
-coordinates and target text. Repeated zero-change ACTION6 attempts suppress
-only the exact `x,y` coordinate in prompts; ACTION6 itself remains available.
+World predictions are action-conditioned. Goal predictions are observation and
+goal-context conditioned; they do not require an action.
+
+Other model roles may use different providers or local runtimes. Sharing a
+provider is an implementation choice, not a module boundary.

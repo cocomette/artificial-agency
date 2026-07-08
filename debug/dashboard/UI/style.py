@@ -434,7 +434,6 @@ def render_dashboard_header(page: str, theme: str = "System") -> None:
         "Test Workshop": "Run manual E2E scripts and inspect their image and JSON artifacts.",
         "Live Play": "Follow the freshest persisted turn while a run is active.",
         "Offline Inspector": "Review prior runs, model inputs, and raw redacted state.",
-        "Scoring": "Compare memory runs with ARC-AGI human baseline stats.",
     }
     safe_page = html.escape(page)
     safe_description = html.escape(descriptions.get(page, "Local runtime console."))

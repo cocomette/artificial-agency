@@ -7,9 +7,7 @@ from dataclasses import asdict
 from typing import Any
 
 from face_of_agi.contracts import (
-    ActionHistoryItem,
-    ActionHistoryResetMarker,
-    ActionHistoryScoreAdvanceMarker,
+    ActionHistoryEntry,
     AgentTrace,
     ActionSpec,
     ContextDocuments,
@@ -17,8 +15,8 @@ from face_of_agi.contracts import (
     MStateRecord,
     Observation,
     ObservationRef,
+    PostDecisionPredictions,
     RoleContext,
-    RunMetadataRecord,
     TurnMetrics,
 )
 from face_of_agi.debug.contracts import ModelInputDebugRecord
@@ -44,11 +42,13 @@ class StateMemory:
         chosen_action: ActionSpec,
         contexts: ContextDocuments,
         agent_trace: AgentTrace,
+        post_decision_predictions: PostDecisionPredictions | None = None,
         turn_metrics: TurnMetrics | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> MStateRecord:
         """Store one complete frame-after-frame M state."""
 
+        predictions = post_decision_predictions or PostDecisionPredictions()
         return self.database.write_m_state(
             run_id=run_id,
             game_id=game_id,
@@ -57,8 +57,12 @@ class StateMemory:
             frame_count=frame_count,
             current_observation=current_observation,
             chosen_action=chosen_action,
+            world_context=contexts.world,
+            goal_context=contexts.goal,
             agent_context=contexts.agent,
             agent_trace=agent_trace,
+            world_prediction=predictions.world_prediction,
+            goal_prediction=predictions.goal_prediction,
             turn_metrics=(
                 turn_metrics or TurnMetrics()
             ),
@@ -76,6 +80,16 @@ class StateMemory:
         general_contexts = self.read_latest_general_contexts()
         latest_state = self.read_latest_state(game_id)
         return ContextDocuments(
+            world=_hydrated_role_context(
+                general_contexts.world,
+                latest_state.world_context if latest_state is not None else None,
+                defaults.world,
+            ),
+            goal=_hydrated_role_context(
+                general_contexts.goal,
+                latest_state.goal_context if latest_state is not None else None,
+                defaults.goal,
+            ),
             agent=_hydrated_role_context(
                 general_contexts.agent,
                 latest_state.agent_context if latest_state is not None else None,
@@ -119,10 +133,11 @@ class StateMemory:
         turn_id: int,
         control_mode: FrameControlMode,
         previous_observation_ref: ObservationRef | None,
-        recent_action_history: tuple[ActionHistoryItem, ...],
+        recent_action_history: tuple[ActionHistoryEntry, ...],
         chosen_action: ActionSpec,
         contexts: ContextDocuments,
         agent_trace: AgentTrace,
+        post_decision_predictions: PostDecisionPredictions | None = None,
         turn_metrics: TurnMetrics | None = None,
     ) -> MStateRecord:
         """Complete a prewritten frame-turn M row with standard metadata."""
@@ -132,6 +147,7 @@ class StateMemory:
             chosen_action=chosen_action,
             contexts=contexts,
             agent_trace=agent_trace,
+            post_decision_predictions=post_decision_predictions,
             turn_metrics=turn_metrics,
             metadata={
                 "turn_id": turn_id,
@@ -142,7 +158,7 @@ class StateMemory:
                     else None
                 ),
                 "recent_action_history": [
-                    _action_history_metadata(item) for item in recent_action_history
+                    asdict(entry) for entry in recent_action_history
                 ],
             },
         )
@@ -168,6 +184,8 @@ class StateMemory:
             frame_index=frame_index,
             frame_count=frame_count,
             current_observation=current_observation,
+            world_context=contexts.world,
+            goal_context=contexts.goal,
             agent_context=contexts.agent,
             metadata=metadata,
         )
@@ -179,16 +197,22 @@ class StateMemory:
         chosen_action: ActionSpec,
         contexts: ContextDocuments,
         agent_trace: AgentTrace,
+        post_decision_predictions: PostDecisionPredictions | None = None,
         turn_metrics: TurnMetrics | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> MStateRecord:
         """Complete a prewritten M source row after the frame turn resolves."""
 
+        predictions = post_decision_predictions or PostDecisionPredictions()
         return self.database.complete_m_state(
             state_id=state_id,
             chosen_action=chosen_action,
+            world_context=contexts.world,
+            goal_context=contexts.goal,
             agent_context=contexts.agent,
             agent_trace=agent_trace,
+            world_prediction=predictions.world_prediction,
+            goal_prediction=predictions.goal_prediction,
             turn_metrics=(
                 turn_metrics or TurnMetrics()
             ),
@@ -213,45 +237,23 @@ class StateMemory:
             state_id=state_id,
         )
 
-    def read_recent_agent_game_contexts(
+    def read_previous_world_game_context(
         self,
         *,
         game_id: str,
-        run_id: str,
         before_state_id: int | None,
-        limit: int,
-    ) -> tuple[str, ...]:
-        """Return recent same-run complete agent game contexts before a state row."""
+    ) -> str | None:
+        """Return the latest complete world game context before a state row."""
 
-        if before_state_id is None or limit <= 0:
-            return ()
-        return self.database.read_recent_agent_game_contexts_before(
+        if before_state_id is None:
+            return None
+        previous_context_state = self.read_complete_state_before(
             game_id=game_id,
-            run_id=run_id,
             state_id=before_state_id,
-            limit=limit,
         )
-
-    def read_agent_game_context_history(
-        self,
-        *,
-        game_id: str,
-        run_id: str,
-        before_state_id: int | None,
-        limit: int,
-    ) -> tuple[str, ...]:
-        """Return recent same-run complete agent game contexts oldest-to-newest."""
-
-        return tuple(
-            reversed(
-                self.read_recent_agent_game_contexts(
-                    game_id=game_id,
-                    run_id=run_id,
-                    before_state_id=before_state_id,
-                    limit=limit,
-                )
-            )
-        )
+        if previous_context_state is None:
+            return None
+        return previous_context_state.world_context.game
 
     def read_latest_state(self, game_id: str) -> MStateRecord | None:
         """Read the latest complete M state for one game."""
@@ -273,6 +275,8 @@ class StateMemory:
 
         return self.database.update_m_state_contexts(
             state_id=state_id,
+            world_context=contexts.world,
+            goal_context=contexts.goal,
             agent_context=contexts.agent,
         )
 
@@ -280,38 +284,6 @@ class StateMemory:
         """List complete M state rows, optionally scoped to one game."""
 
         return self.database.list_m_states(game_id=game_id)
-
-    def write_run_metadata(
-        self,
-        *,
-        run_id: str,
-        game_id: str,
-        kind: str,
-        metadata: dict[str, Any] | None = None,
-    ) -> RunMetadataRecord:
-        """Store one run-level metadata row."""
-
-        return self.database.write_run_metadata(
-            run_id=run_id,
-            game_id=game_id,
-            kind=kind,
-            metadata=metadata,
-        )
-
-    def list_run_metadata(
-        self,
-        *,
-        run_id: str | None = None,
-        game_id: str | None = None,
-        kind: str | None = None,
-    ) -> list[RunMetadataRecord]:
-        """List stored run-level metadata rows."""
-
-        return self.database.list_run_metadata(
-            run_id=run_id,
-            game_id=game_id,
-            kind=kind,
-        )
 
     def write_model_input_debug_record(
         self,
@@ -440,20 +412,3 @@ def _dict(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
     return {}
-
-
-def _action_history_metadata(item: ActionHistoryItem) -> dict[str, Any]:
-    if isinstance(item, ActionHistoryResetMarker):
-        return {
-            "type": "game_reset",
-            "reason": item.reason,
-            "restart_count": item.restart_count,
-        }
-    if isinstance(item, ActionHistoryScoreAdvanceMarker):
-        return {
-            "type": "score_advance",
-            "previous_score": item.previous_score,
-            "new_score": item.new_score,
-            "delta": item.delta,
-        }
-    return asdict(item)
