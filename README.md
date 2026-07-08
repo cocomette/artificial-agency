@@ -1,15 +1,30 @@
 # FACE-OF-AGI
 
-Minimal Python framework for an ARC-AGI-3 agent.
+FACE-OF-AGI is our research codebase for exploring agentic approaches to [ARC-AGI-3](https://arcprize.org/arc-agi/3): an interactive benchmark where agents must discover goals, learn from feedback, and act efficiently in unfamiliar environments. Our work focused on the ARC Prize 2026 Kaggle competition challenge, where agents must operate under limited resources and without internet access.
 
-This repo contains a Python runtime shell, an ARC-AGI environment adapter,
-orchestration loop scaffolding, vLLM-backed model-role adapters, text
-observation serialization, and SQLite-backed memory. Architecture context lives
-under `doc/architecture/`.
+## Overview
 
-The only real model backend is vLLM through its OpenAI-compatible Chat
-Completions API. The `openai` Python package remains a transport client for
-that vLLM endpoint; it is not OpenAI provider support.
+This `main` branch contains the concept we submitted to the ARC-AGI competition. It is one of the later concepts we tested, and it placed us in the top 10 at the mid-competition milestone on June 30, 2026.
+
+The repo contains different solution concepts across different branches, ranging from simpler model setups to orchestrator-based approaches where agents are exposed as tools. The submitted solution used Qwen 3.6 35B served locally through vLLM.
+
+The common architecture shape is an orchestration layer between the game environment, the model harness, and memory. Game data, actions, model I/O, and contexts are stored in SQLite, where they can be used by the agent and inspected through the debug dashboard.
+
+## Branches
+
+The repository is organized around experimental branches:
+
+- `feat/*` branches explore separate ideas, workflows, and research directions.
+- Each branch updates its own `README.md` and `doc/` folder according to the concept it describes.
+- When reading a branch, use that branch's documentation as the source of context.
+
+## Repository Map
+
+- `src/face_of_agi/` - project source code
+- `doc/` - branch-specific project and architecture notes
+- `debug/` - local debugging, inspection, and analysis tools with a debug dashboard app.
+- `tests/` - regression tests for supported mechanics
+- `kaggle/` - Kaggle notebook build and upload workflow
 
 ## Setup
 
@@ -20,31 +35,15 @@ uv sync --no-dev
 uv run --no-dev python -c "import face_of_agi"
 ```
 
-Dependency profiles:
-
-- `uv sync --no-dev`: minimal runtime plus the vLLM HTTP transport client.
-- `uv sync --group test --no-dev`: lightweight regression-test environment.
-- `uv sync --group debug`: local Streamlit dashboard.
-- `uv sync --group dev`: full development environment with tests and notebooks.
-
-For Linux window rendering with `render_mode: human`, install Tk once:
-
-```bash
-sudo apt-get install python3-tk
-```
-
 ## First Run
 
-Create or refresh the local game catalog before using `game_index`:
+Create or refresh the local ARC-AGI game catalog before using `game_index`:
 
 ```bash
 uv run --no-dev python -m face_of_agi.runtime.shell --list-games
 ```
 
-This writes the ignored file `src/face_of_agi/environment/local_games.json`.
-The starter loop uses `game_index` from
-`src/face_of_agi/runtime/configs/starter_loop.yaml` to choose one of those
-catalog entries.
+This writes the ignored file `src/face_of_agi/environment/local_games.json`. The starter loop uses `game_index` from `src/face_of_agi/runtime/configs/starter_loop.yaml` to choose one of those catalog entries.
 
 Run the starter config:
 
@@ -52,53 +51,13 @@ Run the starter config:
 uv run --no-dev python -m face_of_agi.runtime.shell --config src/face_of_agi/runtime/configs/starter_loop.yaml
 ```
 
-The starter config expects a vLLM OpenAI-compatible server at the configured
-`models.shared_vlm.base_url`. It runs real vLLM-backed agent, change,
-historizer, and updater roles.
-
-Quick copy-paste runtime commands also live in `doc/run_runtime.md`.
+The starter config expects a vLLM OpenAI-compatible server at the configured `models.shared_vlm.base_url`. It runs real vLLM-backed agent, change, historizer, and updater roles.
 
 ## Runtime Configs
 
-Ready-to-run configs live under `src/face_of_agi/runtime/configs/`:
+Ready-to-run configs live under `src/face_of_agi/runtime/configs/`. `starter_loop.yaml` is the default entry point, and the `vllm/` folder contains hardware and model-specific variants.
 
-- `starter_loop.yaml`: default vLLM-first runtime config.
-- `vllm/**`: hardware/model-specific vLLM runtime variants.
-
-The model config shape is:
-
-```yaml
-models:
-  observation_text:
-    crop_cells: 3
-    overflow_chars_per_frame: 12000
-    include_rows: true
-    include_component_runs: true
-  shared_vlm:
-    backend: vllm
-    model: Qwen/Qwen3.6-35B-A3B-FP8
-    base_url: http://127.0.0.1:8000/v1
-    api_key: EMPTY
-  agent:
-    backend: vllm
-    max_tool_calls: 0
-    repair_attempts: 1
-  change:
-    backend: vllm
-  historizer:
-    backend: vllm
-  updater:
-    agent:
-      backend: vllm
-    general:
-      backend: vllm
-```
-
-Runtime rejects OpenAI, Ollama, HuggingFace, Diffusers, world, and goal backend
-keys. Model-facing observations are serialized as cropped text with original ARC
-grid coordinates and uppercase hex symbols `0..F`. Image payloads, image URLs,
-base64 data URLs, and image input config fields are not accepted by model-input
-capture.
+Quick copy-paste runtime commands live in `doc/run_runtime.md`. The full config reference lives in `doc/architecture/software/config.md`.
 
 Clear memory database rows without starting ARC:
 
@@ -106,32 +65,27 @@ Clear memory database rows without starting ARC:
 uv run --no-dev python -m face_of_agi.runtime.shell --clean-db
 ```
 
-If you installed the dev environment, use the same commands with
-`uv run --group dev` instead of `uv run --no-dev`.
-
-For the full config reference, see `doc/architecture/software/config.md`.
-For runtime notes and copy-paste command variants, see `doc/run_runtime.md`.
-
 ## Debug Dashboard
 
-The local Streamlit dashboard can launch saved runtime configs and inspect
-persisted FACE-OF-AGI memory turns from SQLite. ARC and vLLM run only when you
-explicitly click `RUN config` in the Runner page.
+The local Streamlit dashboard was built to make runs inspectable while developing agents. It can launch saved runtime configs, edit YAML configs from the browser, inspect persisted SQLite memory turns, review saved runs, and replay agent behavior frame by frame.
 
 ```bash
 uv sync --group debug
-uv run --group debug streamlit run debug/dashboard/app.py -- --database runs/memory.sqlite
+uv run --group debug streamlit run debug/dashboard/app.py -- --database runs/kaggle-debug/runs
 ```
 
-Normal runtime runs prune `M` to the latest state per game. For a debug run
-where every `m_states` row should remain inspectable, set
-`debug_keep_all_m_states: true` in the runtime YAML.
+The `--database` argument points to a folder of SQLite memory files. Dashboard-launched runs write to `memory.sqlite` inside that folder, and the scoring view reads the SQLite files in that folder. The dashboard is useful for inspecting runs, running local configs easily, inspecting results live, running focused E2E tests, and computing scores according to the ARC-AGI-3 scoring method.
 
-The Runner page uses the same runtime shell entrypoint as terminal runs and
-includes a collapsible config editor under the config selector. It lists YAML
-files from `src/face_of_agi/runtime/configs/`, validates edits, and supports
-`Save` or `Save As`. The sidebar can clear the selected SQLite memory database
-through the runtime shell's `--clean-db` path.
+The dashboard works with local runs as well as remote Modal and Kaggle runs through memory-file pulling.
+
+<p align="center">
+  <img src="doc/assets/readme/dashboard-memory-turns.png" alt="Dashboard memory turns view" width="49%">
+  <img src="doc/assets/readme/dashboard-scoring.png" alt="Dashboard scoring view" width="49%">
+</p>
+
+<p align="center">
+  <img src="doc/assets/readme/dashboard-model-io.png" alt="Dashboard model I/O view" width="100%">
+</p>
 
 ## Tests
 
@@ -141,43 +95,19 @@ Run the model-free regression suite:
 uv run --locked --group test --no-dev python -m pytest -q
 ```
 
-GitHub Actions runs this command automatically for pull requests. This gate
-uses only the lightweight `test` dependency group and does not call external
-model APIs or a live vLLM server.
+GitHub Actions runs this command automatically for pull requests. This gate uses only the lightweight `test` dependency group and does not call external model APIs or a live vLLM server.
 
 Testing details live in `doc/test/test_suite.md` and `doc/test/end_to_end.md`.
 
+## Reports And References
+
+We will add a project report to this repository summarizing the work, explored ideas, results, and lessons learned.
+
+Useful starting points:
+
+- [ARC-AGI-3](https://arcprize.org/arc-agi/3)
+- [ARC Prize 2026 ARC-AGI-3 Kaggle Competition](https://www.kaggle.com/competitions/arc-prize-2026-arc-agi-3)
+
 ## License
 
-Project source, scripts, configs, docs, and supporting materials are offered
-under `Apache-2.0`. Third-party dependencies, datasets, model weights, and
-other external artifacts remain under their own license terms. See `LICENSE`,
-`NOTICE`, and `THIRD_PARTY_LICENSES.md`.
-
-## Pull Requests
-
-Pull requests also validate the source branch name. Use lowercase kebab-case
-after one of these prefixes:
-
-```text
-feat/<short-summary>
-fix/<short-summary>
-docs/<short-summary>
-test/<short-summary>
-refactor/<short-summary>
-chore/<short-summary>
-ci/<short-summary>
-audit/<short-summary>
-release/<short-summary>
-wp/<work-package-or-step-summary>
-```
-
-## Docs
-
-- `doc/architecture/system_architecture.md`: high-level agent architecture.
-- `doc/architecture/software/`: target software module boundaries.
-- `doc/architecture/software/config.md`: runtime config reference.
-- `doc/test/`: regression and end-to-end test commands.
-- `doc/architecture/techstack.md`: current tools, frameworks, and runtime stack.
-- `doc/run_runtime.md`: runtime command notes.
-- `kaggle/README.md`: optional Kaggle notebook build and upload workflow.
+Project source, scripts, configs, docs, and supporting materials are offered under `Apache-2.0`. Third-party dependencies, datasets, model weights, and other external artifacts remain under their own license terms.

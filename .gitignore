@@ -31,3 +31,19 @@ kaggle/debug-notebooks/kernel-metadata.json
 src/face_of_agi/environment/local_games.json
 debug/scoring/human_baseline.json
 debug/scoring/human_baseline_stats.json
+
+# Local agent and environment files
+.agents/
+AGENTS.md
+agents.md
+agent.md
+agemtn.md
+.env.*
+*.env
+*.env.*
+!.env.example
+!*.env.example
+
+# Modal local credentials
+.modal.toml
+modal.toml
