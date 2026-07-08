@@ -3,41 +3,44 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from concurrent.futures import Future, ThreadPoolExecutor
-from time import perf_counter
-from typing import TypeVar
+from dataclasses import asdict
+import sys
+from typing import Any, TextIO
 
-from face_of_agi.contracts import ContextDocuments, FrameTurnContext, GameRunResult
-from face_of_agi.contracts import RuntimeConfig
+from arcengine import GameState
+
+from face_of_agi.contracts import (
+    ActionSpec,
+    ContextDocuments,
+    FrameControlMode,
+    FrameTurnContext,
+    GameRunResult,
+    Observation,
+    ObservationRef,
+    PostDecisionPredictions,
+    RewardUpdateQuantities,
+    RuntimeConfig,
+    ToolResult,
+    UpdaterFrameTransitionInput,
+)
 from face_of_agi.environment.adapter import EnvironmentAdapter
 from face_of_agi.environment.config import EnvironmentConfig
 from face_of_agi.memory import StateMemory
-from face_of_agi.models.change import ChangeSummaryModel, ChangeSummaryResult
-from face_of_agi.models.historizer import AgentContextHistorySummary
-from face_of_agi.models.adapters import (
-    AgentContextHistorizerModel,
-    OrchestratorAgentModel,
-)
+from face_of_agi.models.adapters import OrchestratorAgentModel
 from face_of_agi.models.orchestrator_agent import AgentToolRuntime
-from face_of_agi.models.updater import UpdaterTaskRegistry
-from face_of_agi.debug.bus import DebugBus
-from face_of_agi.debug.events import FrameTurnCompleted, RunStopped
-from face_of_agi.orchestration.game_loop.actions import steps
-from face_of_agi.orchestration.game_loop.lifecycle import (
-    check_lifecycle,
-    check_runtime_deadline,
-    finish_run,
-    start_run,
-    startup_error_result,
-    stop_for_framework_error,
+from face_of_agi.models.updater import (
+    AgentContextUpdateInput,
+    ToolContextUpdateInput,
+    UpdaterModel,
 )
-from face_of_agi.runtime import timing as runtime_timing
+from face_of_agi.orchestration.game_loop.post_decision_predictions import (
+    PostDecisionPredictionRunner,
+)
 
 AgentToolRuntimeFactory = Callable[
     [str, str, int, FrameTurnContext],
     AgentToolRuntime,
 ]
-T = TypeVar("T")
 
 
 class GameLoopStateMachine:
@@ -53,20 +56,18 @@ class GameLoopStateMachine:
         state_memory: StateMemory | None,
         contexts: ContextDocuments,
         agent: OrchestratorAgentModel,
-        change_summary_model: ChangeSummaryModel,
-        agent_context_historizer: AgentContextHistorizerModel | None,
-        updater_tasks: UpdaterTaskRegistry,
+        updater: UpdaterModel,
+        post_decision_prediction_runner: PostDecisionPredictionRunner,
         tool_runtime_factory: AgentToolRuntimeFactory | None = None,
-        debug: DebugBus,
+        trace_output: TextIO | None = None,
     ) -> None:
         self.state_memory = state_memory
         self.contexts = contexts
         self.agent = agent
-        self.change_summary_model = change_summary_model
-        self.agent_context_historizer = agent_context_historizer
-        self.updater_tasks = updater_tasks
+        self.updater = updater
+        self.post_decision_prediction_runner = post_decision_prediction_runner
         self.tool_runtime_factory = tool_runtime_factory
-        self.debug = debug
+        self.trace_output = trace_output or sys.stdout
 
     def run(
         self,
@@ -77,243 +78,416 @@ class GameLoopStateMachine:
     ) -> GameRunResult:
         """Run one selected ARC game until a terminal loop condition."""
 
-        try:
-            session = start_run(
-                config=config,
-                environment=environment,
-                environment_config=environment_config,
-                contexts=self.contexts,
-                state_memory=self.state_memory,
-                debug=self.debug,
+        if environment_config.game_id is None:
+            raise RuntimeError("environment config is missing the resolved game_id")
+
+        selected_game_id = environment.select_game_by_id(environment_config.game_id)
+        self._hydrate_contexts_from_latest_state(selected_game_id)
+        observation = environment.reset()
+        remaining_actions = environment_config.max_actions_per_level
+        real_step_count = 0
+        frame_turn_count = 0
+        completed_levels = 0
+        last_completed_levels = 0
+        first_observation: Observation | None = None
+        first_observation_ref: ObservationRef | None = None
+        last_decision = None
+        state_record_ids: list[int] = []
+        persisted_observation_ids: set[str] = set()
+
+        while True:
+            info = environment.get_info()
+            state = info.state
+
+            if state == GameState.WIN:
+                return GameRunResult(
+                    run_id=config.run_id,
+                    game_id=selected_game_id,
+                    initial_observation_ref=first_observation_ref,
+                    decision=last_decision,
+                    state_record_ids=tuple(state_record_ids),
+                    stop_reason="game_end",
+                    step_count=real_step_count,
+                    completed_levels=info.levels_completed,
+                    last_state=state,
+                )
+
+            if state == GameState.GAME_OVER:
+                observation = environment.reset()
+                remaining_actions = environment_config.max_actions_per_level
+                reset_info = environment.get_info()
+                last_completed_levels = reset_info.levels_completed
+                continue
+
+            if info.levels_completed > last_completed_levels:
+                completed_levels = info.levels_completed
+                last_completed_levels = info.levels_completed
+                remaining_actions = environment_config.max_actions_per_level
+
+            if remaining_actions <= 0:
+                return GameRunResult(
+                    run_id=config.run_id,
+                    game_id=selected_game_id,
+                    initial_observation_ref=first_observation_ref,
+                    decision=last_decision,
+                    state_record_ids=tuple(state_record_ids),
+                    stop_reason="action_limit_reached",
+                    step_count=real_step_count,
+                    completed_levels=completed_levels,
+                    last_state=state,
+                )
+
+            real_actions = tuple(info.available_actions) or tuple(
+                environment.get_action_space()
             )
-        except Exception as exc:
-            result = startup_error_result(
-                config=config,
-                environment_config=environment_config,
-                error=exc,
-            )
-            self.debug.emit(RunStopped(result))
-            return result
+            frame_buffer = self._unroll_observation(observation)
 
-        with ThreadPoolExecutor(max_workers=2) as turn_executor:
-            while session.running:
-                context_history_future: Future[AgentContextHistorySummary] | None = None
-                change_future: Future[ChangeSummaryResult] | None = None
+            for frame_index, current_observation in enumerate(frame_buffer):
+                is_final_frame = frame_index == len(frame_buffer) - 1
+                control_mode = (
+                    FrameControlMode.real_environment_turn(real_actions)
+                    if is_final_frame
+                    else FrameControlMode.animation_unroll()
+                )
+                current_ref = self._persist_observation_once(
+                    observation=current_observation,
+                    persisted_observation_ids=persisted_observation_ids,
+                )
 
-                try:
-                    session.process_turn = True
-                    if check_runtime_deadline(session):
-                        continue
-                    check_lifecycle(session)
-                except Exception as exc:
-                    stop_for_framework_error(session, error=exc)
-                    continue
-                if not session.process_turn:
-                    continue
+                if first_observation is None:
+                    first_observation = current_observation
+                    first_observation_ref = current_ref
 
-                turn_started_at = perf_counter()
-                try:
-                    steps.load_frame_buffer_if_needed(session)
-                    steps.enter_frame_turn(
-                        session,
-                        contexts=self.contexts,
-                        state_memory=self.state_memory,
-                        tool_runtime_factory=self.tool_runtime_factory,
-                        debug=self.debug,
+                frame_context = FrameTurnContext(
+                    run_id=config.run_id,
+                    game_id=selected_game_id,
+                    first_observation_ref=first_observation_ref,
+                    current_observation_ref=current_ref,
+                    current_observation=current_observation,
+                    frame_index=frame_index,
+                    frame_count=len(frame_buffer),
+                    control_mode=control_mode,
+                )
+                turn_id = frame_turn_count + 1
+                tool_runtime = self._build_tool_runtime(
+                    run_id=config.run_id,
+                    game_id=selected_game_id,
+                    turn_id=turn_id,
+                    frame_context=frame_context,
+                )
+                decision = self.agent.decide(
+                    context=self.contexts.agent,
+                    first_observation=first_observation,
+                    current_observation=current_observation,
+                    action_space=control_mode.allowed_actions,
+                    tool_runtime=tool_runtime,
+                )
+                last_decision = decision
+                frame_turn_count = turn_id
+
+                self._validate_decision(
+                    decision.final_action,
+                    control_mode=control_mode,
+                )
+                self._write_frame_trace(
+                    frame_turn=frame_turn_count,
+                    frame_context=frame_context,
+                    action=decision.final_action,
+                )
+
+                if control_mode.controllable:
+                    post_decision_predictions = self._run_post_decision_predictions(
+                        current_ref=current_ref,
+                        current_observation=current_observation,
+                        final_action=decision.final_action,
                     )
-                    current = steps.require_current(session)
-                    if current.control_mode is None:
-                        raise RuntimeError(
-                            "current frame snapshot is missing control mode"
-                        )
-                    run_context_updates = True
-                    if check_runtime_deadline(session):
-                        continue
+                    real_step_count += 1
+                    next_observation = environment.step(decision.final_action)
+                    remaining_actions -= 1
+                    next_frame = self._unroll_observation(next_observation)[0]
+                    next_ref = self._persist_observation_once(
+                        observation=next_frame,
+                        persisted_observation_ids=persisted_observation_ids,
+                    )
+                    update_input = UpdaterFrameTransitionInput(
+                        current_observation_ref=current_ref,
+                        actual_next_observation_ref=next_ref,
+                        decision_trace=decision.trace,
+                        post_decision_predictions=post_decision_predictions,
+                        submitted_action=decision.final_action,
+                        metadata={"shell": "noop", "controllable": True},
+                    )
+                    self._apply_context_updates(update_input)
+                    self._persist_turn_shell(
+                        run_id=config.run_id,
+                        game_id=selected_game_id,
+                        frame_context=frame_context,
+                        decision=decision,
+                        update_input=update_input,
+                        state_record_ids=state_record_ids,
+                    )
+                    observation = next_observation
+                    break
 
-                    if run_context_updates:
-                        context_history_future = turn_executor.submit(
-                            steps.summarize_agent_context_history,
-                            session,
-                            state_memory=self.state_memory,
-                            agent_context_historizer=self.agent_context_historizer,
-                            debug=self.debug,
-                        )
-                    steps.decide(
-                        session,
-                        agent=self.agent,
-                        contexts=self.contexts,
-                        debug=self.debug,
-                    )
-                    if check_runtime_deadline(session):
-                        continue
-                    steps.resolve_next_snapshot(session, debug=self.debug)
-                    if check_runtime_deadline(session):
-                        continue
+                next_frame = frame_buffer[frame_index + 1]
+                next_ref = self._persist_observation_once(
+                    observation=next_frame,
+                    persisted_observation_ids=persisted_observation_ids,
+                )
+                update_input = UpdaterFrameTransitionInput(
+                    current_observation_ref=current_ref,
+                    actual_next_observation_ref=next_ref,
+                    decision_trace=decision.trace,
+                    synthetic_none_action=decision.final_action,
+                    metadata={"shell": "noop", "controllable": False},
+                )
+                self._apply_context_updates(update_input)
+                self._persist_turn_shell(
+                    run_id=config.run_id,
+                    game_id=selected_game_id,
+                    frame_context=frame_context,
+                    decision=decision,
+                    update_input=update_input,
+                    state_record_ids=state_record_ids,
+                )
 
-                    current = steps.require_current(session)
-                    change_future = turn_executor.submit(
-                        steps.summarize_change_model,
-                        session,
-                        change_model=self.change_summary_model,
-                        debug=self.debug,
-                    )
-                    try:
-                        change_result = _wait_for_future(
-                            change_future,
-                            span_name="game_loop.change_summary.wait",
-                            turn_id=current.turn_id,
-                            step=current.observation.step,
-                        )
-                    finally:
-                        steps.capture_change_summary_inputs(
-                            session,
-                            change_model=self.change_summary_model,
-                            debug=self.debug,
-                        )
-                        change_future = None
-                    steps.attach_change_summary(session, result=change_result)
-                    if check_runtime_deadline(session):
-                        continue
+    def _run_post_decision_predictions(
+        self,
+        *,
+        current_ref: ObservationRef,
+        current_observation: Observation,
+        final_action: ActionSpec,
+    ) -> PostDecisionPredictions:
+        """Run committed S/G predictions after X chooses a real action."""
 
-                    if run_context_updates:
-                        if context_history_future is None:
-                            raise RuntimeError(
-                                "frame turn is missing agent context history work"
-                            )
-                        try:
-                            agent_context_history = _wait_for_future(
-                                context_history_future,
-                                span_name="historizer.agent_context_history.wait",
-                                turn_id=current.turn_id,
-                                step=current.observation.step,
-                            )
-                        finally:
-                            self.debug.capture_model_inputs(
-                                current.to_frame_context(),
-                                current.turn_id,
-                                self.agent_context_historizer,
-                            )
-                            context_history_future = None
-                        if check_runtime_deadline(session):
-                            continue
-
-                        steps.run_updaters(
-                            session,
-                            contexts=self.contexts,
-                            agent_context_history=agent_context_history,
-                            updater_tasks=self.updater_tasks,
-                            state_memory=self.state_memory,
-                            debug=self.debug,
-                        )
-                    steps.persist(
-                        session,
-                        contexts=self.contexts,
-                        state_memory=self.state_memory,
-                        debug=self.debug,
-                    )
-                    current = steps.require_current(session)
-                    decision = steps.require_decision(session)
-                    if current.control_mode is None:
-                        raise RuntimeError("completed frame turn is missing control mode")
-                    self.debug.emit(
-                        FrameTurnCompleted(
-                            run_id=session.config.run_id,
-                            game_id=session.game_id,
-                            game_index=session.environment_config.game_index,
-                            turn_id=current.turn_id,
-                            env_step=current.observation.step,
-                            frame_index=current.frame_index,
-                            frame_count=current.frame_count,
-                            controllable=current.control_mode.controllable,
-                            action=decision.final_action,
-                            turn_duration_seconds=perf_counter() - turn_started_at,
-                            completed_levels=_completed_levels_after_turn(session),
-                            remaining_actions=session.remaining_actions,
-                        )
-                    )
-                    steps.advance(session)
-                except Exception as exc:
-                    stop_for_framework_error(session, error=exc)
-                finally:
-                    _settle_abandoned_turn_future(
-                        change_future,
-                        capture=lambda: steps.capture_change_summary_inputs(
-                            session,
-                            change_model=self.change_summary_model,
-                            debug=self.debug,
-                        ),
-                    )
-                    _settle_abandoned_turn_future(
-                        context_history_future,
-                        capture=lambda: _capture_agent_context_history_inputs(
-                            session,
-                            historizer=self.agent_context_historizer,
-                            debug=self.debug,
-                        ),
-                    )
-
-        return finish_run(
-            session,
-            contexts=self.contexts,
-            updater_tasks=self.updater_tasks,
-            state_memory=self.state_memory,
-            debug=self.debug,
+        return self.post_decision_prediction_runner.predict(
+            current_observation_ref=current_ref,
+            current_observation=current_observation,
+            final_action=final_action,
+            world_context=self.contexts.world,
+            goal_context=self.contexts.goal,
         )
 
+    def _unroll_observation(self, observation: Observation) -> tuple[Observation, ...]:
+        frames = observation.frames
+        if not frames:
+            frames = (observation.frame,)
 
-def _wait_for_future(
-    future: Future[T],
-    *,
-    span_name: str,
-    turn_id: int,
-    step: int | None,
-) -> T:
-    """Wait for a model prerequisite future with optional timing output."""
+        if len(frames) == 1:
+            return (
+                Observation(
+                    id=observation.id,
+                    step=observation.step,
+                    frame=frames[0],
+                    frames=(frames[0],),
+                    raw_frame_data=observation.raw_frame_data,
+                    metadata={
+                        **observation.metadata,
+                        "bundle_observation_id": observation.id,
+                        "frame_index": 0,
+                        "frame_count": 1,
+                    },
+                ),
+            )
 
-    with runtime_timing.span(span_name, turn_id=turn_id, step=step):
-        return future.result()
+        return tuple(
+            Observation(
+                id=f"{observation.id}-frame-{index}",
+                step=observation.step,
+                frame=frame,
+                frames=(frame,),
+                raw_frame_data=observation.raw_frame_data,
+                metadata={
+                    **observation.metadata,
+                    "bundle_observation_id": observation.id,
+                    "frame_index": index,
+                    "frame_count": len(frames),
+                },
+            )
+            for index, frame in enumerate(frames)
+        )
 
+    def _persist_observation_once(
+        self,
+        *,
+        observation: Observation,
+        persisted_observation_ids: set[str],
+    ) -> ObservationRef:
+        ref = ObservationRef(memory="state", id=observation.id)
+        if self.state_memory is None or observation.id in persisted_observation_ids:
+            return ref
 
-def _settle_abandoned_turn_future(
-    future: Future[object] | None,
-    *,
-    capture: Callable[[], None],
-) -> None:
-    """Cancel or drain an abandoned turn future before the next turn starts."""
+        persisted_observation_ids.add(observation.id)
+        return ref
 
-    if future is None:
-        return
-    if future.cancel():
-        return
-    try:
-        future.result()
-    except Exception:
-        pass
-    finally:
-        try:
-            capture()
-        except Exception:
-            pass
+    def _validate_decision(
+        self,
+        action: ActionSpec,
+        *,
+        control_mode: FrameControlMode,
+    ) -> None:
+        if not control_mode.controllable:
+            if not action.is_none():
+                raise RuntimeError(
+                    "non-final unrolled frame requires synthetic NONE action"
+                )
+            return
 
+        if action.is_none():
+            raise RuntimeError("final controllable frame cannot submit synthetic NONE")
 
-def _capture_agent_context_history_inputs(
-    session,
-    *,
-    historizer: AgentContextHistorizerModel | None,
-    debug: DebugBus,
-) -> None:
-    current = session.current
-    if current is None:
-        return
-    debug.capture_model_inputs(
-        current.to_frame_context(),
-        current.turn_id,
-        historizer,
-    )
+        is_allowed = any(
+            candidate.action_id == action.action_id
+            for candidate in control_mode.allowed_actions
+        )
+        if not is_allowed:
+            raise RuntimeError(
+                f"X returned invalid action for current frame: {action.name}"
+            )
 
+    def _build_tool_runtime(
+        self,
+        *,
+        run_id: str,
+        game_id: str,
+        turn_id: int,
+        frame_context: FrameTurnContext,
+    ) -> AgentToolRuntime | None:
+        if self.tool_runtime_factory is None:
+            return None
+        return self.tool_runtime_factory(
+            run_id,
+            game_id,
+            turn_id,
+            frame_context,
+        )
 
-def _completed_levels_after_turn(session) -> int:
-    metrics = session.turn_metrics
-    if metrics is not None and metrics.cumulative_score is not None:
-        return int(metrics.cumulative_score)
-    return int(session.completed_levels)
+    def _persist_turn_shell(
+        self,
+        *,
+        run_id: str,
+        game_id: str,
+        frame_context: FrameTurnContext,
+        decision: Any,
+        update_input: UpdaterFrameTransitionInput,
+        state_record_ids: list[int],
+    ) -> None:
+        if self.state_memory is None:
+            return
+
+        state = self.state_memory.write_state(
+            run_id=run_id,
+            game_id=game_id,
+            step=frame_context.current_observation.step,
+            frame_index=frame_context.frame_index,
+            frame_count=frame_context.frame_count,
+            current_observation=frame_context.current_observation,
+            chosen_action=decision.final_action,
+            contexts=self.contexts,
+            agent_trace=decision.trace,
+            post_decision_predictions=update_input.post_decision_predictions,
+            metadata={
+                "control_mode": asdict(frame_context.control_mode),
+                "update_input": asdict(update_input),
+            },
+        )
+        state_record_ids.append(state.id)
+
+    def _apply_context_updates(
+        self,
+        update_input: UpdaterFrameTransitionInput,
+    ) -> None:
+        """Apply updater P to the live working contexts before persistence."""
+
+        quantities = RewardUpdateQuantities()
+        common_kwargs = {
+            "current_observation_ref": update_input.current_observation_ref,
+            "actual_next_observation_ref": update_input.actual_next_observation_ref,
+            "post_decision_predictions": update_input.post_decision_predictions,
+            "quantities": quantities,
+            "submitted_action": update_input.submitted_action,
+            "synthetic_none_action": update_input.synthetic_none_action,
+            "metadata": dict(update_input.metadata),
+        }
+
+        self.contexts.world = self.updater.update_tool_context(
+            ToolContextUpdateInput(
+                role="world",
+                previous_context=self.contexts.world,
+                tool_results=self._tool_results_for_role(update_input, "world"),
+                **common_kwargs,
+            )
+        )
+        self.contexts.goal = self.updater.update_tool_context(
+            ToolContextUpdateInput(
+                role="goal",
+                previous_context=self.contexts.goal,
+                tool_results=self._tool_results_for_role(update_input, "goal"),
+                **common_kwargs,
+            )
+        )
+        self.contexts.agent = self.updater.update_agent_context(
+            AgentContextUpdateInput(
+                previous_context=self.contexts.agent,
+                trace=update_input.decision_trace,
+                **common_kwargs,
+            )
+        )
+
+    def _tool_results_for_role(
+        self,
+        update_input: UpdaterFrameTransitionInput,
+        role: str,
+    ) -> tuple[ToolResult, ...]:
+        """Return live trace tool results for one updater role."""
+
+        return tuple(
+            result
+            for result in update_input.decision_trace.tool_results
+            if result.tool == role
+        )
+
+    def _hydrate_contexts_from_latest_state(self, game_id: str) -> None:
+        """Use the previous M state contexts when this game has run before."""
+
+        if self.state_memory is None:
+            return
+
+        latest_state = self.state_memory.read_latest_state(game_id)
+        if latest_state is None:
+            return
+
+        self.contexts.world = latest_state.world_context
+        self.contexts.goal = latest_state.goal_context
+        self.contexts.agent = latest_state.agent_context
+
+    def _write_frame_trace(
+        self,
+        *,
+        frame_turn: int,
+        frame_context: FrameTurnContext,
+        action: ActionSpec,
+    ) -> None:
+        controllable = "yes" if frame_context.control_mode.controllable else "no"
+        print(
+            "frame turn"
+            f" {frame_turn}: env_step={frame_context.current_observation.step}"
+            f" frame={frame_context.frame_index + 1}/{frame_context.frame_count}"
+            f" controllable={controllable}",
+            file=self.trace_output,
+        )
+        if action.is_none():
+            print(
+                "action: X returned NONE; environment not stepped",
+                file=self.trace_output,
+            )
+        else:
+            print(
+                f"action: X selected {self._format_action(action)}",
+                file=self.trace_output,
+            )
+
+    def _format_action(self, action: ActionSpec) -> str:
+        if action.data:
+            return f"{action.name} {action.data}"
+        return action.name

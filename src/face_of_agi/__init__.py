@@ -1,11 +1,6 @@
 """Provider-neutral ARC-AGI-3 agent framework."""
 
 from face_of_agi.contracts import (
-    ActionHistoryEntry,
-    ActionHistoryItem,
-    ActionHistoryResetMarker,
-    ActionHistoryScoreAdvanceMarker,
-    ActionOutcomeEvidence,
     ActionSpec,
     AgentTrace,
     ContextDocuments,
@@ -16,22 +11,14 @@ from face_of_agi.contracts import (
     NONE_ACTION_ID,
     Observation,
     ObservationRef,
-    ParallelGameRunFailure,
-    ParallelGameRunResult,
-    ParallelGameRunSuccess,
+    PostDecisionPredictions,
     RuntimeConfig,
     ToolCall,
     ToolResult,
-    TurnMetrics,
     UpdaterFrameTransitionInput,
 )
 
 __all__ = [
-    "ActionHistoryEntry",
-    "ActionHistoryItem",
-    "ActionHistoryResetMarker",
-    "ActionHistoryScoreAdvanceMarker",
-    "ActionOutcomeEvidence",
     "ActionSpec",
     "AgentTrace",
     "ContextDocuments",
@@ -42,12 +29,9 @@ __all__ = [
     "NONE_ACTION_ID",
     "Observation",
     "ObservationRef",
-    "ParallelGameRunFailure",
-    "ParallelGameRunResult",
-    "ParallelGameRunSuccess",
+    "PostDecisionPredictions",
     "RuntimeConfig",
     "ToolCall",
     "ToolResult",
-    "TurnMetrics",
     "UpdaterFrameTransitionInput",
 ]

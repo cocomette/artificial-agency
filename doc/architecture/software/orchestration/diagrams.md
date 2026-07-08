@@ -1,28 +1,32 @@
 # Orchestration Diagrams
 
-## Ownership Around One Frame Turn
+## Ownership Around One Step
 
 ```mermaid
 flowchart LR
     Env["Environment Adapter"] -->|Observation and action space| Orch["Orchestration"]
-    Orch -->|Decision request| X["Agent X"]
+    Orch -->|Decision request| X["Orchestrator Agent X"]
+    X -->|ToolCall with source ref| Orch
+    Orch -->|Resolved persisted frame| Tool["World/Goal Tool"]
+    Tool -->|ToolResult| Orch
+    Orch <-->|Resolve and persist refs| E["Experimental Memory E"]
+    Orch -->|ToolResult plus ref id| X
     X -->|Final action and trace| Orch
-    Orch -->|ActionSpec on controllable frames| Env
-    Orch -->|Observed transition| Change["Change Summary"]
-    Change -->|Summary| Orch
-    Orch -->|Context revisions| Hist["Historizer"]
-    Hist -->|History summary| Orch
-    Orch -->|Trace, summary, metrics| P["Updater P"]
-    P -->|Updated context| Orch
+    Orch -->|ActionSpec| Env
     Orch <-->|Resolve state refs and commit transition| M["Persistent Memory M"]
+    Orch -->|Trace and outcome| P["Updater P"]
+    P -->|Updated context| Orch
+    Orch -->|Context records| M
 ```
 
 ## Persistence Gate
 
 ```mermaid
 flowchart TB
-    X["Agent X"] -->|trace and action| Orch["Orchestration"]
-    Change["Change Summary"] -->|transition summary| Orch
+    S["World Tool S"] -->|prediction| Orch["Orchestration"]
+    G["Goal Tool G"] -->|prediction| Orch
+    X["Agent X"] -->|trace and action| Orch
     P["Updater P"] -->|context updates| Orch
-    Orch <-->|committed run history and state refs| M["M: m_states"]
+    Orch <-->|tool output frames and refs| E["E: e_experiments"]
+    Orch <-->|committed run history and state refs| M["M: state_records"]
 ```

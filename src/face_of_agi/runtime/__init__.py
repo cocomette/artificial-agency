@@ -1,19 +1,5 @@
 """Runtime entry points and loop assembly."""
 
-from typing import Any
+from face_of_agi.runtime.loop import RuntimeLoop
 
-__all__ = ["ParallelRuntimeLoop", "RuntimeLoop"]
-
-
-def __getattr__(name: str) -> Any:
-    """Load heavier runtime entry points only when they are requested."""
-
-    if name == "RuntimeLoop":
-        from face_of_agi.runtime.loop import RuntimeLoop
-
-        return RuntimeLoop
-    if name == "ParallelRuntimeLoop":
-        from face_of_agi.runtime.parallel import ParallelRuntimeLoop
-
-        return ParallelRuntimeLoop
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+__all__ = ["RuntimeLoop"]

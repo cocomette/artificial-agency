@@ -6,17 +6,26 @@
 flowchart TD
     Start([START_RUN]) --> Load[LOAD_FRAME_BUFFER]
     Load --> Enter[ENTER_FRAME_TURN]
-    Enter --> Control{Controllable final frame?}
-    Control -- yes --> Build[BUILD_X_INPUT]
+    Enter --> Build[BUILD_X_INPUT]
     Build --> CallX[CALL_X]
-    CallX --> Resolve[RESOLVE_NEXT_SNAPSHOT]
-    Control -- no --> Synthetic[SYNTHESIZE_NONE]
-    Synthetic --> Resolve
+    CallX --> Tools{Tool calls?}
 
-    Resolve --> Change[SUMMARIZE_CHANGE]
-    Change --> Hist[SUMMARIZE_AGENT_CONTEXT_HISTORY]
-    Hist --> Update[RUN_UPDATER]
-    Update --> Persist[PERSIST_TURN]
+    Tools -- yes --> Route[HANDLE_TOOL_CALLS]
+    Route --> CallX
+    Tools -- no --> Apply{APPLY_DECISION}
+
+    Apply -- non-final frame --> ValidateNone[Require synthetic NONE]
+    ValidateNone --> SkipEnv[Skip environment step]
+    SkipEnv --> UpdateBuffered["RUN_UPDATER<br/>actual = next buffered frame"]
+
+    Apply -- final frame --> ValidateReal[Require real environment action]
+    ValidateReal --> Predict["RUN_POST_DECISION_PREDICTIONS<br/>S/G from current frame"]
+    Predict --> StepEnv["Call environment.step(action)"]
+    StepEnv --> NewBundle[Receive next EnvironmentObservationBundle]
+    NewBundle --> UpdateFresh["RUN_UPDATER<br/>actual = first new frame"]
+
+    UpdateBuffered --> Persist[PERSIST_TURN]
+    UpdateFresh --> Persist
     Persist --> MoreFrames{More frames in buffer?}
 
     MoreFrames -- yes --> Enter
@@ -36,9 +45,8 @@ sequenceDiagram
     participant Env as Environment Adapter
     participant Orch as Orchestration
     participant M as State Memory M
-    participant X as Agent X
-    participant C as Change Summary
-    participant H as Historizer
+    participant E as Experimental Memory E
+    participant X as Orchestrator Agent X
     participant P as Updater P
 
     Orch->>Env: reset or step(real action)
@@ -46,26 +54,29 @@ sequenceDiagram
     Orch->>Orch: load FrameUnrollBuffer
 
     loop each FrameTurn in buffer
-        Orch->>M: prewrite or load current real frame
+        Orch->>M: persist or load current real frame
+        Orch->>X: decide(context, frame, tools, action_space)
 
-        alt non-final frame
-            Orch->>Orch: synthesize DecisionResult(final_action=NONE)
-            Orch->>Orch: skip environment step
-            Orch->>Orch: actual next = next buffered frame
-        else final frame
-            Orch->>X: decide(text observations, context, action_space)
-            X-->>Orch: DecisionResult(final_action=real action)
-            Orch->>Env: step(real action)
-            Env-->>Orch: next EnvironmentObservationBundle
-            Orch->>Orch: actual next = first new frame
+        opt X requests S/G tool
+            X-->>Orch: ToolCall(observation_ref, optional action)
+            Orch->>M: resolve real observation refs
+            Orch->>E: resolve or persist experimental refs
+            Orch-->>X: ToolResultRef
         end
 
-        Orch->>C: summarize transition text
-        C-->>Orch: ChangeSummaryResult
-        Orch->>H: summarize recent context history
-        H-->>Orch: AgentContextHistorySummary
-        Orch->>P: update agent context
+        alt non-final frame
+            X-->>Orch: DecisionResult(final_action=NONE)
+            Orch->>Orch: validate NONE and skip environment step
+            Orch->>P: compare current frame with next buffered frame
+        else final frame
+            X-->>Orch: DecisionResult(final_action=real action)
+            Orch->>Orch: run committed S/G predictions
+            Orch->>Env: step(real action)
+            Env-->>Orch: next EnvironmentObservationBundle
+            Orch->>P: compare predictions and final frame with first new frame
+        end
+
         P-->>Orch: update result
-        Orch->>M: persist trace, summary, metrics, context
+        Orch->>M: persist trace, transition, update refs
     end
 ```

@@ -1,7 +1,8 @@
 """Shared frame and image helpers.
 
 The runtime stores visual observations by reference. These helpers keep that
-storage path small and provider-neutral while still allowing refs to rehydrate.
+storage path small and provider-neutral while still allowing refs to rehydrate
+to real images for later model calls.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
-from face_of_agi.contracts import Observation
+from face_of_agi.contracts import Observation, ToolResult
 
 FRAME_PAYLOAD_TYPE = "face_of_agi.frame.png_base64.v1"
 DEFAULT_MEMORY_IMAGE_SIZE = (64, 64)
@@ -21,7 +22,7 @@ DEFAULT_MEMORY_IMAGE_SIZE = (64, 64)
 def observation_to_pil_image(
     observation: Observation,
     *,
-    grid_scale: int = 4,
+    frame_scale: int = 4,
 ) -> Any:
     """Return the visible observation frame as a PIL RGB image."""
 
@@ -33,7 +34,7 @@ def observation_to_pil_image(
     return frame_to_pil_image(
         frame,
         step=observation.step,
-        grid_scale=grid_scale,
+        frame_scale=frame_scale,
         label=observation.id,
     )
 
@@ -42,7 +43,7 @@ def frame_to_pil_image(
     frame: Any,
     *,
     step: int = 0,
-    grid_scale: int = 4,
+    frame_scale: int = 4,
     label: str = "frame",
 ) -> Any:
     """Normalize a PIL/numpy/grid frame into a PIL RGB image."""
@@ -60,7 +61,7 @@ def frame_to_pil_image(
         rgb_array = frame_to_rgb_array(
             steps=step,
             frame=array,
-            scale=grid_scale,
+            scale=frame_scale,
         )
         return Image.fromarray(rgb_array).convert("RGB")
 
@@ -73,12 +74,12 @@ def frame_to_pil_image(
 def image_to_base64_png(
     image: Any,
     *,
-    size: str | tuple[int, int] | None = None,
+    size: tuple[int, int] | None = None,
     resample: str = "nearest",
 ) -> str:
     """Encode a PIL-compatible image as base64 PNG."""
 
-    image = resize_image_if_needed(image.convert("RGB"), size=size, resample=resample)
+    image = _resize_image_if_needed(image.convert("RGB"), size=size, resample=resample)
     buffer = BytesIO()
     image.save(buffer, format="PNG")
     return base64.b64encode(buffer.getvalue()).decode("ascii")
@@ -87,10 +88,10 @@ def image_to_base64_png(
 def image_to_data_url(
     image: Any,
     *,
-    size: str | tuple[int, int] | None = None,
+    size: tuple[int, int] | None = None,
     resample: str = "nearest",
 ) -> str:
-    """Encode an image as a PNG data URL for debug/memory tools."""
+    """Encode an image as a PNG data URL for provider APIs."""
 
     encoded = image_to_base64_png(image, size=size, resample=resample)
     return f"data:image/png;base64,{encoded}"
@@ -110,15 +111,15 @@ def normalize_frame_for_memory(
     frame: Any,
     *,
     size: tuple[int, int] = DEFAULT_MEMORY_IMAGE_SIZE,
-    grid_scale: int = 4,
+    frame_scale: int = 4,
 ) -> Any:
     """Return the 64x64 image that memory will persist, or the value unchanged."""
 
     try:
-        image = frame_to_pil_image(frame, grid_scale=grid_scale)
+        image = frame_to_pil_image(frame, frame_scale=frame_scale)
     except Exception:
         return frame
-    return resize_image_if_needed(image, size=size, resample="nearest")
+    return _resize_image_if_needed(image, size=size, resample="nearest")
 
 
 def to_memory_jsonable(value: Any) -> Any:
@@ -135,6 +136,17 @@ def to_memory_jsonable(value: Any) -> Any:
             "frame": to_memory_jsonable(value.frame),
             "frames": [to_memory_jsonable(frame) for frame in value.frames],
             "raw_frame_data": _json_fallback(value.raw_frame_data),
+            "metadata": to_memory_jsonable(value.metadata),
+        }
+
+    if isinstance(value, ToolResult):
+        return {
+            "id": value.id,
+            "tool": value.tool,
+            "predicted_observation": to_memory_jsonable(value.predicted_observation),
+            "source_observation_ref": to_memory_jsonable(value.source_observation_ref),
+            "action": to_memory_jsonable(value.action),
+            "explanation": value.explanation,
             "metadata": to_memory_jsonable(value.metadata),
         }
 
@@ -191,40 +203,15 @@ def _try_serialize_frame(value: Any) -> dict[str, Any] | None:
     }
 
 
-def parse_image_size(
-    size: str | tuple[int, int] | None,
-    *,
-    field_name: str = "image_size",
-) -> tuple[int, int] | None:
-    """Return a PIL image size from a config value."""
-
-    if size is None:
-        return None
-    if isinstance(size, tuple) and len(size) == 2:
-        width, height = size
-    elif isinstance(size, str) and "x" in size:
-        width_text, height_text = size.lower().split("x", 1)
-        width, height = int(width_text), int(height_text)
-    else:
-        raise ValueError(
-            f"{field_name} must be None, a (width, height) tuple, "
-            "or a string like '1024x1024'"
-        )
-    if width <= 0 or height <= 0:
-        raise ValueError(f"{field_name} must be positive, got {size!r}")
-    return (width, height)
-
-
-def resize_image_if_needed(
+def _resize_image_if_needed(
     image: Any,
     *,
-    size: str | tuple[int, int] | None,
+    size: tuple[int, int] | None,
     resample: str,
 ) -> Any:
     """Resize a PIL image when requested."""
 
-    target_size = parse_image_size(size)
-    if target_size is None or image.size == target_size:
+    if size is None or image.size == size:
         return image
 
     from PIL import Image
@@ -235,21 +222,7 @@ def resize_image_if_needed(
         "bicubic": Image.Resampling.BICUBIC,
         "lanczos": Image.Resampling.LANCZOS,
     }
-    if resample not in filters:
-        allowed = ", ".join(sorted(filters))
-        raise ValueError(f"resample must be one of {allowed}, got {resample!r}")
-    return image.resize(target_size, filters[resample])
-
-
-def _resize_image_if_needed(
-    image: Any,
-    *,
-    size: str | tuple[int, int] | None,
-    resample: str,
-) -> Any:
-    """Compatibility wrapper for older internal callers."""
-
-    return resize_image_if_needed(image, size=size, resample=resample)
+    return image.resize(size, filters[resample])
 
 
 def _json_fallback(value: Any) -> Any:

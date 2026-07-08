@@ -13,30 +13,25 @@ the repository. Architecture and module ownership live in
 - Package build backend: Hatchling.
 - Environment interface: ARC-AGI Toolkit.
 - Persistence: SQLite through Python's built-in `sqlite3` module.
-- Rendering/visualization: Matplotlib.
-- Base install: ARC-AGI Toolkit, Matplotlib, Rich, PyYAML, and the OpenAI SDK
-  used only as the vLLM OpenAI-compatible HTTP client.
+- Base install: ARC-AGI Toolkit and Matplotlib only.
 
 ## Model Runtime
 
-- Real model backend: vLLM.
-- Transport: vLLM's OpenAI-compatible Chat Completions API.
-- Model-facing observations: `ObservationText` serialization of native 2D ARC
-  integer grids plus cropped PNG image data URLs for frame-consuming vLLM roles.
-- Runtime configs: `src/face_of_agi/runtime/configs/starter_loop.yaml` and
-  `src/face_of_agi/runtime/configs/vllm/**`.
-
-OpenAI, Ollama, HuggingFace, and Diffusers provider paths are not part of the
-current runtime stack.
+- Local model entry point: Ollama where it fits a model role.
+- World image backend: Hugging Face Diffusers with `Qwen/Qwen-Image-Edit`.
+- ML/runtime libraries: PyTorch, Transformers, Accelerate, Safetensors,
+  SentencePiece, and Protobuf.
+- Install path: `uv sync --extra ml --no-dev` for runtime ML dependencies, or
+  `uv sync --group dev` for the full development environment.
 
 ## Hardware Assumptions
 
-- vLLM is expected to run outside the base Python environment, locally or on
-  dedicated GPU infrastructure.
-- The runtime process only needs network access to the configured vLLM
-  OpenAI-compatible endpoint.
-- Hardware-specific vLLM launch/config variants live under
-  `src/face_of_agi/runtime/configs/vllm/`.
+- CUDA is the preferred device for the Qwen image backend.
+- Apple MPS is supported as a local fallback.
+- CPU can run as a fallback path, but it is not a practical target for the
+  current image backend.
+- Hugging Face model weights are downloaded into the normal local Hugging Face
+  cache on first use.
 
 ## Development Tools
 

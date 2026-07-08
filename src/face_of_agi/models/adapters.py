@@ -4,27 +4,34 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from face_of_agi.models.change.contracts import ChangeSummaryModel
-from face_of_agi.models.historizer.contracts import AgentContextHistorizerModel
 from face_of_agi.models.orchestrator_agent.contracts import OrchestratorAgentModel
-from face_of_agi.models.updater.contracts import UpdaterTaskRegistry
+from face_of_agi.models.tools.goal.contracts import GoalToolModel
+from face_of_agi.models.tools.world.contracts import WorldToolModel
+from face_of_agi.models.updater.contracts import UpdaterModel
 
 
 @dataclass(slots=True)
 class ModelRegistry:
     """Small registry for injected model role implementations."""
 
-    agent_context_historizer_model: AgentContextHistorizerModel | None = None
+    world_tool: WorldToolModel | None = None
+    goal_tool: GoalToolModel | None = None
     orchestrator_agent: OrchestratorAgentModel | None = None
-    change_summary_model: ChangeSummaryModel | None = None
-    updater_tasks: UpdaterTaskRegistry | None = None
+    updater: UpdaterModel | None = None
 
-    def require_agent_context_historizer_model(self) -> AgentContextHistorizerModel:
-        """Return the agent context historizer, failing early if not wired."""
+    def require_world_tool(self) -> WorldToolModel:
+        """Return the world model tool role, failing early if it was not wired."""
 
-        if self.agent_context_historizer_model is None:
-            raise RuntimeError("agent context historizer model is not registered")
-        return self.agent_context_historizer_model
+        if self.world_tool is None:
+            raise RuntimeError("world model tool is not registered")
+        return self.world_tool
+
+    def require_goal_tool(self) -> GoalToolModel:
+        """Return the goal model tool role, failing early if it was not wired."""
+
+        if self.goal_tool is None:
+            raise RuntimeError("goal model tool is not registered")
+        return self.goal_tool
 
     def require_orchestrator_agent(self) -> OrchestratorAgentModel:
         """Return the X agent role, failing early if it was not wired."""
@@ -33,25 +40,18 @@ class ModelRegistry:
             raise RuntimeError("orchestrator agent model is not registered")
         return self.orchestrator_agent
 
-    def require_change_summary_model(self) -> ChangeSummaryModel:
-        """Return the change summary role, failing early if it was not wired."""
+    def require_updater(self) -> UpdaterModel:
+        """Return the updater role, failing early if it was not wired."""
 
-        if self.change_summary_model is None:
-            raise RuntimeError("change summary model is not registered")
-        return self.change_summary_model
-
-    def require_updater_tasks(self) -> UpdaterTaskRegistry:
-        """Return updater task registry, failing early if it was not wired."""
-
-        if self.updater_tasks is None:
-            raise RuntimeError("updater task registry is not registered")
-        return self.updater_tasks
+        if self.updater is None:
+            raise RuntimeError("updater model is not registered")
+        return self.updater
 
 
 __all__ = [
-    "ChangeSummaryModel",
-    "AgentContextHistorizerModel",
+    "GoalToolModel",
     "ModelRegistry",
     "OrchestratorAgentModel",
-    "UpdaterTaskRegistry",
+    "UpdaterModel",
+    "WorldToolModel",
 ]

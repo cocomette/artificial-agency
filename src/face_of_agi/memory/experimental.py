@@ -6,7 +6,9 @@ from typing import Any
 
 from face_of_agi.contracts import (
     EExperimentRecord,
+    MemoryRecord,
     Observation,
+    ObservationRef,
     ToolCall,
     ToolResult,
 )
@@ -20,6 +22,40 @@ class ExperimentalMemory:
         self.database = database
         self.database.initialize_schema()
 
+    def write_record(
+        self,
+        *,
+        run_id: str,
+        game_id: str,
+        kind: str,
+        payload: Any,
+        step: int | None = None,
+    ) -> MemoryRecord:
+        """Store one temporary reasoning artifact."""
+
+        return self.database.write_record(
+            "experimental_records",
+            run_id=run_id,
+            game_id=game_id,
+            step=step,
+            kind=kind,
+            payload=payload,
+        )
+
+    def list_records(
+        self,
+        *,
+        run_id: str | None = None,
+        game_id: str | None = None,
+    ) -> list[MemoryRecord]:
+        """List temporary reasoning artifacts."""
+
+        return self.database.list_records(
+            "experimental_records",
+            run_id=run_id,
+            game_id=game_id,
+        )
+
     def write_experiment(
         self,
         *,
@@ -27,7 +63,7 @@ class ExperimentalMemory:
         game_id: str,
         turn_id: int,
         tool_call: ToolCall,
-        output_description: Observation,
+        output_observation: Observation,
         tool_result: ToolResult,
         metadata: dict[str, Any] | None = None,
     ) -> EExperimentRecord:
@@ -38,9 +74,9 @@ class ExperimentalMemory:
             game_id=game_id,
             turn_id=turn_id,
             tool_name=tool_call.tool,
-            source_state_id=tool_call.source_state_id,
+            source_observation_ref=tool_call.observation_ref,
             tool_call=tool_call,
-            output_description=output_description,
+            output_observation=output_observation,
             tool_result=tool_result,
             metadata=metadata,
         )
@@ -82,3 +118,27 @@ class ExperimentalMemory:
         """Delete all dedicated E experiment rows."""
 
         self.database.clear_e_experiments()
+
+    def resolve_observation(self, ref: ObservationRef) -> Observation | None:
+        """Resolve an experimental ref to its stored output observation."""
+
+        if ref.memory != "experimental":
+            raise ValueError("ExperimentalMemory only resolves experimental refs")
+
+        record = self.read_experiment(ref.id)
+        if record is None:
+            return None
+        return _observation_from_payload(record.output_observation)
+
+
+def _observation_from_payload(payload: dict[str, Any]) -> Observation:
+    """Rehydrate the minimal observation shape stored in E."""
+
+    frames = payload.get("frames") or ()
+    return Observation(
+        id=str(payload.get("id", "")),
+        step=int(payload.get("step", 0)),
+        frame=payload.get("frame"),
+        frames=tuple(frames),
+        metadata=dict(payload.get("metadata") or {}),
+    )

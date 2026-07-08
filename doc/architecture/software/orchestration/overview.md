@@ -1,47 +1,54 @@
 # Orchestration Overview
 
-Orchestration is the central control layer for the runtime. It owns the game
-loop and is the only module that coordinates environment calls, model calls,
-memory reads and writes, updater calls, and action submission.
+Orchestration is the central control layer for the target runtime. It owns the
+game loop and is the only module that coordinates environment calls, model
+calls, tool routing, memory reads and writes, updater calls, and action
+submission.
 
 The orchestrator agent `X` is a model role. The orchestration layer is the
 deterministic software controller that calls `X` and handles every side effect
 around it.
 
 The top-level `Orchestrator` acts as a facade and dependency coordinator.
-Concrete workflows live in focused sub-orchestration components. The current
-ARC game loop is implemented as `GameLoopStateMachine` in
+Concrete workflows should live in focused sub-orchestration components. The
+current ARC game loop is implemented as `GameLoopStateMachine` in
 `src/face_of_agi/orchestration/game_loop/state_machine.py`.
 
-The game loop defines frame-bundle unrolling, synthetic `NONE` decisions during
-non-controllable animation frames, and real environment action submission only
-on controllable final frames.
+The target game-loop state machine is documented in
+[`game_loop/overview.md`](game_loop/overview.md). It defines frame-bundle
+unrolling, synthetic `NONE` decisions during non-controllable animation frames,
+and real environment action submission only on controllable final frames.
 
-## Responsibilities
+## Target Responsibilities
 
 At a high level, orchestration:
 
 - starts and advances one ARC-AGI game run
 - receives observations and metadata from the environment module
-- composes current agent context from global `K^X` and selected-game `L^X`
-- calls Agent `X` only on controllable final frames
-- exposes an `AgentToolRuntime` with no available tools in the current runtime
-- receives the final action and trace from `X`, or synthesizes `NONE` and an
-  orchestration-owned trace for animation frames
-- sends final-frame real actions to the environment module
-- resolves the actual next frame for transition evidence
-- calls the change summary model for compact transition text
-- calls the agent context historizer when configured
-- runs updater `P` after each observed frame transition
-- applies updater-returned agent context to live working context documents
-- persists frame transitions, traces, metrics, action history, and context into
-  `M`
+- composes current role contexts
+- calls the orchestrator agent `X`
+- exposes world `S` and goal `G` models as tools to `X`
+- passes `X` a per-turn `AgentToolRuntime` for controlled tool requests
+- resolves observation and prediction references from `M` and `E`
+- stores tool output frames in rolling `E` and exposes their references back to
+  `X`
+- receives the final action and trace from `X`
+- sends the final action to the environment module
+- runs updater `P` after each real environment step
+- applies updater-returned contexts to the live working context documents
+- persists real transitions, traces, and current contexts into `M`
+- prunes rolling experimental memory when it exceeds the configured turn window
 
 ## Boundary
 
-Orchestration depends on typed interfaces from the environment, memory, models,
-updates, and shared contracts modules. It does not depend on a specific model
-backend or provider-specific response format.
+Orchestration should depend on typed interfaces from the environment, memory,
+models, updates, and shared contracts modules. It should not depend on a
+specific model backend or on provider-specific response formats.
 
-The true main loop lives here. Runtime can assemble and invoke orchestration,
-but it should not grow independent game-step logic.
+The orchestrator agent can ask to reuse prior memory records by id. The
+orchestration layer resolves those references, calls the requested tool with
+the referenced observation or prediction, and stores the new result back into
+rolling `E` unless it is later committed into `M`.
+
+The true main loop now lives here. Runtime can continue to assemble and invoke
+orchestration, but it should not grow independent game-step logic.

@@ -11,34 +11,33 @@
 ## Memory Contracts
 
 - `ObservationRef`: reference to a real state record in `M` or an experimental
-  record in `E`.
+  prediction record in `E`.
 - `MemoryRecord`: generic persisted record.
 - `MemoryDomain`: either `state` or `experimental`.
 
-## Agent Contracts
+## Tool And Agent Contracts
 
-- `ToolCall`: provider-neutral request shape retained for future tools. The
-  current runtime exposes no real tools.
-- `ToolResult`: provider-neutral tool output shape retained for future tools.
+- `ToolCall`: request from `X` to call `S` or `G`; world calls include an
+  action, goal calls do not.
+- `ToolResult`: output from a world or goal tool call; it becomes reusable
+  only after orchestration persists it and returns a reference id.
 - `AgentTrace`: complete trace of an agent decision step.
-- `ActionHistoryEntry`: compact record of one prior frame-turn decision
-  exposed to later X prompts.
-- `AgentToolRuntime`: controlled per-turn tool boundary exposed to `X`; current
-  configs expose an empty tool list.
+- `AgentToolRuntime`: controlled per-turn tool boundary exposed to `X`.
 - `DecisionResult`: final action plus trace.
+- `PostDecisionPredictions`: committed world and goal predictions produced by
+  orchestration after `X` chooses a real action.
 
 ## Context And Update Contracts
 
 - `RoleContext`: game-agnostic plus game-specific text context for one role.
-- `ContextDocuments`: current agent context document.
-- `TurnMetrics`: frame-turn cost, trace timing, and score/progress metrics.
-- `UpdaterFrameTransitionInput`: observed transition, trace, action, metrics,
-  and action-history evidence for updater `P`.
-- `AgentGameContextUpdateInput`: updater input for agent game-context updates,
-  including previous/current observations, live `AgentTrace`, action history,
-  context history, and update quantities.
-- `GeneralKnowledgeUpdateInput`: agent general updater input for end-of-run
-  `K^X` updates.
+- `ContextDocuments`: current role contexts for world, goal, and agent.
+- `RewardUpdateQuantities`: structured update signals for updater `P`.
+- `ToolContextUpdateInput`: updater input for world or goal context updates,
+  including the previous role context, transition references, committed
+  post-decision predictions, matching live tool results, and update quantities.
+- `AgentContextUpdateInput`: updater input for agent context updates,
+  including the previous agent context, live `AgentTrace`, transition
+  references, committed post-decision predictions, and update quantities.
 
 ## Boundary Rule
 

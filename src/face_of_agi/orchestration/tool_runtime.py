@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from face_of_agi.contracts import (
     ExperimentToolInvocationResult,
     FrameTurnContext,
+    Observation,
+    ObservationRef,
     ToolCall,
     ToolName,
 )
@@ -25,6 +28,7 @@ class ExperimentToolInvoker(Protocol):
         frame_context: FrameTurnContext,
         call: ToolCall,
         metadata: dict[str, Any] | None = None,
+        state_observations: Mapping[str, Observation] | None = None,
     ) -> ExperimentToolInvocationResult:
         """Execute one orchestration-owned experiment tool call."""
         ...
@@ -34,30 +38,62 @@ class ExperimentToolInvoker(Protocol):
 class OrchestrationAgentToolRuntime:
     """Small per-turn tool interface handed to Agent X.
 
-    The object is the narrow boundary where orchestration attaches configured
-    tools and stores their results in experimental memory.
+    Agent X can request tool calls through this object, but orchestration still
+    owns reference resolution, model routing, E writes, and rolling cleanup.
     """
 
     run_id: str
     game_id: str
     turn_id: int
     frame_context: FrameTurnContext
-    invoke_tool: ExperimentToolInvoker | None = None
+    invoke_tool: ExperimentToolInvoker
+    state_observations: Mapping[str, Observation]
     available_tool_names: tuple[ToolName, ...] = ()
     tools_enabled: bool = True
 
     @property
-    def current_source_state_id(self) -> int | None:
-        """Return the callable frame ref for the current frame source."""
+    def first_observation_ref(self) -> ObservationRef:
+        """Return the first real observation reference visible to X."""
 
-        return self.frame_context.current_source_state_id
+        return self.frame_context.first_observation_ref
+
+    @property
+    def current_observation_ref(self) -> ObservationRef:
+        """Return the current real observation reference visible to X."""
+
+        return self.frame_context.current_observation_ref
+
+    def available_observation_refs(self) -> tuple[ObservationRef, ...]:
+        """Return real observation refs immediately visible to X this turn."""
+
+        refs = (
+            self.frame_context.first_observation_ref,
+            self.frame_context.current_observation_ref,
+        )
+        deduped: list[ObservationRef] = []
+        for ref in refs:
+            if ref not in deduped:
+                deduped.append(ref)
+        return tuple(deduped)
 
     def available_tools(self) -> tuple[ToolName, ...]:
-        """Return tools X may call during this frame turn."""
+        """Return model tools X may call during this frame turn."""
 
         if not self.tools_enabled:
             return ()
         return self.available_tool_names
+
+    def tool_metadata(self) -> dict[str, Any]:
+        """Return frame-local tool policy details for agent prompts."""
+
+        return {
+            "tools_enabled": self.tools_enabled,
+            "available_tools": list(self.available_tools()),
+            "control_mode": {
+                "controllable": self.frame_context.control_mode.controllable,
+                "reason": self.frame_context.control_mode.reason,
+            },
+        }
 
     def invoke(
         self,
@@ -65,12 +101,10 @@ class OrchestrationAgentToolRuntime:
         *,
         metadata: dict[str, Any] | None = None,
     ) -> ExperimentToolInvocationResult:
-        """Execute one configured future tool through orchestration."""
+        """Execute one tool call through orchestration and persist it in E."""
 
         if not self.tools_enabled:
             raise RuntimeError("tool calls are disabled for this frame")
-        if self.invoke_tool is None:
-            raise RuntimeError("no Agent X tools are configured")
         if call.tool not in self.available_tool_names:
             raise RuntimeError(f"{call.tool} tool is not available for this frame")
 
@@ -82,4 +116,5 @@ class OrchestrationAgentToolRuntime:
             frame_context=self.frame_context,
             call=call,
             metadata=merged_metadata,
+            state_observations=self.state_observations,
         )

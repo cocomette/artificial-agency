@@ -1,0 +1,24 @@
+# First run `--list-games`, which writes the indexed game catalog file.
+game_index: 0
+max_actions_per_level: 10
+operation_mode: offline
+game_catalog_path: src/face_of_agi/environment/local_games.json
+environments_dir: environment_files
+recordings_dir: recordings
+enable_visualization: true
+render_mode: human
+seed: 0
+save_recording: false
+include_frame_data: true
+cheat_action_context: false
+experimental_memory_turn_buffer: 2
+models:
+  prompt_model_calls_enabled: false
+  agent:
+    backend: random
+    max_tool_calls: 2
+    repair_attempts: 1
+  world:
+    backend: none
+  goal:
+    backend: none

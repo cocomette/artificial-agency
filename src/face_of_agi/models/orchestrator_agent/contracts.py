@@ -5,8 +5,6 @@ from __future__ import annotations
 from typing import Any, Protocol, Sequence
 
 from face_of_agi.contracts import (
-    ActionHistoryItem,
-    ActionOutcomeEvidence,
     ActionSpec,
     DecisionResult,
     ExperimentToolInvocationResult,
@@ -27,12 +25,25 @@ class AgentToolRuntime(Protocol):
         ...
 
     @property
-    def current_source_state_id(self) -> int | None:
-        """Return the callable frame ref for the current source."""
+    def first_observation_ref(self) -> ObservationRef:
+        """Return the first real observation reference visible to X."""
+        ...
+
+    @property
+    def current_observation_ref(self) -> ObservationRef:
+        """Return the current real observation reference visible to X."""
+        ...
+
+    def available_observation_refs(self) -> tuple[ObservationRef, ...]:
+        """Return memory refs that are immediately visible to X."""
         ...
 
     def available_tools(self) -> tuple[ToolName, ...]:
         """Return model tools available for this frame turn."""
+        ...
+
+    def tool_metadata(self) -> dict[str, Any]:
+        """Return frame-local tool policy metadata."""
         ...
 
     def invoke(
@@ -46,20 +57,15 @@ class AgentToolRuntime(Protocol):
 
 
 class OrchestratorAgentModel(Protocol):
-    """Agent role X that chooses final actions."""
+    """Agent role X that may call world and goal model tools."""
 
     def decide(
         self,
         context: RoleContext,
+        first_observation: Observation,
         current_observation: Observation,
         action_space: Sequence[ActionSpec],
         tool_runtime: AgentToolRuntime | None = None,
-        recent_action_history: tuple[ActionHistoryItem, ...] = (),
-        *,
-        glossary_actions: Sequence[ActionSpec],
-        first_observation_ref: ObservationRef | None = None,
-        recent_action_history_available: bool = True,
-        action_outcome_evidence: ActionOutcomeEvidence | None = None,
     ) -> DecisionResult:
         """Return one final action and its decision trace."""
         ...

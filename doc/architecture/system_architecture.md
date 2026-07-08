@@ -188,9 +188,6 @@ Where:
 - `O_{i,0}` is the first observation frame of the current game.
 - `O_{i,t}` is the current observation frame.
 - `action_space_{i,t}` is the current set of valid environment actions.
-- X also receives a bounded recent action history from prior frame turns:
-  compact metadata with turn, step, observation reference, action,
-  controllability, control reason, and optional reasoning summary.
 - `S` and `G` are callable tools, not embedded logic.
 - `A_{i,t}` is the final real action selected for the environment.
 - `T^X_{i,t}` is the full agent trace for the current step.
@@ -391,10 +388,9 @@ ObservationRef = {
 ```
 
 For decision-time agent calls, state-memory refs should be limited to the first
-observation, immediately previous frame-turn observation, current observation,
-and any past real states explicitly exposed by the orchestrator through the
-current context. Experimental refs can point to temporary predictions created
-during the current decision step.
+observation, current observation, and any past real states explicitly exposed
+by the orchestrator through the current context. Experimental refs can point to
+temporary predictions created during the current decision step.
 
 ### ToolCall
 
@@ -437,38 +433,28 @@ The full trace `T^X_{i,t}` should be passed to the updater, because the updater 
 
 ### RewardUpdateQuantities
 
-The agent updater receives selected individual quantities that would go into a
-reward calculation, rather than a final scalar reward. Orchestration may retain
-additional internal quantities for computing future fields.
+The agent updater receives the individual quantities that would go into a reward calculation, rather than a final scalar reward.
 
 ```text
 RewardUpdateQuantities = {
-  prediction_error: optional float,          # internal D^S baseline; not sent to updater prompts
-  prediction_error_delta: optional float,    # prior prediction error minus current prediction error
+  prediction_error: optional float,          # D^S: distance between predicted and real next observation
+  prediction_error_delta: optional float,    # change in prediction error relative to a prior step or baseline
   goal_distance: optional float,             # D^G: distance from current/next state to inferred goal
-  time_cost: optional float,                 # cumulative real environment steps spent
-  trace_cost: optional float,                # wall-clock time spent deciding
+  time_cost: optional float,                 # cost for spending real environment steps
+  trace_cost: optional float,                # cost for long traces or excessive tool calls
   score_delta: optional float,               # raw environment score/progress change, if available
   notes: optional text
 }
 ```
 
-The updater system prompt should explain how to use the fields it receives:
+The updater system prompt should explain how to use these fields:
 
-- `prediction_error_delta`: detect whether the agent is finding outcomes the
-  world model predicts better than before; higher positive values mean the
-  prediction error is falling faster and are the learning-improvement signal.
-- `goal_distance`: update whether the action appeared to move toward or away
-  from the inferred goal; higher values mean less goal-following and more
-  exploration.
-- `time_cost`: prefer strategies that make progress in fewer real environment
-  steps; this is cumulative pressure as real actions are spent.
-- `trace_cost`: discourage slow decisions when they do not improve action quality.
+- `prediction_error`: update beliefs about which world-model predictions were reliable or unreliable.
+- `prediction_error_delta`: detect whether the agent/world model is improving or degrading over time.
+- `goal_distance`: update whether the action appeared to move toward or away from the inferred goal.
+- `time_cost`: prefer strategies that make progress in fewer real environment steps.
+- `trace_cost`: discourage unnecessary tool-call chains when they do not improve action quality.
 - `score_delta`: use direct game feedback, when available, as evidence for goal and policy updates.
-
-Updater prompts receive `prediction_error_delta` rather than raw
-`prediction_error`. The raw prediction error may still be retained by
-orchestration/memory to compute the next delta.
 
 ## Main Game Loop
 
@@ -686,12 +672,7 @@ Each model adapter should expose one role-specific call:
 ```text
 WorldModel.predict(context, action, observation_ref) -> ToolResult
 GoalModel.predict(context, action, observation_ref) -> ToolResult
-Agent.act(
-  context,
-  current_observation,
-  tools,
-  action_space
-) -> AgentTrace + ActionSpec
+Agent.act(context, first_observation, current_observation, tools, action_space) -> AgentTrace + ActionSpec
 Updater.update(update_packet) -> UpdatedContexts
 ```
 
@@ -701,14 +682,7 @@ The rest of the system should not depend on whether the implementation is a VLM,
 
 Memory should store objects and return references.
 
-The decision-time agent should receive only the first, immediately previous,
-and current frame-turn observations as images. Duplicate observations may be
-omitted from the image list when those roles point to the same observation.
-Full frame history remains in state memory for logging, updater use, and
-future training, but it should not be copied into the agent context. X may
-receive a bounded recent action history as compact metadata; this does not
-include prior frame payloads beyond the single previous frame-turn
-observation.
+The decision-time agent should receive only the first and current frame as images. Full frame history remains in state memory for logging, updater use, and future training, but it should not be copied into the agent context.
 
 Tool calls should pass observation references. This avoids copying full histories into model contexts and matches the intended state-memory and experimental-memory split.
 Orchestration reads both `M_i` and `E_{i,t}` to resolve those references, then

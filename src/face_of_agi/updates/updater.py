@@ -1,7 +1,7 @@
 """Updater role boundary."""
 
-from face_of_agi.models.updater.contracts import UpdaterTaskRegistry
+from face_of_agi.models.updater.contracts import UpdaterModel
 
-Updater = UpdaterTaskRegistry
+Updater = UpdaterModel
 
-__all__ = ["Updater", "UpdaterTaskRegistry"]
+__all__ = ["Updater", "UpdaterModel"]

@@ -3,51 +3,60 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Mapping, Sequence
 from typing import TextIO
 
-from arc_agi import OperationMode
-
 from face_of_agi.contracts import GameRunResult, RuntimeConfig
-from face_of_agi.debug.bus import DebugBus
-from face_of_agi.debug.sinks import (
-    CompositeDebugSink,
-    DebugSink,
-    DebugTrace,
-    LiveTurnMonitor,
-)
 from face_of_agi.environment.adapter import EnvironmentAdapter
 from face_of_agi.environment.config import EnvironmentConfig
 from face_of_agi.orchestration.orchestrator import Orchestrator
 
 
 class RuntimeLoop:
-    """Run one configured environment shell through orchestration."""
+    """Run the starter environment shell or the older reset-only fallback."""
 
     def __init__(
         self,
         orchestrator: Orchestrator,
         *,
         trace_output: TextIO | None = None,
-        live_turn_monitor: LiveTurnMonitor | None = None,
     ) -> None:
         self.orchestrator = orchestrator
         self.trace_output = trace_output or sys.stdout
-        self.live_turn_monitor = live_turn_monitor
 
     def run(
         self,
         *,
         config: RuntimeConfig,
-        environment: EnvironmentAdapter,
-        environment_config: EnvironmentConfig,
-    ) -> GameRunResult:
-        """Run the configured game loop shell."""
+        environment: EnvironmentAdapter | None = None,
+        environment_config: EnvironmentConfig | None = None,
+        environments: Mapping[str, EnvironmentAdapter] | None = None,
+    ) -> GameRunResult | list[GameRunResult]:
+        """Run the starter shell or the older reset-only multi-game fallback."""
 
-        return self._run_environment_shell(
-            config=config,
-            environment=environment,
-            environment_config=environment_config,
-        )
+        if environment is not None and environment_config is not None:
+            return self._run_environment_shell(
+                config=config,
+                environment=environment,
+                environment_config=environment_config,
+            )
+
+        if environments is None:
+            raise RuntimeError(
+                "runtime requires either one environment shell or legacy environments"
+            )
+
+        game_ids: Sequence[str] = config.game_ids or tuple(environments.keys())
+        results: list[GameRunResult] = []
+        for game_id in game_ids:
+            results.append(
+                self.orchestrator.run_reset_only(
+                    run_id=config.run_id,
+                    game_id=game_id,
+                    environment=environments[game_id],
+                )
+            )
+        return results
 
     def _run_environment_shell(
         self,
@@ -58,42 +67,11 @@ class RuntimeLoop:
     ) -> GameRunResult:
         """Delegate the single-game ARC loop to orchestration."""
 
-        debug = DebugBus(
-            sink=self._debug_sink(environment_config),
-            state_memory=self.orchestrator.state_memory,
-            persist_model_input_debug_records=_persist_model_input_debug_records(
-                environment_config,
-            ),
-        )
         result = self.orchestrator.run_environment_shell(
             config=config,
             environment=environment,
             environment_config=environment_config,
-            debug=debug,
+            trace_output=self.trace_output,
         )
-        if not environment_config.debug_keep_all_m_states:
-            try:
-                self.orchestrator.cleanup_state_memory_keep_latest()
-            except Exception:
-                result.metadata["cleanup_fallback"] = True
+        self.orchestrator.cleanup_state_memory_keep_latest()
         return result
-
-    def _debug_sink(self, environment_config: EnvironmentConfig) -> DebugSink:
-        trace = DebugTrace.from_config(
-            environment_config,
-            output=self.trace_output,
-        )
-        monitor = self.live_turn_monitor
-        if monitor is None and environment_config.live_turn_monitor:
-            monitor = LiveTurnMonitor(output=self.trace_output)
-        if monitor is None:
-            return trace
-        return CompositeDebugSink((trace, monitor))
-
-
-def _persist_model_input_debug_records(
-    environment_config: EnvironmentConfig,
-) -> bool:
-    """Return whether provider request captures should be persisted."""
-
-    return environment_config.operation_mode != OperationMode.COMPETITION
