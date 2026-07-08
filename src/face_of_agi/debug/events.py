@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, TypeAlias
 
@@ -12,11 +11,6 @@ from face_of_agi.contracts import (
     FrameTurnContext,
     GameRunResult,
     Observation,
-    ObservationRef,
-    RoleContext,
-    ToolCall,
-    ToolName,
-    ToolResult,
 )
 
 
@@ -34,21 +28,6 @@ class FrameTurnStarted:
     lifecycle_state: Any
     completed_levels: int
     remaining_actions: int
-    available_tools: Sequence[ToolName]
-
-
-@dataclass(frozen=True, slots=True)
-class AgentFrameworkInputCaptured:
-    context: RoleContext
-    current_observation: Observation
-    action_space: Sequence[ActionSpec]
-    recent_action_history: Sequence[Any]
-    tool_runtime: Any | None
-
-
-@dataclass(frozen=True, slots=True)
-class AgentProviderRequestsCaptured:
-    requests: Sequence[Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,46 +39,10 @@ class FrameDecisionRecorded:
 
 
 @dataclass(frozen=True, slots=True)
-class ToolModelInputCaptured:
-    role: ToolName
-    purpose: str
-    call: ToolCall
-    context: RoleContext
-    observation: Observation
-
-
-@dataclass(frozen=True, slots=True)
-class ToolProviderInputCaptured:
-    role: ToolName
-    purpose: str
-    adapter: Any | None
-
-
-@dataclass(frozen=True, slots=True)
-class ToolResultRecorded:
-    role: ToolName
-    purpose: str
-    result: ToolResult
-    experiment_ref: ObservationRef | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class EnvironmentStepRecorded:
     action: ActionSpec
     next_observation: Observation
     remaining_actions: int
-
-
-@dataclass(frozen=True, slots=True)
-class UpdaterInputCaptured:
-    role: str
-    update_input: Any
-
-
-@dataclass(frozen=True, slots=True)
-class UpdaterProviderOutputCaptured:
-    role: str
-    adapter: Any | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,15 +81,8 @@ class RunStopped:
 DebugEvent: TypeAlias = (
     RunStarted
     | FrameTurnStarted
-    | AgentFrameworkInputCaptured
-    | AgentProviderRequestsCaptured
     | FrameDecisionRecorded
-    | ToolModelInputCaptured
-    | ToolProviderInputCaptured
-    | ToolResultRecorded
     | EnvironmentStepRecorded
-    | UpdaterInputCaptured
-    | UpdaterProviderOutputCaptured
     | ModelCallCompleted
     | MStatePersisted
     | FrameTurnCompleted

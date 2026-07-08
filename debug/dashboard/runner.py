@@ -11,8 +11,6 @@ import subprocess
 import threading
 import time
 
-from debug.playback import PlaybackRequest
-
 DEV_COMMAND_PREFIX = (
     "uv",
     "run",
@@ -32,7 +30,6 @@ CLEAN_DB_COMMAND_PREFIX = (
 )
 GAME_CATALOG_PATH = Path("src/face_of_agi/environment/local_games.json")
 RUNTIME_RUNNER_KEY = "runtime_runner"
-RUNNER_PLAYBACK_REQUEST_KEY = "runner_playback_request"
 SCHEMA_RESET_REQUIRED_TEXT = (
     "does not match the current memory schema; reset this disposable local database"
 )
@@ -58,7 +55,6 @@ def build_run_command(
     database_path: str | Path,
     *,
     keep_all_m_states: bool = True,
-    playback_request: PlaybackRequest | None = None,
 ) -> list[str]:
     """Build the dev-profile runtime command used by the dashboard runner."""
 
@@ -69,28 +65,9 @@ def build_run_command(
         "--database",
         str(database_path),
     ]
-    if keep_all_m_states or playback_request is not None:
+    if keep_all_m_states:
         command.append("--debug-keep-all-m-states")
-    return _with_playback_args(command, playback_request)
-
-
-def _with_playback_args(
-    command: list[str],
-    playback_request: PlaybackRequest | None,
-) -> list[str]:
-    """Append debug playback flags when the Runner has an armed request."""
-
-    if playback_request is None:
-        return command
-    return [
-        *command,
-        "--playback-run-id",
-        playback_request.source_run_id,
-        "--playback-game-id",
-        playback_request.game_id,
-        "--playback-turn-id",
-        str(playback_request.turn_id),
-    ]
+    return command
 
 
 def build_list_games_command() -> list[str]:

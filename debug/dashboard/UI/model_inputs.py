@@ -19,7 +19,7 @@ from debug.dashboard.model_inputs import (
 )
 
 _SENT_IMAGE_COLUMNS = 2
-_SENT_IMAGE_PREVIEW_SIZE = (1024, 1024)
+_SENT_IMAGE_PREVIEW_SIZE = (256, 256)
 
 
 def render_model_inputs(records: list[dict[str, Any]]) -> None:

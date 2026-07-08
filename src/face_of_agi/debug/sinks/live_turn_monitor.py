@@ -10,11 +10,9 @@ from typing import TextIO
 from face_of_agi.debug.events import DebugEvent, FrameTurnCompleted, ModelCallCompleted
 
 _MODEL_AVG_FIELDS = {
-    "agent": "avg_model_sec_agent",
-    "change": "avg_model_sec_change",
-    "historizer": "avg_model_sec_historizer",
-    "updater.agent": "avg_model_sec_updater_agent",
-    "updater.general": "avg_model_sec_updater_general",
+    "backbone": "avg_turn_sec_backbone",
+    "planner": "avg_turn_sec_planner",
+    "replay": "avg_turn_sec_replay",
 }
 
 
@@ -81,16 +79,6 @@ class LiveTurnMonitor:
             self.output.write(self._summary_line(now) + "\n")
             self.output.flush()
 
-    def _record_model_call(self, event: ModelCallCompleted) -> None:
-        if event.role not in _MODEL_AVG_FIELDS:
-            return
-        with self._lock:
-            self._model_call_totals[event.role] += max(
-                0.0,
-                float(event.duration_seconds),
-            )
-            self._model_call_counts[event.role] += 1
-
     def _summary_line(self, now: float) -> str:
         avg_turn_seconds = self._total_turn_seconds / self._turn_count
         elapsed_seconds = (
@@ -120,14 +108,18 @@ class LiveTurnMonitor:
             f" total_completed_levels={total_completed_levels}"
         )
 
+    def _record_model_call(self, event: ModelCallCompleted) -> None:
+        if event.role not in _MODEL_AVG_FIELDS:
+            return
+        with self._lock:
+            duration = max(0.0, float(event.duration_seconds))
+            self._model_call_totals[event.role] += duration
+            self._model_call_counts[event.role] += 1
+
     def _model_averages_text(self) -> str:
         fields = []
         for role, field in _MODEL_AVG_FIELDS.items():
             count = self._model_call_counts[role]
-            average = (
-                self._model_call_totals[role] / count
-                if count
-                else 0.0
-            )
+            average = self._model_call_totals[role] / count if count else 0.0
             fields.append(f" {field}={average:.3f}")
         return "".join(fields)

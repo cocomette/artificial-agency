@@ -13,7 +13,6 @@ from debug.dashboard.memory_reader import (
     redacted_for_json,
     turn_summary,
 )
-from debug.dashboard.UI.model_inputs import render_model_inputs
 
 ACTION6_GRID_SIZE = 64
 
@@ -59,11 +58,11 @@ def render_selected_turn(
 
     _render_turn_heading(state)
 
-    overview, model_inputs, raw = st.tabs(["Overview", "Models I/O", "Raw Data"])
+    overview, learner, raw = st.tabs(["Overview", "Learner", "Raw Data"])
     with overview:
         _render_overview(state)
-    with model_inputs:
-        render_model_inputs(model_input_records or [])
+    with learner:
+        _render_learner(state)
     with raw:
         _render_raw(state, model_input_records or [])
 
@@ -114,6 +113,40 @@ def _render_overview(state: dict[str, Any]) -> None:
         st.json(
             [action_label(action) for action in control_mode.get("allowed_actions") or []]
         )
+        trace = _dict(state.get("learner_trace"))
+        transition = _dict(trace.get("transition"))
+        replay = _dict(trace.get("replay"))
+        if transition:
+            st.write("Transition")
+            st.json(
+                {
+                    "changed_pixel_percent": transition.get("changed_pixel_percent"),
+                    "prediction_error": transition.get("prediction_error"),
+                    "score_delta": transition.get("score_delta"),
+                    "completed_levels": transition.get("completed_levels"),
+                }
+            )
+        if replay:
+            st.write("Replay")
+            st.json(replay)
+
+
+def _render_learner(state: dict[str, Any]) -> None:
+    trace = _dict(state.get("learner_trace"))
+    snapshot = _dict(state.get("learner_snapshot"))
+    if not trace and not snapshot:
+        st.info("No learner trace persisted for this turn.")
+        return
+    if trace:
+        st.write("Planner Candidates")
+        st.json(trace.get("planner_candidates") or [])
+        st.write("Backbone Metadata")
+        st.json(trace.get("backbone_metadata") or {})
+        st.write("Learner Metadata")
+        st.json(trace.get("learner_metadata") or {})
+    if snapshot:
+        st.write("Learner Snapshot")
+        st.json(snapshot)
 
 
 def _render_raw(

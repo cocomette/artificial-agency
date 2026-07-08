@@ -1,11 +1,6 @@
-"""Central orchestration layer for environment, memory, and models."""
+"""Central orchestration layer for environment, memory, and the online agent."""
 
 from face_of_agi.orchestration.orchestrator import Orchestrator
 from face_of_agi.orchestration.game_loop import GameLoopStateMachine
-from face_of_agi.orchestration.tool_runtime import OrchestrationAgentToolRuntime
 
-__all__ = [
-    "GameLoopStateMachine",
-    "OrchestrationAgentToolRuntime",
-    "Orchestrator",
-]
+__all__ = ["GameLoopStateMachine", "Orchestrator"]

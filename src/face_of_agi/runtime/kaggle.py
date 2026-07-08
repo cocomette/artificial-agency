@@ -16,7 +16,7 @@ import urllib.request
 
 from arc_agi import OperationMode
 
-from face_of_agi.contracts import ContextDocuments, GameRunResult, RuntimeConfig
+from face_of_agi.contracts import GameRunResult, RuntimeConfig
 from face_of_agi.debug.sinks import LiveTurnMonitor
 from face_of_agi.environment.adapter import (
     ArcEnvironmentWrapperAdapter,
@@ -30,15 +30,11 @@ from face_of_agi.runtime.parallel import (
     retry_parallel_game_spec,
 )
 from face_of_agi.runtime.shell import (
-    _build_model_registry,
     _build_orchestrator,
     _print_parallel_result,
 )
 
-DEFAULT_KAGGLE_CONFIG = (
-    "src/face_of_agi/runtime/configs/vllm/"
-    "vllm_rtx6000_qwen36_35b_fp8_parallel.yaml"
-)
+DEFAULT_KAGGLE_CONFIG = "src/face_of_agi/runtime/configs/kaggle_transformers.yaml"
 DEFAULT_DATABASE_DIR = Path("/kaggle/working/runs")
 
 
@@ -290,22 +286,13 @@ def _run_kaggle_game(
         database_path=spec.database_path,
         deadline_monotonic=spec.deadline_monotonic,
     )
-    model_registry = _build_model_registry(
-        agent_config=environment_config.models.agent,
-        change_config=environment_config.models.change,
-        historizer_config=environment_config.models.historizer,
-        shared_vlm_config=environment_config.models.shared_vlm,
-        observation_text_config=environment_config.models.observation_text,
-        updater_config=environment_config.models.updater,
-    )
     runtime = RuntimeLoop(
         _build_orchestrator(
             spec.database_path,
+            environment_config=environment_config,
             experimental_memory_turn_buffer=(
                 environment_config.experimental_memory_turn_buffer
             ),
-            models=model_registry,
-            contexts=ContextDocuments(),
         ),
         trace_output=trace_output,
         live_turn_monitor=spec.live_turn_monitor,

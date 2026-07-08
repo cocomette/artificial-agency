@@ -19,37 +19,70 @@ DebugTraceMode = Literal[
 ]
 DebugColorMode = Literal["auto", "always", "never"]
 GameSelectionMode = Literal["all_available"]
+BackboneModelFamily = Literal["generic_vision", "qwen3_5_moe_multimodal"]
+DEFAULT_BACKBONE_FEATURE_PROMPT = (
+    "Encode this ARC-AGI game frame as a compact visual state representation."
+)
 
 
 @dataclass(slots=True)
-class ModelRoleConfig:
-    """Runtime-selected model role backend configuration."""
+class BackboneRuntimeConfig:
+    """Frozen local Transformers backbone configuration."""
 
-    backend: str | None = None
-    model: str | None = None
-    max_tool_calls: int | None = None
-    repair_attempts: int | None = None
+    backend: str = "transformers"
+    model_family: BackboneModelFamily = "generic_vision"
+    model_path: str = ""
+    processor_path: str | None = None
+    device: str = "auto"
+    dtype: str = "auto"
+    image_size: str | None = "224x224"
+    local_files_only: bool = True
+    representation_layer: str = "pooled"
+    feature_prompt: str = DEFAULT_BACKBONE_FEATURE_PROMPT
+    processor_kwargs: dict[str, Any] = field(default_factory=dict)
+    model_kwargs: dict[str, Any] = field(default_factory=dict)
     options: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
-class ModelRuntimeConfig:
-    """Runtime model backend config for agent and tool roles."""
+class OnlineRuntimeConfig:
+    """Small online learner component configuration."""
 
-    observation_text: dict[str, Any] = field(default_factory=dict)
-    shared_vlm: ModelRoleConfig = field(default_factory=ModelRoleConfig)
-    agent: ModelRoleConfig = field(default_factory=ModelRoleConfig)
-    change: ModelRoleConfig = field(default_factory=ModelRoleConfig)
-    historizer: ModelRoleConfig = field(default_factory=ModelRoleConfig)
-    updater: "UpdaterRuntimeConfig | None" = None
+    buffer_size: int = 512
+    adapter_rank: int = 16
+    ensemble_size: int = 5
+    hidden_dim: int = 512
+    learning_rate: float = 0.001
+    batch_size: int = 32
 
 
 @dataclass(slots=True)
-class UpdaterRuntimeConfig:
-    """Runtime backend config for updater task slots."""
+class ReplayRuntimeConfig:
+    """Bounded replay configuration."""
 
-    agent: ModelRoleConfig = field(default_factory=ModelRoleConfig)
-    general: ModelRoleConfig = field(default_factory=ModelRoleConfig)
+    max_updates_per_turn: int = 8
+    max_seconds_per_turn: float = 0.5
+    solved_level_updates: int = 32
+
+
+@dataclass(slots=True)
+class PlannerRuntimeConfig:
+    """Short-horizon planner configuration."""
+
+    horizon: int = 3
+    candidate_count: int = 64
+    coordinate_candidates: int = 16
+    diagnostic_turns: int = 4
+
+
+@dataclass(slots=True)
+class AgentRuntimeConfig:
+    """Runtime configuration for the online learner agent."""
+
+    backbone: BackboneRuntimeConfig = field(default_factory=BackboneRuntimeConfig)
+    online: OnlineRuntimeConfig = field(default_factory=OnlineRuntimeConfig)
+    replay: ReplayRuntimeConfig = field(default_factory=ReplayRuntimeConfig)
+    planner: PlannerRuntimeConfig = field(default_factory=PlannerRuntimeConfig)
 
 
 @dataclass(slots=True)
@@ -75,17 +108,13 @@ class EnvironmentConfig:
     save_recording: bool = False
     use_learned_contexts: bool = True
     experimental_memory_turn_buffer: int = 2
-    agent_action_history_window: int = 8
-    agent_updater_action_history_window: int = 8
-    agent_context_history_window: int = 8
+    action_history_window: int = 8
     animation_keyframe_pixel_threshold: int = 8
-    action_suppression_zero_changed_pixel_turns: int = 3
-    updater_stagnation_warning_zero_changed_pixel_turns: int = 3
     debug_keep_all_m_states: bool = False
     debug_trace: DebugTraceMode = "minimal"
     debug_color: DebugColorMode = "auto"
     live_turn_monitor: bool = False
-    models: ModelRuntimeConfig = field(default_factory=ModelRuntimeConfig)
+    agent: AgentRuntimeConfig = field(default_factory=AgentRuntimeConfig)
 
 
 def load_environment_config(path: str | Path) -> EnvironmentConfig:
@@ -140,29 +169,13 @@ def load_environment_config(path: str | Path) -> EnvironmentConfig:
         experimental_memory_turn_buffer=int(
             raw_data.get("experimental_memory_turn_buffer", 2)
         ),
-        agent_action_history_window=_non_negative_int(
-            raw_data.get("agent_action_history_window", 8),
-            key="agent_action_history_window",
-        ),
-        agent_updater_action_history_window=_non_negative_int(
-            raw_data.get("agent_updater_action_history_window", 8),
-            key="agent_updater_action_history_window",
-        ),
-        agent_context_history_window=_non_negative_int(
-            raw_data.get("agent_context_history_window", 8),
-            key="agent_context_history_window",
+        action_history_window=_non_negative_int(
+            raw_data.get("action_history_window", 8),
+            key="action_history_window",
         ),
         animation_keyframe_pixel_threshold=_non_negative_int(
             raw_data.get("animation_keyframe_pixel_threshold", 8),
             key="animation_keyframe_pixel_threshold",
-        ),
-        action_suppression_zero_changed_pixel_turns=_non_negative_int(
-            raw_data.get("action_suppression_zero_changed_pixel_turns", 3),
-            key="action_suppression_zero_changed_pixel_turns",
-        ),
-        updater_stagnation_warning_zero_changed_pixel_turns=_non_negative_int(
-            raw_data.get("updater_stagnation_warning_zero_changed_pixel_turns", 3),
-            key="updater_stagnation_warning_zero_changed_pixel_turns",
         ),
         debug_keep_all_m_states=_optional_bool(
             raw_data.get("debug_keep_all_m_states"),
@@ -184,135 +197,131 @@ def load_environment_config(path: str | Path) -> EnvironmentConfig:
             raw_data.get("live_turn_monitor"),
             default=False,
         ),
-        models=_load_model_runtime_config(raw_data.get("models")),
+        agent=_load_agent_runtime_config(raw_data.get("agent")),
     )
 
 
-def _load_model_runtime_config(value: Any) -> ModelRuntimeConfig:
-    """Load optional model role backend config from YAML."""
+def _load_agent_runtime_config(value: Any) -> AgentRuntimeConfig:
+    """Load the required online learner config from YAML."""
 
     if value is None:
-        raise ValueError("models config is required")
+        raise ValueError("agent config is required")
     if not isinstance(value, dict):
-        raise ValueError("models config must be a mapping")
-
-    _reject_removed_model_keys(value)
-    return ModelRuntimeConfig(
-        observation_text=_load_observation_text_config(value.get("observation_text")),
-        shared_vlm=_load_model_role_config(value.get("shared_vlm")),
-        agent=_load_model_role_config(value.get("agent")),
-        change=_load_required_model_role_config(value, "change"),
-        historizer=_load_model_role_config(value.get("historizer")),
-        updater=_load_updater_runtime_config(value.get("updater")),
+        raise ValueError("agent config must be a mapping")
+    return AgentRuntimeConfig(
+        backbone=_load_backbone_runtime_config(value.get("backbone")),
+        online=_load_online_runtime_config(value.get("online")),
+        replay=_load_replay_runtime_config(value.get("replay")),
+        planner=_load_planner_runtime_config(value.get("planner")),
     )
 
 
-def _load_updater_runtime_config(value: Any) -> UpdaterRuntimeConfig:
-    """Load updater task backend configs from YAML."""
-
-    if value is None:
-        raise ValueError("models.updater config is required")
+def _load_backbone_runtime_config(value: Any) -> BackboneRuntimeConfig:
     if not isinstance(value, dict):
-        raise ValueError("updater config must be a mapping")
-    _reject_removed_updater_keys(value)
-
-    return UpdaterRuntimeConfig(
-        agent=_load_required_updater_task_config(value, "agent"),
-        general=_load_required_updater_task_config(value, "general"),
-    )
-
-
-def _load_required_updater_task_config(
-    value: dict[str, Any],
-    task_name: str,
-) -> ModelRoleConfig:
-    """Load one required updater task config."""
-
-    if task_name not in value:
-        raise ValueError(f"models.updater.{task_name} config is required")
-    config = _load_model_role_config(value[task_name])
-    if config.backend is None or config.backend == "":
-        raise ValueError(f"models.updater.{task_name}.backend is required")
-    return config
-
-
-def _load_required_model_role_config(
-    value: dict[str, Any],
-    role_name: str,
-) -> ModelRoleConfig:
-    """Load one required model role config."""
-
-    if role_name not in value:
-        raise ValueError(f"models.{role_name} config is required")
-    config = _load_model_role_config(value[role_name])
-    if config.backend is None or config.backend == "":
-        raise ValueError(f"models.{role_name}.backend is required")
-    return config
-
-
-def _load_optional_active_model_role_config(
-    value: dict[str, Any],
-    role_name: str,
-) -> ModelRoleConfig | None:
-    """Load an optional active role, preserving absence as disabled."""
-
-    if role_name not in value:
-        return None
-    return _load_required_model_role_config(value, role_name)
-
-
-def _reject_removed_model_keys(value: dict[str, Any]) -> None:
-    removed = sorted(set(value) & {"world", "goal"})
-    if removed:
-        names = ", ".join(f"models.{key}" for key in removed)
-        raise ValueError(f"{names} config has been removed")
-
-
-def _reject_removed_updater_keys(value: dict[str, Any]) -> None:
-    removed = sorted(set(value) & {"world", "goal"})
-    if removed:
-        names = ", ".join(f"models.updater.{key}" for key in removed)
-        raise ValueError(f"{names} config has been removed")
-
-
-def _load_observation_text_config(value: Any) -> dict[str, Any]:
-    """Load shared text observation serializer options."""
-
-    if value is None:
-        return {}
-    if not isinstance(value, dict):
-        raise ValueError("models.observation_text config must be a mapping")
-    return dict(value)
-
-
-def _load_model_role_config(value: Any) -> ModelRoleConfig:
-    """Load one role config from a YAML mapping."""
-
-    if value is None:
-        return ModelRoleConfig()
-    if not isinstance(value, dict):
-        raise ValueError("model role config must be a mapping")
-
-    known_keys = {"backend", "model", "max_tool_calls", "repair_attempts"}
-    options = dict(value.get("options") or {})
-    for key, item in value.items():
-        if key not in known_keys and key != "options":
-            options[key] = item
-
-    return ModelRoleConfig(
-        backend=_optional_string(value.get("backend")),
-        model=_optional_string(value.get("model")),
-        max_tool_calls=(
-            int(value["max_tool_calls"])
-            if value.get("max_tool_calls") is not None
-            else None
+        raise ValueError("agent.backbone config is required")
+    backend = str(value.get("backend") or "transformers")
+    if backend != "transformers":
+        raise ValueError("agent.backbone.backend must be transformers")
+    model_path = _optional_string(value.get("model_path")) or ""
+    if not model_path:
+        raise ValueError("agent.backbone.model_path is required")
+    known = {
+        "backend",
+        "model_family",
+        "model_path",
+        "processor_path",
+        "device",
+        "dtype",
+        "image_size",
+        "local_files_only",
+        "representation_layer",
+        "feature_prompt",
+        "processor_kwargs",
+        "model_kwargs",
+        "options",
+    }
+    return BackboneRuntimeConfig(
+        backend=backend,
+        model_family=_choice(
+            value.get("model_family"),
+            key="agent.backbone.model_family",
+            default="generic_vision",
+            allowed=("generic_vision", "qwen3_5_moe_multimodal"),
         ),
-        repair_attempts=(
-            int(value["repair_attempts"])
-            if value.get("repair_attempts") is not None
-            else None
+        model_path=model_path,
+        processor_path=_optional_string(value.get("processor_path")),
+        device=str(value.get("device") or "auto"),
+        dtype=str(value.get("dtype") or "auto"),
+        image_size=_optional_string(value.get("image_size")) or "224x224",
+        local_files_only=_optional_bool(
+            value.get("local_files_only"),
+            default=True,
         ),
-        options=options,
+        representation_layer=str(value.get("representation_layer") or "pooled"),
+        feature_prompt=str(
+            value.get("feature_prompt") or DEFAULT_BACKBONE_FEATURE_PROMPT
+        ),
+        processor_kwargs=_optional_mapping(
+            value.get("processor_kwargs"),
+            "agent.backbone.processor_kwargs",
+        ),
+        model_kwargs=_optional_mapping(
+            value.get("model_kwargs"),
+            "agent.backbone.model_kwargs",
+        ),
+        options=_options(value, known),
+    )
+
+
+def _load_online_runtime_config(value: Any) -> OnlineRuntimeConfig:
+    data = _optional_mapping(value, "agent.online")
+    return OnlineRuntimeConfig(
+        buffer_size=_positive_int(data.get("buffer_size", 512), key="buffer_size"),
+        adapter_rank=_positive_int(data.get("adapter_rank", 16), key="adapter_rank"),
+        ensemble_size=_positive_int(data.get("ensemble_size", 5), key="ensemble_size"),
+        hidden_dim=_positive_int(data.get("hidden_dim", 512), key="hidden_dim"),
+        learning_rate=_positive_float(
+            data.get("learning_rate", 0.001),
+            key="learning_rate",
+        ),
+        batch_size=_positive_int(data.get("batch_size", 32), key="batch_size"),
+    )
+
+
+def _load_replay_runtime_config(value: Any) -> ReplayRuntimeConfig:
+    data = _optional_mapping(value, "agent.replay")
+    return ReplayRuntimeConfig(
+        max_updates_per_turn=_non_negative_int(
+            data.get("max_updates_per_turn", 8),
+            key="max_updates_per_turn",
+        ),
+        max_seconds_per_turn=_non_negative_float(
+            data.get("max_seconds_per_turn", 0.5),
+            key="max_seconds_per_turn",
+        ),
+        solved_level_updates=_non_negative_int(
+            data.get("solved_level_updates", 32),
+            key="solved_level_updates",
+        ),
+    )
+
+
+def _load_planner_runtime_config(value: Any) -> PlannerRuntimeConfig:
+    data = _optional_mapping(value, "agent.planner")
+    return PlannerRuntimeConfig(
+        horizon=_positive_int(data.get("horizon", 3), key="horizon"),
+        candidate_count=_positive_int(
+            data.get("candidate_count", 64),
+            key="candidate_count",
+        ),
+        coordinate_candidates=_positive_int(
+            data.get("coordinate_candidates", 16),
+            key="coordinate_candidates",
+        ),
+        diagnostic_turns=_non_negative_int(
+            data.get("diagnostic_turns", 4),
+            key="diagnostic_turns",
+        ),
     )
 
 
@@ -335,6 +344,11 @@ def _read_yaml(path: str | Path) -> dict[str, Any]:
         raise ValueError(
             "max_actions_per_game has been removed; use max_actions_per_level "
             "for the per-level action budget"
+        )
+    if "models" in loaded:
+        raise ValueError(
+            "models config has been removed; configure the online learner under "
+            "agent"
         )
     return loaded
 
@@ -454,6 +468,27 @@ def _non_negative_int(value: Any, *, key: str) -> int:
     return parsed
 
 
+def _positive_int(value: Any, *, key: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise ValueError(f"{key} must be at least 1")
+    return parsed
+
+
+def _non_negative_float(value: Any, *, key: str) -> float:
+    parsed = float(value)
+    if parsed < 0:
+        raise ValueError(f"{key} must be non-negative")
+    return parsed
+
+
+def _positive_float(value: Any, *, key: str) -> float:
+    parsed = float(value)
+    if parsed <= 0:
+        raise ValueError(f"{key} must be positive")
+    return parsed
+
+
 def _optional_positive_int(value: Any, *, key: str) -> int | None:
     """Normalize one optional positive integer config value."""
 
@@ -484,6 +519,22 @@ def _choice(
         options = ", ".join(allowed)
         raise ValueError(f"{key} must be one of: {options}")
     return parsed
+
+
+def _optional_mapping(value: Any, key: str) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"{key} must be a mapping")
+    return value
+
+
+def _options(value: dict[str, Any], known: set[str]) -> dict[str, Any]:
+    options = dict(value.get("options") or {})
+    for key, item in value.items():
+        if key not in known:
+            options[key] = item
+    return options
 
 
 def load_game_catalog(path: str | Path) -> dict[str, str]:

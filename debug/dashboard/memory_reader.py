@@ -81,8 +81,8 @@ def load_m_states(database_path: str | Path) -> list[dict[str, Any]]:
             "frame_count": int(row["frame_count"]),
             "current_observation": _load_json(row["current_observation_json"]),
             "chosen_action": _load_optional_json(row["chosen_action_json"]),
-            "agent_context": _load_json(row["agent_context_json"]),
-            "agent_trace": _load_optional_json(row["agent_trace_json"]),
+            "learner_snapshot": _load_json(row["learner_snapshot_json"]),
+            "learner_trace": _load_optional_json(row["learner_trace_json"]),
             "turn_metrics": _load_optional_json(
                 _row_value(row, "turn_metrics_json")
             ),
@@ -99,27 +99,26 @@ def load_m_states(database_path: str | Path) -> list[dict[str, Any]]:
 def load_e_experiments(database_path: str | Path) -> list[dict[str, Any]]:
     """Load dedicated E experiment rows with decoded JSON payloads."""
 
-    rows = _query_rows(database_path, "SELECT * FROM e_experiments ORDER BY id")
+    try:
+        rows = _query_rows(database_path, "SELECT * FROM learner_artifacts ORDER BY id")
+    except sqlite3.OperationalError as exc:
+        if "no such table: learner_artifacts" in str(exc):
+            return []
+        raise
     experiments: list[dict[str, Any]] = []
     for row in rows:
-        tool_call = _load_json(row["tool_call_json"])
-        tool_result = _load_json(row["tool_result_json"])
-        source_state_id = _row_value(row, "source_state_id")
-        source_observation_ref = _dict(tool_result).get("source_observation_ref")
         experiments.append(
             {
                 "id": int(row["id"]),
                 "game_id": str(row["game_id"]),
                 "run_id": str(row["run_id"]),
                 "turn_id": int(row["turn_id"]),
-                "tool_name": str(row["tool_name"]),
-                "source_state_id": (
-                    int(source_state_id) if source_state_id is not None else None
-                ),
-                "source_observation_ref": source_observation_ref,
-                "tool_call": tool_call,
-                "output_description": _load_json(row["output_description_json"]),
-                "tool_result": tool_result,
+                "tool_name": str(row["kind"]),
+                "source_state_id": None,
+                "source_observation_ref": None,
+                "tool_call": {},
+                "output_description": _load_json(row["payload_json"]),
+                "tool_result": _load_json(row["payload_json"]),
                 "metadata": _load_json(row["metadata_json"]),
                 "created_at": str(row["created_at"]),
             }
@@ -167,7 +166,7 @@ def turn_summary(state: dict[str, Any]) -> dict[str, Any]:
 
     metadata = _dict(state.get("metadata"))
     control_mode = _dict(metadata.get("control_mode"))
-    trace = _dict(state.get("agent_trace"))
+    trace = _dict(state.get("learner_trace"))
     return {
         "id": state["id"],
         "turn_id": state["turn_id"],
@@ -178,7 +177,8 @@ def turn_summary(state: dict[str, Any]) -> dict[str, Any]:
         "controllable": bool(control_mode.get("controllable", False)),
         "control_reason": control_mode.get("reason", ""),
         "chosen_action": action_label(state.get("chosen_action")),
-        "tool_call_count": len(trace.get("tool_calls") or []),
+        "tool_call_count": len(trace.get("planner_candidates") or []),
+        "prediction_error": _prediction_error(trace),
         "created_at": state["created_at"],
     }
 
@@ -351,6 +351,14 @@ def source_label(experiment: dict[str, Any]) -> str:
     if source_state_id is not None:
         return f"M:{source_state_id}"
     return ref_label(experiment.get("source_observation_ref"))
+
+
+def _prediction_error(trace: dict[str, Any]) -> Any:
+    transition = _dict(trace.get("transition"))
+    value = transition.get("prediction_error")
+    if isinstance(value, (int, float)):
+        return round(float(value), 6)
+    return None
 
 
 def redacted_for_json(value: Any) -> Any:

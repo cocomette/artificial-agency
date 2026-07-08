@@ -1,0 +1,49 @@
+game_selection: all_available
+operation_mode: offline
+game_catalog_path: src/face_of_agi/environment/local_games.json
+environments_dir: environment_files
+recordings_dir: recordings
+seed: 0
+save_recording: false
+use_learned_contexts: false
+experimental_memory_turn_buffer: 1
+debug_keep_all_m_states: true
+enable_visualization: false
+render_mode: null
+debug_trace: minimal
+debug_color: never
+live_turn_monitor: true
+max_parallel_games: 1
+max_game_retries: 0
+max_actions_per_level: 300
+animation_keyframe_pixel_threshold: 8
+action_history_window: 10
+agent:
+  backbone:
+    backend: transformers
+    model_family: qwen3_5_moe_multimodal
+    model_path: /kaggle/input/face-of-agi-qwen36-35b-fp8-weights
+    processor_path: null
+    device: auto
+    dtype: auto
+    image_size: 224x224
+    local_files_only: true
+    representation_layer: image_tokens_mean
+    model_kwargs:
+      device_map: auto
+  online:
+    buffer_size: 512
+    adapter_rank: 16
+    ensemble_size: 5
+    hidden_dim: 512
+    learning_rate: 0.001
+    batch_size: 32
+  replay:
+    max_updates_per_turn: 8
+    max_seconds_per_turn: 0.5
+    solved_level_updates: 32
+  planner:
+    horizon: 3
+    candidate_count: 64
+    coordinate_candidates: 16
+    diagnostic_turns: 4

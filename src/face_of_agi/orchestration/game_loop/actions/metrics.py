@@ -17,12 +17,7 @@ def effective_trace_cost_seconds(
     if wall_clock_seconds is None:
         return None
 
-    load_seconds = _load_duration_seconds(
-        decision.trace.metadata.get("usage")
-    ) + sum(
-        _load_duration_seconds(result.metadata.get("usage"))
-        for result in decision.trace.tool_results
-    )
+    load_seconds = _load_duration_seconds(decision.trace.metadata.get("usage"))
     return max(0.0, wall_clock_seconds - load_seconds)
 
 
@@ -32,7 +27,7 @@ def turn_metrics(
     trace_cost_seconds: float | None,
     cumulative_time_cost: float | None,
 ) -> TurnMetrics:
-    """Build frame-turn metrics for persistence and updater boundaries."""
+    """Build frame-turn metrics for persistence and learner traces."""
 
     return TurnMetrics(
         time_cost=cumulative_time_cost,
@@ -67,7 +62,7 @@ def levels_completed(observation: Observation | None) -> int | None:
 
 
 def _load_duration_seconds(value: Any) -> float:
-    """Sum load_duration nanoseconds from provider usage payloads."""
+    """Sum Ollama-style load_duration nanoseconds from provider usage payloads."""
 
     if isinstance(value, dict):
         return _nanoseconds_to_seconds(value.get("load_duration"))

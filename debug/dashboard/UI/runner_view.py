@@ -7,18 +7,17 @@ from pathlib import Path
 import streamlit as st
 
 from debug.dashboard import config_manager
+from debug.dashboard.modal_snapshot import ModalSnapshotConfig
 from debug.dashboard.UI.config_editor import render_config_editor
 from debug.dashboard.runner import (
     CommandResult,
     GAME_CATALOG_PATH,
     RUNTIME_RUNNER_KEY,
-    RUNNER_PLAYBACK_REQUEST_KEY,
     RuntimeRunner,
     build_run_command,
     format_command,
     pull_game_list,
 )
-from debug.playback import PlaybackRequest
 
 RUNNER_KEY = RUNTIME_RUNNER_KEY
 RUNNER_CONFIG_KEY = "runner_config"
@@ -27,7 +26,11 @@ PENDING_CONFIG_KEY = "runner_pending_config"
 GAME_LIST_RESULT_KEY = "runner_game_list_result"
 
 
-def render_runner(database_path: str) -> None:
+def render_runner(
+    database_path: str,
+    *,
+    modal_snapshot: ModalSnapshotConfig | None = None,
+) -> None:
     """Render runtime process controls and live output."""
 
     _render_runner_header()
@@ -50,13 +53,15 @@ def render_runner(database_path: str) -> None:
         )
 
     keep_all_m_states = bool(st.checkbox("Keep all M states", value=True))
-    playback_request = _render_playback_request()
     command = build_run_command(
         selected_config_path,
         database_path,
         keep_all_m_states=keep_all_m_states,
-        playback_request=playback_request,
     )
+    if modal_snapshot is not None:
+        st.caption(
+            "Modal mode inspects a pulled SQLite snapshot. Runtime launches are local."
+        )
 
     runner = _get_runner()
     if runner is not None:
@@ -128,23 +133,6 @@ def _resolve_config_selection(
     if stored_name in config_names:
         return str(stored_name)
     return config_names[0]
-
-
-def _render_playback_request() -> PlaybackRequest | None:
-    request = st.session_state.get(RUNNER_PLAYBACK_REQUEST_KEY)
-    if not isinstance(request, PlaybackRequest):
-        return None
-
-    st.info(
-        "Playback armed: "
-        f"run `{request.source_run_id}`, game `{request.game_id}`, "
-        f"handoff turn `{request.turn_id}`. "
-        "The next run will replay prior turns before live control resumes."
-    )
-    if st.button("Clear playback request"):
-        st.session_state.pop(RUNNER_PLAYBACK_REQUEST_KEY, None)
-        st.rerun()
-    return request
 
 
 def _render_runner_header() -> None:

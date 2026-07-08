@@ -1,20 +1,14 @@
-"""Temporary experimental memory E."""
+"""Compatibility wrapper for learner debug artifacts."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from face_of_agi.contracts import (
-    EExperimentRecord,
-    Observation,
-    ToolCall,
-    ToolResult,
-)
 from face_of_agi.memory.sqlite import SQLiteDatabase
 
 
 class ExperimentalMemory:
-    """Rolling experimental memory E backed by dedicated SQLite rows."""
+    """Small facade over the learner artifact table."""
 
     def __init__(self, database: SQLiteDatabase) -> None:
         self.database = database
@@ -26,39 +20,43 @@ class ExperimentalMemory:
         run_id: str,
         game_id: str,
         turn_id: int,
-        tool_call: ToolCall,
-        output_description: Observation,
-        tool_result: ToolResult,
+        tool_call: Any,
+        output_description: Any,
+        tool_result: Any,
         metadata: dict[str, Any] | None = None,
-    ) -> EExperimentRecord:
-        """Store one tool-produced output frame in rolling E memory."""
+    ) -> dict[str, Any]:
+        """Store one debug payload as a learner artifact."""
 
-        return self.database.write_e_experiment(
+        return self.database.write_learner_artifact(
             run_id=run_id,
             game_id=game_id,
             turn_id=turn_id,
-            tool_name=tool_call.tool,
-            source_state_id=tool_call.source_state_id,
-            tool_call=tool_call,
-            output_description=output_description,
-            tool_result=tool_result,
+            kind=f"debug_artifact:{_tool_name(tool_call)}",
+            payload={
+                "tool_call": tool_call,
+                "output_description": output_description,
+                "tool_result": tool_result,
+            },
             metadata=metadata,
         )
 
-    def read_experiment(self, ref_id: str | int) -> EExperimentRecord | None:
-        """Read one E row by the id used in experimental observation refs."""
+    def read_experiment(self, ref_id: str | int) -> dict[str, Any] | None:
+        """Read one artifact by id."""
 
-        return self.database.read_e_experiment(ref_id=ref_id)
+        for artifact in self.database.list_learner_artifacts():
+            if int(artifact["id"]) == int(ref_id):
+                return artifact
+        return None
 
     def list_experiments(
         self,
         *,
         run_id: str | None = None,
         game_id: str | None = None,
-    ) -> list[EExperimentRecord]:
-        """List dedicated E experiment rows."""
+    ) -> list[dict[str, Any]]:
+        """List learner artifact rows."""
 
-        return self.database.list_e_experiments(
+        return self.database.list_learner_artifacts(
             run_id=run_id,
             game_id=game_id,
         )
@@ -72,13 +70,15 @@ class ExperimentalMemory:
     ) -> None:
         """Prune E to a rolling turn buffer for each game in one run."""
 
-        self.database.cleanup_e_experiments_keep_latest_turns_per_game(
-            run_id=run_id,
-            game_id=game_id,
-            max_turns=max_turns,
-        )
+        del run_id, max_turns, game_id
 
     def clear_experiments(self) -> None:
-        """Delete all dedicated E experiment rows."""
+        """Delete all learner artifact rows."""
 
-        self.database.clear_e_experiments()
+        self.database.clear_learner_artifacts()
+
+
+def _tool_name(value: Any) -> str:
+    if isinstance(value, dict):
+        return str(value.get("tool") or value.get("name") or "unknown")
+    return str(getattr(value, "tool", "unknown"))

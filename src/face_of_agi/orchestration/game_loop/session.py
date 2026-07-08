@@ -16,11 +16,9 @@ from face_of_agi.contracts import (
     ObservationRef,
     RuntimeConfig,
     TurnMetrics,
-    UpdaterFrameTransitionInput,
 )
 from face_of_agi.environment.adapter import EnvironmentAdapter
 from face_of_agi.environment.config import EnvironmentConfig
-from face_of_agi.models.orchestrator_agent import AgentToolRuntime
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,15 +74,12 @@ class GameLoopSession:
     frame_index: int = 0
     current: FrameTurnSnapshot | None = None
     next: FrameTurnSnapshot | None = None
-    tool_runtime: AgentToolRuntime | None = None
     decision: DecisionResult | None = None
     decision_duration_seconds: float | None = None
     trace_cost_seconds: float | None = None
     turn_metrics: TurnMetrics | None = None
-    update_input: UpdaterFrameTransitionInput | None = None
     next_environment_observation: Observation | None = None
     next_frame_buffer: tuple[Observation, ...] = ()
-    transition_frame_observations: tuple[Observation, ...] = ()
     real_step_count: int = 0
     frame_turn_count: int = 0
     game_start_turn_id: int = 1

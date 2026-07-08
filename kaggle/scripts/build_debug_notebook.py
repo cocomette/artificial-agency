@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import base64
 import argparse
+import base64
 from io import BytesIO
 import json
 from pathlib import Path
@@ -31,62 +31,33 @@ ACCELERATOR = "rtx6000"
 _ACCELERATORS = {
     "rtx6000": {"name": "NvidiaRtxPro6000", "gpu": True},
 }
-DEBUG_KERNEL_TITLE_PREFIX = "Debug"
-DEBUG_KERNEL_TITLE_MAX_LENGTH = 48
+DEBUG_KERNEL_TITLE_PREFIX = "FOA"
 DEBUG_KERNEL_COMMIT_LENGTH = 8
 
-DEFAULT_CONFIG_RELATIVE_PATH = (
-    "src/face_of_agi/runtime/configs/vllm/"
-    "vllm_rtx6000_qwen36_35b_fp8_debug.yaml"
+CONFIG_RELATIVE_PATH = (
+    "src/face_of_agi/runtime/configs/kaggle_debug_transformers.yaml"
 )
 PROJECT_DIR = "/kaggle/working/face-of-agi"
 DATABASE_PATH = "/kaggle/working/runs/memory.sqlite"
-WHEELHOUSE_DATASET_SLUG = "face-of-agi-wheelhouse"
+WHEELHOUSE_DATASET_SLUG = "face-of-agi-transformers-wheelhouse"
 PUBLIC_GAMES_DATASET_SLUG = "face-of-agi-public-games"
 COMPETITION_SLUG = "arc-prize-2026-arc-agi-3"
-DEFAULT_MODEL_DATASET_SLUG = "face-of-agi-qwen36-35b-fp8-weights"
+MODEL_DATASET_SLUG = "face-of-agi-qwen36-35b-fp8-weights"
 CONFIG_PUBLIC_GAMES_PATH = f"/kaggle/input/{PUBLIC_GAMES_DATASET_SLUG}"
-VLLM_VERSION = "0.19.1"
 RUNTIME_PACKAGES = (
     "arc-agi",
+    "accelerate",
+    "numpy",
+    "pillow",
     "python-dotenv",
     "pyyaml",
     "rich",
-    "openai",
     "pandas",
     "pyarrow",
-)
-VLLM_STACK_PACKAGES = (
-    "compressed-tensors==0.15.0.1",
-    "flashinfer-python==0.6.6",
-    "quack-kernels==0.4.1",
-    "torch-c-dlpack-ext",
-    f"vllm=={VLLM_VERSION}",
-    "xgrammar==0.2.1",
-)
-VLLM_TORCH_DEPENDENCY_PACKAGES = (
-    "apache-tvm-ffi>=0.1.2",
-    "click",
-    "cloudpickle",
-    "cuda-tile",
-    "einops",
-    "loguru",
-    "ml-dtypes",
-    "ninja",
-    "numpy>=1.23.5",
-    "nvidia-cudnn-frontend>=1.13.0",
-    "nvidia-cutlass-dsl==4.6.0.dev0",
-    "nvidia-ml-py",
-    "packaging>=24.2",
-    "psutil",
-    "pydantic>=2.0",
-    "requests",
-    "setuptools",
-    "tabulate",
-    "tqdm>=4.62.3",
-    "transformers>=4.45.0",
-    "typing-extensions>=4.10.0",
-    "z3-solver<4.15.5,>=4.13.0",
+    "safetensors",
+    "torch",
+    "torchvision",
+    "transformers",
 )
 
 
@@ -107,8 +78,8 @@ def markdown_cell(source: str) -> dict:
 def build(
     source_archive_b64: str | None = None,
     *,
-    config_relative_path: str = DEFAULT_CONFIG_RELATIVE_PATH,
-    model_dataset_slug: str = DEFAULT_MODEL_DATASET_SLUG,
+    config_relative_path: str = CONFIG_RELATIVE_PATH,
+    model_dataset_slug: str = MODEL_DATASET_SLUG,
 ) -> dict:
     """Return the debug notebook document."""
 
@@ -161,10 +132,7 @@ def _install_cell() -> dict:
             f"""\
             import subprocess
             import sys
-            import zipfile
             from pathlib import Path
-            from pip._vendor.packaging.requirements import Requirement
-            from pip._vendor.packaging.utils import canonicalize_name
 
             __KAGGLE_INPUT_HELPERS__
 
@@ -189,59 +157,7 @@ def _install_cell() -> dict:
                     command.append("--no-deps")
                 subprocess.check_call(command + list(packages))
 
-            def wheel_for(distribution, version=None):
-                normalized = canonicalize_name(distribution).replace("-", "_")
-                pattern = (
-                    f"{{normalized}}-*.whl"
-                    if version is None
-                    else f"{{normalized}}-{{version}}*.whl"
-                )
-                matches = sorted(wheelhouse_input.glob(pattern))
-                if not matches:
-                    raise FileNotFoundError(
-                        f"Could not find {{distribution}} wheel in {{wheelhouse_input}}"
-                    )
-                return matches[-1]
-
-            def vllm_dependency_requirements():
-                skipped = {{
-                    "torch",
-                    "torchaudio",
-                    "torchvision",
-                    "triton",
-                    "vllm",
-                    "cuda-toolkit",
-                    "compressed-tensors",
-                    "flashinfer-python",
-                    "quack-kernels",
-                    "tilelang",
-                    "tokenspeed-mla",
-                    "torch-c-dlpack-ext",
-                    "xgrammar",
-                }}
-                with zipfile.ZipFile(wheel_for("vllm", {VLLM_VERSION!r})) as wheel:
-                    metadata_name = next(
-                        name
-                        for name in wheel.namelist()
-                        if name.endswith(".dist-info/METADATA")
-                    )
-                    metadata = wheel.read(metadata_name).decode("utf-8")
-                requirements = []
-                for line in metadata.splitlines():
-                    if not line.startswith("Requires-Dist: "):
-                        continue
-                    requirement = Requirement(line.removeprefix("Requires-Dist: "))
-                    if canonicalize_name(requirement.name) in skipped:
-                        continue
-                    if requirement.marker is not None and not requirement.marker.evaluate({{"extra": ""}}):
-                        continue
-                    requirements.append(str(requirement))
-                return requirements
-
             pip_install({RUNTIME_PACKAGES!r})
-            pip_install({VLLM_TORCH_DEPENDENCY_PACKAGES!r})
-            pip_install(vllm_dependency_requirements())
-            pip_install({VLLM_STACK_PACKAGES!r}, no_deps=True)
             """
         ).replace("__KAGGLE_INPUT_HELPERS__", _kaggle_input_helpers())
     )
@@ -268,7 +184,6 @@ def _run_debug_cell(
     config_relative_path: str,
     model_dataset_slug: str,
 ) -> dict:
-    config_model_path = f"/kaggle/input/{model_dataset_slug}"
     return code_cell(
         dedent(
             f"""\
@@ -276,11 +191,9 @@ def _run_debug_cell(
             import shutil
             import subprocess
             import sys
-            import time
-            import urllib.error
-            import urllib.request
             import zipfile
             from pathlib import Path
+            import yaml
 
             project_dir = Path({PROJECT_DIR!r})
             config_path = project_dir / {config_relative_path!r}
@@ -325,17 +238,20 @@ def _run_debug_cell(
                     str(public_environments_dir),
                 )
                 .replace({CONFIG_PUBLIC_GAMES_PATH!r}, str(public_games_input))
-                .replace({config_model_path!r}, str(model_input))
             )
+            config_data = yaml.safe_load(config_text)
+            config_data.setdefault("agent", {{}}).setdefault("backbone", {{}})[
+                "model_path"
+            ] = str(model_input)
             runtime_config_path = Path("/kaggle/working/runtime_config.yaml")
-            runtime_config_path.write_text(config_text, encoding="utf-8")
+            runtime_config_path.write_text(
+                yaml.safe_dump(config_data, sort_keys=False),
+                encoding="utf-8",
+            )
             os.environ.update({{
                 "ENVIRONMENTS_DIR": str(public_environments_dir),
                 "RECORDINGS_DIR": "/kaggle/working/recordings",
                 "MPLBACKEND": "agg",
-                "VLLM_API_KEY": "EMPTY",
-                "VLLM_DISABLE_LOG_LOGO": "1",
-                "VLLM_LOGGING_LEVEL": "ERROR",
             }})
             source_dir = str(project_dir / "src")
             existing_pythonpath = os.environ.get("PYTHONPATH")
@@ -346,63 +262,19 @@ def _run_debug_cell(
             )
             sys.path.insert(0, source_dir)
 
-            from face_of_agi.runtime.vllm_server import (
-                vllm_server_command,
-                vllm_server_config_from_config_text,
+            subprocess.check_call(
+                [
+                    sys.executable,
+                    "-m",
+                    "face_of_agi.runtime.shell",
+                    "--config",
+                    str(runtime_config_path),
+                    "--database",
+                    str(database_path),
+                    "--debug-keep-all-m-states",
+                ],
+                cwd=str(project_dir),
             )
-
-            vllm_config = vllm_server_config_from_config_text(
-                config_text
-            )
-            if vllm_config is None:
-                raise RuntimeError("Kaggle debug config does not define a vLLM server")
-            command = list(vllm_server_command(vllm_config))
-            print("Starting vLLM:", " ".join(command))
-            process = subprocess.Popen(command, cwd=str(project_dir))
-
-            def wait_for_vllm() -> None:
-                deadline = time.monotonic() + 900
-                url = f"{{vllm_config.base_url}}/models"
-                while time.monotonic() < deadline:
-                    if process.poll() is not None:
-                        raise RuntimeError(
-                            "vLLM exited before becoming ready with return code "
-                            f"{{process.returncode}}"
-                        )
-                    try:
-                        api_key = os.environ.get("VLLM_API_KEY", "")
-                        request = urllib.request.Request(
-                            url,
-                            headers={{"Authorization": f"Bearer {{api_key}}"}},
-                        )
-                        with urllib.request.urlopen(request, timeout=5) as response:
-                            if 200 <= response.status < 500:
-                                return
-                    except (TimeoutError, urllib.error.URLError):
-                        time.sleep(2)
-                raise RuntimeError("vLLM did not become ready inside Kaggle")
-
-            try:
-                wait_for_vllm()
-                subprocess.check_call(
-                    [
-                        sys.executable,
-                        "-m",
-                        "face_of_agi.runtime.shell",
-                        "--config",
-                        str(runtime_config_path),
-                        "--database",
-                        str(database_path),
-                        "--debug-keep-all-m-states",
-                    ],
-                    cwd=str(project_dir),
-                )
-            finally:
-                process.terminate()
-                try:
-                    process.wait(timeout=30)
-                except subprocess.TimeoutExpired:
-                    process.kill()
 
             for sqlite_path in sorted(database_path.parent.glob("*.sqlite")):
                 print(f"debug sqlite: {{sqlite_path}}")
@@ -541,7 +413,9 @@ def _current_debug_kernel_identity(
     *,
     kernel_title_suffix: str = "",
 ) -> tuple[str, str]:
-    branch_name = _current_branch_name()
+    branch_name = _git_output("branch", "--show-current")
+    if not branch_name:
+        raise SystemExit("debug notebook kernel id requires a named git branch")
     commit_id = _git_output(
         "rev-parse",
         f"--short={DEBUG_KERNEL_COMMIT_LENGTH}",
@@ -567,70 +441,13 @@ def _debug_kernel_identity(
         raise SystemExit("debug notebook kernel metadata id is missing an owner")
     branch_slug = _metadata_slug(branch_name)
     commit_slug = _metadata_slug(commit_id)
-    suffix_slug = (
-        _metadata_slug(kernel_title_suffix) if kernel_title_suffix.strip() else ""
-    )
-    branch_slug = _debug_kernel_branch_slug(
-        branch_slug,
-        commit_slug,
-        kernel_title_suffix=suffix_slug,
-    )
     title_parts = [DEBUG_KERNEL_TITLE_PREFIX]
-    if suffix_slug:
-        title_parts.append(suffix_slug)
+    if kernel_title_suffix.strip():
+        title_parts.append(kernel_title_suffix.strip())
     title_parts.extend((branch_slug, commit_slug))
     title = " ".join(title_parts)
     kernel_slug = _metadata_slug(title)
     return f"{owner}/{kernel_slug}", title
-
-
-def _current_branch_name() -> str:
-    branch_name = _git_output("branch", "--show-current")
-    if branch_name:
-        return branch_name
-
-    refs = _git_output(
-        "for-each-ref",
-        "--format=%(refname:short)",
-        "--points-at",
-        "HEAD",
-        "refs/heads",
-        "refs/remotes/origin",
-    ).splitlines()
-    for ref in refs:
-        if ref and not ref.startswith("origin/"):
-            return ref
-    for ref in refs:
-        if ref.startswith("origin/") and ref != "origin/HEAD":
-            return ref.removeprefix("origin/")
-
-    raise SystemExit("debug notebook kernel id requires a named git branch")
-
-
-def _debug_kernel_branch_slug(
-    branch_slug: str,
-    commit_slug: str,
-    *,
-    kernel_title_suffix: str = "",
-) -> str:
-    fixed_parts = [DEBUG_KERNEL_TITLE_PREFIX]
-    if kernel_title_suffix:
-        fixed_parts.append(kernel_title_suffix)
-    fixed_parts.append(commit_slug)
-    max_branch_length = (
-        DEBUG_KERNEL_TITLE_MAX_LENGTH
-        - sum(len(part) for part in fixed_parts)
-        - len(fixed_parts)
-    )
-    if max_branch_length < 1:
-        raise SystemExit("debug notebook kernel title prefix is too long")
-    if len(branch_slug) <= max_branch_length:
-        return branch_slug
-
-    shortened_slug = branch_slug[:max_branch_length].strip("-")
-    if not shortened_slug:
-        raise SystemExit(f"cannot shorten debug kernel branch slug {branch_slug!r}")
-    return shortened_slug
 
 
 def _metadata_slug(value: str) -> str:
@@ -660,7 +477,7 @@ def _dataset_source_slugs(model_dataset_slug: str) -> tuple[str, str, str]:
 
 def _sync_metadata(
     *,
-    model_dataset_slug: str = DEFAULT_MODEL_DATASET_SLUG,
+    model_dataset_slug: str = MODEL_DATASET_SLUG,
     kernel_title_suffix: str = "",
 ) -> dict:
     if not METADATA_TEMPLATE_PATH.exists():
@@ -688,8 +505,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         description="Build the ARC Prize 2026 Kaggle RTX 6000 debug notebook.",
     )
     parser.add_argument("--metadata-only", action="store_true")
-    parser.add_argument("--config-relative-path", default=DEFAULT_CONFIG_RELATIVE_PATH)
-    parser.add_argument("--model-dataset-slug", default=DEFAULT_MODEL_DATASET_SLUG)
+    parser.add_argument("--config-relative-path", default=CONFIG_RELATIVE_PATH)
+    parser.add_argument("--model-dataset-slug", default=MODEL_DATASET_SLUG)
     parser.add_argument("--kernel-title-suffix", default="")
     return parser.parse_args(argv)
 
@@ -703,7 +520,7 @@ def main(argv: list[str] | None = None) -> None:
         )
         print(
             "[build_debug_notebook] Synced "
-            f"{_display_path(METADATA_PATH)} as {meta['id']}"
+            f"{METADATA_PATH.relative_to(ROOT)} as {meta['id']}"
         )
         return
 
@@ -718,7 +535,7 @@ def main(argv: list[str] | None = None) -> None:
         ),
         encoding="utf-8",
     )
-    print(f"[build_debug_notebook] Wrote {_display_path(NOTEBOOK_PATH)}")
+    print(f"[build_debug_notebook] Wrote {NOTEBOOK_PATH.relative_to(ROOT)}")
 
     meta = _sync_metadata(
         model_dataset_slug=args.model_dataset_slug,
@@ -726,15 +543,8 @@ def main(argv: list[str] | None = None) -> None:
     )
     print(
         "[build_debug_notebook] Synced "
-        f"{_display_path(METADATA_PATH)} as {meta['id']}"
+        f"{METADATA_PATH.relative_to(ROOT)} as {meta['id']}"
     )
-
-
-def _display_path(path: Path) -> str:
-    try:
-        return str(path.relative_to(ROOT))
-    except ValueError:
-        return str(path)
 
 
 if __name__ == "__main__":

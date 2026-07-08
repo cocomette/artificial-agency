@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from enum import Enum
 import json
 import sys
@@ -25,20 +24,9 @@ from face_of_agi.contracts import (
     FrameTurnContext,
     GameRunResult,
     Observation,
-    ObservationRef,
-    RoleContext,
-    ToolCall,
-    ToolName,
-    ToolResult,
-)
-from face_of_agi.debug.capture.model_io import (
-    collect_model_input_payload,
-    collect_model_io_payload,
 )
 from face_of_agi.debug.sanitize import sanitize_for_debug
 from face_of_agi.debug.events import (
-    AgentFrameworkInputCaptured,
-    AgentProviderRequestsCaptured,
     DebugEvent,
     EnvironmentStepRecorded,
     FrameDecisionRecorded,
@@ -48,11 +36,6 @@ from face_of_agi.debug.events import (
     ModelCallCompleted,
     RunStarted,
     RunStopped,
-    ToolModelInputCaptured,
-    ToolProviderInputCaptured,
-    ToolResultRecorded,
-    UpdaterInputCaptured,
-    UpdaterProviderOutputCaptured,
 )
 
 DebugTraceMode = str
@@ -97,7 +80,6 @@ class DebugTrace:
                     "run": "bold cyan",
                     "frame": "bold blue",
                     "agent": "bold magenta",
-                    "updater": "bold bright_blue",
                     "memory": "bold bright_black",
                     "warning": "bold red",
                 }
@@ -136,7 +118,7 @@ class DebugTrace:
         return _TRACE_LEVELS[self.mode] >= _TRACE_LEVELS["verbose"]
 
     def decision_enabled(self) -> bool:
-        """Return whether the Agent X decision panel should be printed."""
+        """Return whether the learner decision panel should be printed."""
 
         return self.mode == "agent_decision" or self.verbose_enabled()
 
@@ -161,18 +143,7 @@ class DebugTrace:
                 lifecycle_state=event.lifecycle_state,
                 completed_levels=event.completed_levels,
                 remaining_actions=event.remaining_actions,
-                available_tools=event.available_tools,
             )
-        elif isinstance(event, AgentFrameworkInputCaptured):
-            self.agent_framework_input(
-                context=event.context,
-                current_observation=event.current_observation,
-                action_space=event.action_space,
-                recent_action_history=event.recent_action_history,
-                tool_runtime=event.tool_runtime,
-            )
-        elif isinstance(event, AgentProviderRequestsCaptured):
-            self.agent_provider_requests(event.requests)
         elif isinstance(event, FrameDecisionRecorded):
             self.frame_decision(
                 frame_turn=event.frame_turn,
@@ -180,37 +151,12 @@ class DebugTrace:
                 action=event.action,
                 trace=event.trace,
             )
-        elif isinstance(event, ToolModelInputCaptured):
-            self.tool_model_input(
-                role=event.role,
-                purpose=event.purpose,
-                call=event.call,
-                context=event.context,
-                observation=event.observation,
-            )
-        elif isinstance(event, ToolProviderInputCaptured):
-            self.tool_provider_input(
-                role=event.role,
-                purpose=event.purpose,
-                adapter=event.adapter,
-            )
-        elif isinstance(event, ToolResultRecorded):
-            self.tool_result(
-                role=event.role,
-                purpose=event.purpose,
-                result=event.result,
-                experiment_ref=event.experiment_ref,
-            )
         elif isinstance(event, EnvironmentStepRecorded):
             self.environment_step(
                 action=event.action,
                 next_observation=event.next_observation,
                 remaining_actions=event.remaining_actions,
             )
-        elif isinstance(event, UpdaterInputCaptured):
-            self.updater_input(role=event.role, update_input=event.update_input)
-        elif isinstance(event, UpdaterProviderOutputCaptured):
-            self.updater_provider_output(role=event.role, adapter=event.adapter)
         elif isinstance(event, MStatePersisted):
             self.persisted_state(record_id=event.record_id, turn_id=event.turn_id)
         elif isinstance(event, ModelCallCompleted):
@@ -264,9 +210,8 @@ class DebugTrace:
         lifecycle_state: Any,
         completed_levels: int,
         remaining_actions: int,
-        available_tools: Sequence[ToolName],
     ) -> None:
-        """Print per-frame loop state before Agent X runs."""
+        """Print per-frame loop state before the learner runs."""
 
         if not self.verbose_enabled():
             return
@@ -294,50 +239,9 @@ class DebugTrace:
             "allowed_actions",
             ", ".join(action.name for action in frame_context.control_mode.allowed_actions),
         )
-        table.add_row("available_tools", ", ".join(available_tools) or "(none)")
         self.console.print(
             Panel(table, title="Frame turn", border_style="frame", box=box.ASCII)
         )
-
-    def agent_framework_input(
-        self,
-        *,
-        context: RoleContext,
-        current_observation: Observation,
-        action_space: Sequence[ActionSpec],
-        recent_action_history: Sequence[ActionHistoryItem],
-        tool_runtime: Any | None,
-    ) -> None:
-        """Print the provider-neutral input handed to Agent X."""
-
-        if not self.model_inputs_enabled():
-            return
-
-        payload: dict[str, Any] = {
-            "role": "agent_x",
-            "context": _role_context_payload(context),
-            "current_observation": _observation_payload(current_observation),
-            "action_space": [_action_payload(action) for action in action_space],
-            "recent_action_history": [
-                _action_history_payload(item) for item in recent_action_history
-            ],
-        }
-        if tool_runtime is not None:
-            payload["turn_id"] = getattr(tool_runtime, "turn_id", None)
-        self._json_panel("Agent X framework input", payload, style="agent")
-
-    def agent_provider_requests(self, requests: Sequence[Any]) -> None:
-        """Print provider-specific requests sent by Agent X backends."""
-
-        if not self.model_inputs_enabled():
-            return
-
-        for index, request in enumerate(requests, start=1):
-            self._json_panel(
-                f"Agent X provider request {index}",
-                request,
-                style="agent",
-            )
 
     def frame_decision(
         self,
@@ -363,8 +267,8 @@ class DebugTrace:
 
         title = (
             "Orchestration synthetic decision"
-            if trace.metadata.get("agent_x_called") is False
-            else "Agent X decision"
+            if trace.metadata.get("online_agent_called") is False
+            else "Online learner decision"
         )
         self._json_panel(
             title,
@@ -373,80 +277,10 @@ class DebugTrace:
                 "env_step": frame_context.current_observation.step,
                 "final_action": _action_payload(action),
                 "reasoning_summary": trace.reasoning_summary,
-                "tool_calls": trace.tool_calls,
-                "tool_results": [_tool_result_summary(result) for result in trace.tool_results],
+                "diagnostics": trace.diagnostics,
                 "metadata": trace.metadata,
             },
             style="agent",
-        )
-
-    def tool_model_input(
-        self,
-        *,
-        role: ToolName,
-        purpose: str,
-        call: ToolCall,
-        context: RoleContext,
-        observation: Observation,
-    ) -> None:
-        """Print the framework-level prediction input."""
-
-        if not self.model_inputs_enabled():
-            return
-
-        self._json_panel(
-            f"{role} model input",
-            {
-                "purpose": purpose,
-                "tool_call": call,
-                "context": _role_context_payload(context),
-                "source_observation": _observation_payload(observation),
-            },
-            style=role,
-        )
-
-    def tool_provider_input(
-        self,
-        *,
-        role: ToolName,
-        purpose: str,
-        adapter: Any | None,
-    ) -> None:
-        """Print captured provider prompt/request data for predictions."""
-
-        if not self.model_inputs_enabled() or adapter is None:
-            return
-
-        payload = collect_model_input_payload(adapter)
-        if not payload:
-            return
-        self._json_panel(
-            f"{role} provider input",
-            {"purpose": purpose, **payload},
-            style=role,
-        )
-
-    def tool_result(
-        self,
-        *,
-        role: ToolName,
-        purpose: str,
-        result: ToolResult,
-        experiment_ref: ObservationRef | None = None,
-    ) -> None:
-        """Print a routed prediction result summary."""
-
-        if not self.verbose_enabled():
-            return
-
-        self._json_panel(
-            f"{role} tool result",
-            {
-                "purpose": purpose,
-                "experiment_ref": experiment_ref,
-                "result": _tool_result_summary(result),
-            },
-            style=role,
         )
 
     def environment_step(
@@ -469,33 +303,6 @@ class DebugTrace:
                 "remaining_actions": remaining_actions,
             },
             style="run",
-        )
-
-    def updater_input(self, *, role: str, update_input: Any) -> None:
-        """Print the input passed to updater P."""
-
-        if not self.model_inputs_enabled():
-            return
-
-        self._json_panel(
-            f"Updater P {role} input",
-            update_input,
-            style="updater",
-        )
-
-    def updater_provider_output(self, *, role: str, adapter: Any | None) -> None:
-        """Print captured provider request/response data for updater P."""
-
-        if not self.model_inputs_enabled() or adapter is None:
-            return
-
-        payload = collect_model_io_payload(adapter)
-        if not payload:
-            return
-        self._json_panel(
-            f"Updater P {role} provider output",
-            payload,
-            style="updater",
         )
 
     def persisted_state(self, *, record_id: int, turn_id: int) -> None:
@@ -545,14 +352,18 @@ class DebugTrace:
             f" frame={frame_context.frame_index + 1}/{frame_context.frame_count}"
             f" controllable={controllable}",
         )
-        if action.is_none() and trace.metadata.get("agent_x_called") is False:
+        if action.is_none() and trace.metadata.get("online_agent_called") is False:
             self.console.print(
                 "action: orchestration synthesized NONE; environment not stepped"
             )
         elif action.is_none():
-            self.console.print("action: X returned NONE; environment not stepped")
+            self.console.print(
+                "action: online learner returned NONE; environment not stepped"
+            )
         else:
-            self.console.print(f"action: X selected {_format_action(action)}")
+            self.console.print(
+                f"action: online learner selected {_format_action(action)}"
+            )
 
     def _json_panel(self, title: str, payload: Any, *, style: str) -> None:
         text = json.dumps(sanitize_for_debug(payload), indent=2, sort_keys=True)
@@ -596,14 +407,6 @@ def _wrap_width(console_width: int) -> int:
     return max(40, min(120, console_width - 8))
 
 
-def _role_context_payload(context: RoleContext) -> dict[str, str]:
-    return {
-        "general": context.general,
-        "game": context.game,
-        "composed": context.composed(),
-    }
-
-
 def _observation_payload(observation: Observation) -> dict[str, Any]:
     return {
         "id": observation.id,
@@ -619,7 +422,6 @@ def _action_payload(action: ActionSpec | None) -> dict[str, Any] | None:
     return {
         "action_id": action.name,
         "data": action.data,
-        "target": action.target,
         "requires_data": action.is_complex(),
     }
 
@@ -641,39 +443,18 @@ def _action_history_payload(item: ActionHistoryItem) -> dict[str, Any]:
     return {
         "action": _action_payload(item.action),
         "controllable": item.controllable,
-        "changed_pixel_count": item.changed_pixel_count,
-        "changed_cell_percent": item.changed_cell_percent,
-        "completed_levels": item.completed_levels,
-        "action_count": item.action_count,
+        "changed_pixel_percent": item.changed_pixel_percent,
         "skipped_intermediate_animation_frame_count": (
             item.skipped_intermediate_animation_frame_count
         ),
-        "change_summary": item.change_summary,
-    }
-
-
-def _tool_result_summary(result: ToolResult | None) -> dict[str, Any] | None:
-    if result is None:
-        return None
-    return {
-        "id": result.id,
-        "tool": result.tool,
-        "source_observation_ref": result.source_observation_ref,
-        "source_state_id": result.source_state_id,
-        "action": result.action,
-        "explanation": result.explanation,
-        "metadata": result.metadata,
-        "output": result.output,
+        "transition_summary": item.transition_summary,
     }
 
 
 def _format_action(action: ActionSpec) -> str:
-    suffix = ""
-    if action.target is not None and action.target.strip():
-        suffix = f" target={action.target.strip()!r}"
     if action.data:
-        return f"{action.name} {action.data}{suffix}"
-    return action.name + suffix
+        return f"{action.name} {action.data}"
+    return action.name
 
 
 def _display_scalar(value: Any) -> str:

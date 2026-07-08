@@ -1,4 +1,6 @@
-"""Smoke tests for SQLite memory domains."""
+"""Tests for SQLite-backed online learner state memory."""
+
+from __future__ import annotations
 
 import sqlite3
 
@@ -7,278 +9,193 @@ from PIL import Image
 from face_of_agi.contracts import (
     ActionSpec,
     AgentTrace,
-    ContextDocuments,
+    DecisionResult,
+    FrameControlMode,
+    LearnerTurnTrace,
     Observation,
     ObservationRef,
-    RoleContext,
-    ToolCall,
-    ToolResult,
-    TurnMetrics,
+    PlannerCandidate,
+    ReplayStats,
+    TransitionRecord,
 )
-from face_of_agi.memory import ExperimentalMemory, SQLiteDatabase, StateMemory
+from face_of_agi.memory import SQLiteDatabase, StateMemory
 
 
-def _trace(observation_ref: ObservationRef, action: ActionSpec) -> AgentTrace:
-    return AgentTrace(
-        step=0,
-        first_observation_ref=observation_ref,
-        current_observation_ref=observation_ref,
-        final_action=action,
-    )
-
-
-def test_sqlite_initializes_current_memory_tables(tmp_path) -> None:
+def test_m_state_schema_has_learner_payload_columns(tmp_path) -> None:
     database = SQLiteDatabase(tmp_path / "memory.sqlite")
-    state = StateMemory(database)
-    experimental = ExperimentalMemory(database)
+    database.initialize_schema()
 
     with sqlite3.connect(database.path) as connection:
-        tables = {
-            row[0]
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            )
-        }
-        m_columns = {
-            row[1] for row in connection.execute("PRAGMA table_info(m_states)")
-        }
+        columns = [
+            row[1]
+            for row in connection.execute("PRAGMA table_info(m_states)").fetchall()
+        ]
 
-    assert {
-        "m_states",
-        "e_experiments",
-        "model_input_debug_records",
-        "run_metadata",
-    }.issubset(tables)
-    assert "agent_context_json" in m_columns
-    assert "turn_metrics_json" in m_columns
-    assert "world_context_json" not in m_columns
-    assert state.read_latest_state("game-1") is None
-    assert experimental.list_experiments() == []
+    assert "learner_snapshot_json" in columns
+    assert "learner_trace_json" in columns
+    assert "turn_metrics_json" in columns
 
 
-def test_state_memory_writes_reads_and_cleans_agent_states(tmp_path) -> None:
-    database = SQLiteDatabase(tmp_path / "memory.sqlite")
-    state = StateMemory(database)
-    observation = Observation(id="obs-0", step=0, frame={"frame": 0})
-    action = ActionSpec(action_id="ACTION1")
-    observation_ref = ObservationRef(memory="state", id=observation.id)
+def test_state_memory_prewrite_complete_and_list_learner_trace(tmp_path) -> None:
+    memory = StateMemory(SQLiteDatabase(tmp_path / "memory.sqlite"))
+    observation = _observation("obs-1")
+    trace = _learner_trace(observation)
 
-    first = state.write_state(
+    source = memory.prewrite_frame_turn_source(
         run_id="run-1",
         game_id="game-1",
-        step=0,
+        turn_id=1,
+        current_observation=observation,
         frame_index=0,
         frame_count=1,
-        current_observation=observation,
-        chosen_action=action,
-        contexts=ContextDocuments(agent=RoleContext(game="old")),
-        agent_trace=_trace(observation_ref, action),
+        control_mode=FrameControlMode.real_environment_turn(
+            (ActionSpec(action_id="ACTION1"),)
+        ),
+        learner_snapshot={"buffer": {"size": 0}},
     )
-    second = state.write_state(
-        run_id="run-2",
+
+    completed = memory.complete_frame_turn_state(
+        state_id=source.id,
+        turn_id=1,
+        control_mode=FrameControlMode.real_environment_turn(
+            (ActionSpec(action_id="ACTION1"),)
+        ),
+        previous_observation_ref=None,
+        recent_action_history=(),
+        chosen_action=ActionSpec(action_id="ACTION1"),
+        learner_snapshot={"buffer": {"size": 1}},
+        learner_trace=trace,
+    )
+
+    rows = memory.list_states(game_id="game-1")
+    assert rows == [completed]
+    assert rows[0].learner_snapshot["buffer"]["size"] == 1
+    assert rows[0].learner_trace["transition"]["prediction_error"] == 0.25
+    assert rows[0].learner_trace["planner_candidates"][0]["action"]["action_id"] == "ACTION1"
+    assert rows[0].chosen_action["action_id"] == "ACTION1"
+    assert rows[0].metadata["turn_id"] == 1
+
+
+def test_read_latest_state_uses_newest_complete_row(tmp_path) -> None:
+    memory = StateMemory(SQLiteDatabase(tmp_path / "memory.sqlite"))
+    first = memory.write_state(
+        run_id="run-1",
         game_id="game-1",
         step=1,
         frame_index=0,
         frame_count=1,
-        current_observation=Observation(id="obs-1", step=1, frame={"frame": 1}),
-        chosen_action=action,
-        contexts=ContextDocuments(agent=RoleContext(general="K", game="new")),
-        agent_trace=_trace(observation_ref, action),
-        turn_metrics=TurnMetrics(time_cost=2.0, trace_cost=0.5),
+        current_observation=_observation("obs-1"),
+        chosen_action=ActionSpec(action_id="ACTION1"),
+        learner_snapshot={"frame_turn_count": 1},
+        learner_trace=_learner_trace(_observation("obs-1")),
     )
-    state.write_state(
+    second = memory.write_state(
         run_id="run-1",
-        game_id="game-2",
-        step=0,
+        game_id="game-1",
+        step=2,
         frame_index=0,
         frame_count=1,
-        current_observation=observation,
-        chosen_action=action,
-        contexts=ContextDocuments(agent=RoleContext(game="other")),
-        agent_trace=_trace(observation_ref, action),
+        current_observation=_observation("obs-2"),
+        chosen_action=ActionSpec(action_id="ACTION2"),
+        learner_snapshot={"frame_turn_count": 2},
+        learner_trace=_learner_trace(_observation("obs-2"), action_id="ACTION2"),
     )
 
-    latest = state.read_latest_state("game-1")
+    assert first.id != second.id
+    latest = memory.read_latest_state("game-1")
+
     assert latest is not None
     assert latest.id == second.id
-    assert latest.agent_context == RoleContext(general="K", game="new")
-    assert latest.turn_metrics.time_cost == 2.0
-    assert first.turn_metrics == TurnMetrics()
-
-    state.cleanup_keep_latest_per_game()
-
-    remaining = state.list_states()
-    assert len(remaining) == 2
-    assert first.id not in {record.id for record in remaining}
-
-    state.clear_states()
-    assert state.list_states() == []
+    assert latest.learner_snapshot["frame_turn_count"] == 2
 
 
-def test_state_memory_reads_latest_agent_general_context(tmp_path) -> None:
-    database = SQLiteDatabase(tmp_path / "memory.sqlite")
-    state = StateMemory(database)
-    observation = Observation(id="obs-0", step=0, frame={"frame": 0})
-    action = ActionSpec(action_id="ACTION1")
-    observation_ref = ObservationRef(memory="state", id=observation.id)
+def test_learner_artifact_persists_generic_payload(tmp_path) -> None:
+    memory = StateMemory(SQLiteDatabase(tmp_path / "memory.sqlite"))
 
-    assert state.read_latest_general_contexts() == ContextDocuments()
+    stored = memory.write_learner_artifact(
+        game_id="game-1",
+        run_id="run-1",
+        turn_id=1,
+        kind="planner_debug",
+        payload={"candidate_count": 3},
+        metadata={"source": "unit"},
+    )
 
-    state.write_state(
+    assert stored["kind"] == "planner_debug"
+    assert stored["payload"] == {"candidate_count": 3}
+    assert memory.list_learner_artifacts(run_id="run-1") == [stored]
+
+
+def test_model_input_debug_records_round_trip(tmp_path) -> None:
+    memory = StateMemory(SQLiteDatabase(tmp_path / "memory.sqlite"))
+    row = memory.write_state(
         run_id="run-1",
         game_id="game-1",
-        step=0,
+        step=1,
         frame_index=0,
         frame_count=1,
-        current_observation=observation,
-        chosen_action=action,
-        contexts=ContextDocuments(agent=RoleContext(general="agent K 1")),
-        agent_trace=_trace(observation_ref, action),
-    )
-    state.write_state(
-        run_id="run-2",
-        game_id="game-2",
-        step=0,
-        frame_index=0,
-        frame_count=1,
-        current_observation=observation,
-        chosen_action=action,
-        contexts=ContextDocuments(agent=RoleContext(general="agent K 2")),
-        agent_trace=_trace(observation_ref, action),
+        current_observation=_observation("obs-1"),
+        chosen_action=ActionSpec(action_id="ACTION1"),
+        learner_snapshot={"buffer": {"size": 1}},
+        learner_trace=_learner_trace(_observation("obs-1")),
     )
 
-    contexts = state.read_latest_general_contexts()
-    assert contexts.agent == RoleContext(general="agent K 2", game="")
-
-
-def test_experimental_memory_writes_reads_and_resolves_output_frames(tmp_path) -> None:
-    database = SQLiteDatabase(tmp_path / "memory.sqlite")
-    experimental = ExperimentalMemory(database)
-    source_ref = ObservationRef(memory="state", id="obs-0")
-    call = ToolCall(
-        tool="world",
-        source_state_id=1,
-        action=ActionSpec(action_id="ACTION1"),
-    )
-    result = ToolResult(
-        id="world-result-1",
-        tool="world",
-        output={"frame": "predicted"},
-        source_observation_ref=source_ref,
-        source_state_id=1,
-        action=ActionSpec(action_id="ACTION1"),
-        metadata={"quality": "fake"},
-    )
-
-    record = experimental.write_experiment(
-        run_id="run-1",
-        game_id="game-1",
-        turn_id=4,
-        tool_call=call,
-        output_description=Observation(
-            id=result.id,
-            step=2,
-            frame=result.output,
-            frames=(result.output,),
-        ),
-        tool_result=result,
-    )
-
-    latest = experimental.read_experiment(record.id)
-    assert latest is not None
-    assert latest.source_state_id == 1
-    assert latest.tool_name == "world"
-    assert latest.output_description["frame"] == {"frame": "predicted"}
-    assert latest.tool_result["metadata"] == {"quality": "fake"}
-
-
-def test_memory_serializes_and_rehydrates_visual_frames_at_64x64(tmp_path) -> None:
-    database = SQLiteDatabase(tmp_path / "memory.sqlite")
-    state = StateMemory(database)
-    experimental = ExperimentalMemory(database)
-    source_ref = ObservationRef(memory="state", id="obs-image")
-    action = ActionSpec(action_id="ACTION1")
-    trace = _trace(source_ref, action)
-    source = Observation(
-        id="obs-image",
-        step=0,
-        frame=Image.new("RGB", (20, 30), color=(1, 2, 3)),
-    )
-
-    state.write_state(
-        run_id="run-1",
-        game_id="game-1",
-        step=0,
-        frame_index=0,
-        frame_count=1,
-        current_observation=source,
-        chosen_action=action,
-        contexts=ContextDocuments(),
-        agent_trace=trace,
-    )
-    latest = state.read_latest_state("game-1")
-
-    assert latest is not None
-    assert isinstance(latest.current_observation["frame"], Image.Image)
-    assert latest.current_observation["frame"].size == (64, 64)
-
-    result = ToolResult(
-        id="world-image",
-        tool="world",
-        output=Image.new("RGB", (11, 13), color=(9, 8, 7)),
-        source_observation_ref=source_ref,
-        source_state_id=1,
-        action=action,
-    )
-    experiment = experimental.write_experiment(
+    record = memory.write_model_input_debug_record(
+        m_state_id=row.id,
         run_id="run-1",
         game_id="game-1",
         turn_id=1,
-        tool_call=ToolCall(tool="world", source_state_id=1, action=action),
-        output_description=Observation(id=result.id, step=0, frame=result.output),
-        tool_result=result,
+        call_slot="backbone",
+        provider="transformers",
+        model="local-model",
+        phase="encode",
+        attempt=0,
+        request={"observation_id": "obs-1"},
+        metadata={"active": True},
     )
-    stored = experimental.read_experiment(experiment.id)
 
-    assert stored is not None
-    assert isinstance(stored.output_description["frame"], Image.Image)
-    assert stored.output_description["frame"].size == (64, 64)
+    records = memory.database.list_model_input_debug_records(m_state_id=row.id)
+    assert records == [record]
+    assert records[0].metadata == {"active": True}
 
 
-def test_state_memory_clears_current_memory_tables(tmp_path) -> None:
-    database = SQLiteDatabase(tmp_path / "memory.sqlite")
-    state = StateMemory(database)
-    experimental = ExperimentalMemory(database)
-    observation = Observation(id="obs-0", step=0, frame={"frame": 0})
-    action = ActionSpec(action_id="ACTION1")
-    observation_ref = ObservationRef(memory="state", id=observation.id)
-    state.write_state(
-        run_id="run-1",
-        game_id="game-1",
-        step=0,
-        frame_index=0,
-        frame_count=1,
-        current_observation=observation,
-        chosen_action=action,
-        contexts=ContextDocuments(),
-        agent_trace=_trace(observation_ref, action),
+def _observation(observation_id: str) -> Observation:
+    return Observation(
+        id=observation_id,
+        step=1,
+        frame=Image.new("RGB", (8, 8), color=(1, 2, 3)),
     )
-    experimental.write_experiment(
-        run_id="run-1",
-        game_id="game-1",
-        turn_id=1,
-        tool_call=ToolCall(tool="goal", source_state_id=1),
-        output_description=Observation(id="goal-0", step=0, frame={"goal": True}),
-        tool_result=ToolResult(
-            id="goal-0",
-            tool="goal",
-            output={"goal": True},
-            source_observation_ref=observation_ref,
-            source_state_id=1,
+
+
+def _learner_trace(
+    observation: Observation,
+    *,
+    action_id: str = "ACTION1",
+) -> LearnerTurnTrace:
+    action = ActionSpec(action_id=action_id)
+    ref = ObservationRef(memory="state", id=observation.id)
+    decision = DecisionResult(
+        final_action=action,
+        trace=AgentTrace(
+            step=observation.step,
+            first_observation_ref=ref,
+            current_observation_ref=ref,
+            final_action=action,
         ),
     )
-
-    state.clear_memory_tables()
-
-    assert state.list_states() == []
-    assert experimental.list_experiments() == []
+    return LearnerTurnTrace(
+        decision=decision,
+        transition=TransitionRecord(
+            previous_observation_ref=ref,
+            next_observation_ref=ObservationRef(memory="state", id=f"{observation.id}-next"),
+            action=action,
+            controllable=True,
+            changed_pixel_percent=12.5,
+            prediction_error=0.25,
+        ),
+        replay=ReplayStats(real_update_count=1, replay_update_count=2),
+        planner_candidates=(
+            PlannerCandidate(action=action, score=1.0, predicted_value=0.5),
+        ),
+        backbone_metadata={"previous": {"backend": "fake"}},
+    )

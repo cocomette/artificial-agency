@@ -1,8 +1,0 @@
-FACE-OF-AGI
-
-This repository contains FACE-OF-AGI source code, configuration,
-documentation, and supporting project tooling.
-
-Covered project material is licensed under Apache-2.0 as described in LICENSE.
-Third-party dependencies, datasets, model weights, and other external artifacts
-are excluded from that grant and remain under their own upstream terms.

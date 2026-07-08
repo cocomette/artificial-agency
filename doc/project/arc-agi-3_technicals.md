@@ -48,13 +48,8 @@ Prize-eligible submissions must be reproducible and open source.
 Rules that matter for implementation:
 
 - All submitter-authored code and methods must be open sourced.
-- For this public repository, covered source code, configs, scripts, docs, and
-  supporting project material are offered under `Apache-2.0`.
-- Third-party code must be under licenses that allow public sharing and
-  commercial use of code or models containing/depending on that code.
-- Model weights, datasets, and Kaggle competition inputs are not relicensed by
-  this repository. Publish their source, exact artifact version, and upstream
-  license/terms separately.
+- The submitter-authored parts must use a permissive public-domain-style license such as `CC0` or `MIT-0`.
+- Third-party code must be under a license that allows public sharing, such as `Apache-2.0` or `GPLv3`.
 - The solution must be open sourced before receiving official private evaluation scores.
 - The submitted method should be reproducible from the released code.
 
@@ -63,16 +58,19 @@ Rules that matter for implementation:
 Keep the project structured so that it can be published cleanly:
 
 ```text
-face-of-agi/
-  src/face_of_agi/
-  kaggle/
-  doc/
+arc_agi_agent/
+  agent/
+    policy.py
+    planner.py
+    perception.py
+    memory.py
+  models/
+    README.md
+  configs/
+  notebooks/
   LICENSE
-  NOTICE
-  THIRD_PARTY_LICENSES.md
-  REPRODUCING.md
   README.md
-  pyproject.toml
+  requirements.txt or pyproject.toml
 ```
 
 Avoid hidden dependencies, private services, or manual steps that cannot be reproduced by reviewers.

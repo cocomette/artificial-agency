@@ -1,0 +1,1634 @@
+{
+  "ar25": {
+    "levels": {
+      "1": {
+        "avg_number_of_actions": 30.666666666666668,
+        "median_number_of_actions": 32,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 9,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "2": {
+        "avg_number_of_actions": 107.22222222222223,
+        "median_number_of_actions": 71,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 9,
+        "number_of_players_below_average_number_of_actions": 6,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "3": {
+        "avg_number_of_actions": 177.55555555555554,
+        "median_number_of_actions": 155,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 9,
+        "number_of_players_below_average_number_of_actions": 7,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "4": {
+        "avg_number_of_actions": 225.22222222222223,
+        "median_number_of_actions": 181,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 9,
+        "number_of_players_below_average_number_of_actions": 6,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "5": {
+        "avg_number_of_actions": 370.3333333333333,
+        "median_number_of_actions": 336,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 9,
+        "number_of_players_below_average_number_of_actions": 6,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "6": {
+        "avg_number_of_actions": 543.5,
+        "median_number_of_actions": 471.5,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 8,
+        "number_of_players_below_average_number_of_actions": 5,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "7": {
+        "avg_number_of_actions": 877.8333333333334,
+        "median_number_of_actions": 731.5,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 6,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 3
+      },
+      "8": {
+        "avg_number_of_actions": 1002.8,
+        "median_number_of_actions": 751,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 5,
+        "number_of_players_below_average_number_of_actions": 3,
+        "number_of_players_below_median_number_of_actions": 2
+      }
+    }
+  },
+  "bp35": {
+    "levels": {
+      "1": {
+        "avg_number_of_actions": 26,
+        "median_number_of_actions": 21,
+        "number_of_players": 14,
+        "number_of_players_solved_level": 11,
+        "number_of_players_below_average_number_of_actions": 8,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "2": {
+        "avg_number_of_actions": 84.0909090909091,
+        "median_number_of_actions": 77,
+        "number_of_players": 14,
+        "number_of_players_solved_level": 11,
+        "number_of_players_below_average_number_of_actions": 6,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "3": {
+        "avg_number_of_actions": 135.54545454545453,
+        "median_number_of_actions": 123,
+        "number_of_players": 14,
+        "number_of_players_solved_level": 11,
+        "number_of_players_below_average_number_of_actions": 6,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "4": {
+        "avg_number_of_actions": 181.0909090909091,
+        "median_number_of_actions": 175,
+        "number_of_players": 14,
+        "number_of_players_solved_level": 11,
+        "number_of_players_below_average_number_of_actions": 6,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "5": {
+        "avg_number_of_actions": 215,
+        "median_number_of_actions": 210,
+        "number_of_players": 14,
+        "number_of_players_solved_level": 11,
+        "number_of_players_below_average_number_of_actions": 6,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "6": {
+        "avg_number_of_actions": 292,
+        "median_number_of_actions": 301.5,
+        "number_of_players": 14,
+        "number_of_players_solved_level": 10,
+        "number_of_players_below_average_number_of_actions": 3,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "7": {
+        "avg_number_of_actions": 418.55555555555554,
+        "median_number_of_actions": 402,
+        "number_of_players": 14,
+        "number_of_players_solved_level": 9,
+        "number_of_players_below_average_number_of_actions": 6,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "8": {
+        "avg_number_of_actions": 469,
+        "median_number_of_actions": 464.5,
+        "number_of_players": 14,
+        "number_of_players_solved_level": 6,
+        "number_of_players_below_average_number_of_actions": 3,
+        "number_of_players_below_median_number_of_actions": 3
+      },
+      "9": {
+        "avg_number_of_actions": 595.5,
+        "median_number_of_actions": 595.5,
+        "number_of_players": 14,
+        "number_of_players_solved_level": 2,
+        "number_of_players_below_average_number_of_actions": 1,
+        "number_of_players_below_median_number_of_actions": 1
+      }
+    }
+  },
+  "cd82": {
+    "levels": {
+      "1": {
+        "avg_number_of_actions": 50.6,
+        "median_number_of_actions": 53.5,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 10,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "2": {
+        "avg_number_of_actions": 66.3,
+        "median_number_of_actions": 60.0,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 10,
+        "number_of_players_below_average_number_of_actions": 6,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "3": {
+        "avg_number_of_actions": 107.125,
+        "median_number_of_actions": 100.0,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 8,
+        "number_of_players_below_average_number_of_actions": 5,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "4": {
+        "avg_number_of_actions": 127.75,
+        "median_number_of_actions": 123.0,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 8,
+        "number_of_players_below_average_number_of_actions": 5,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "5": {
+        "avg_number_of_actions": 156.5,
+        "median_number_of_actions": 147.0,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 8,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "6": {
+        "avg_number_of_actions": 180.5,
+        "median_number_of_actions": 174.0,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 8,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 4
+      }
+    }
+  },
+  "cn04": {
+    "levels": {
+      "1": {
+        "avg_number_of_actions": 45.81818181818182,
+        "median_number_of_actions": 29,
+        "number_of_players": 12,
+        "number_of_players_solved_level": 11,
+        "number_of_players_below_average_number_of_actions": 9,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "2": {
+        "avg_number_of_actions": 126.44444444444444,
+        "median_number_of_actions": 97,
+        "number_of_players": 12,
+        "number_of_players_solved_level": 9,
+        "number_of_players_below_average_number_of_actions": 5,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "3": {
+        "avg_number_of_actions": 247.625,
+        "median_number_of_actions": 155.5,
+        "number_of_players": 12,
+        "number_of_players_solved_level": 8,
+        "number_of_players_below_average_number_of_actions": 6,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "4": {
+        "avg_number_of_actions": 567.5,
+        "median_number_of_actions": 508.0,
+        "number_of_players": 12,
+        "number_of_players_solved_level": 6,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 3
+      },
+      "5": {
+        "avg_number_of_actions": 772.5,
+        "median_number_of_actions": 733.0,
+        "number_of_players": 12,
+        "number_of_players_solved_level": 6,
+        "number_of_players_below_average_number_of_actions": 3,
+        "number_of_players_below_median_number_of_actions": 3
+      },
+      "6": {
+        "avg_number_of_actions": 1011.5,
+        "median_number_of_actions": 1005.5,
+        "number_of_players": 12,
+        "number_of_players_solved_level": 6,
+        "number_of_players_below_average_number_of_actions": 3,
+        "number_of_players_below_median_number_of_actions": 3
+      }
+    }
+  },
+  "dc22": {
+    "levels": {
+      "1": {
+        "avg_number_of_actions": 54,
+        "median_number_of_actions": 56.5,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 10,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "2": {
+        "avg_number_of_actions": 155.4,
+        "median_number_of_actions": 153.5,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 10,
+        "number_of_players_below_average_number_of_actions": 5,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "3": {
+        "avg_number_of_actions": 222.9,
+        "median_number_of_actions": 237.5,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 10,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "4": {
+        "avg_number_of_actions": 354.3333333333333,
+        "median_number_of_actions": 334,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 9,
+        "number_of_players_below_average_number_of_actions": 6,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "5": {
+        "avg_number_of_actions": 643.3333333333334,
+        "median_number_of_actions": 638.5,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 6,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 3
+      },
+      "6": {
+        "avg_number_of_actions": 1107.5,
+        "median_number_of_actions": 1202.5,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 4,
+        "number_of_players_below_average_number_of_actions": 1,
+        "number_of_players_below_median_number_of_actions": 2
+      }
+    }
+  },
+  "ft09": {
+    "levels": {
+      "1": {
+        "avg_number_of_actions": 50.5,
+        "median_number_of_actions": 39.0,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 8,
+        "number_of_players_below_average_number_of_actions": 5,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "2": {
+        "avg_number_of_actions": 67.71428571428571,
+        "median_number_of_actions": 56,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 7,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 3
+      },
+      "3": {
+        "avg_number_of_actions": 100.8,
+        "median_number_of_actions": 79,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 5,
+        "number_of_players_below_average_number_of_actions": 3,
+        "number_of_players_below_median_number_of_actions": 2
+      },
+      "4": {
+        "avg_number_of_actions": 140.25,
+        "median_number_of_actions": 133.5,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 4,
+        "number_of_players_below_average_number_of_actions": 2,
+        "number_of_players_below_median_number_of_actions": 2
+      },
+      "5": {
+        "avg_number_of_actions": 199.75,
+        "median_number_of_actions": 161.0,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 4,
+        "number_of_players_below_average_number_of_actions": 3,
+        "number_of_players_below_median_number_of_actions": 2
+      },
+      "6": {
+        "avg_number_of_actions": 229.5,
+        "median_number_of_actions": 192.5,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 4,
+        "number_of_players_below_average_number_of_actions": 3,
+        "number_of_players_below_median_number_of_actions": 2
+      }
+    }
+  },
+  "g50t": {
+    "levels": {
+      "1": {
+        "avg_number_of_actions": 84.81818181818181,
+        "median_number_of_actions": 78,
+        "number_of_players": 12,
+        "number_of_players_solved_level": 11,
+        "number_of_players_below_average_number_of_actions": 6,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "2": {
+        "avg_number_of_actions": 241.375,
+        "median_number_of_actions": 228.5,
+        "number_of_players": 12,
+        "number_of_players_solved_level": 8,
+        "number_of_players_below_average_number_of_actions": 6,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "3": {
+        "avg_number_of_actions": 419,
+        "median_number_of_actions": 362.0,
+        "number_of_players": 12,
+        "number_of_players_solved_level": 4,
+        "number_of_players_below_average_number_of_actions": 3,
+        "number_of_players_below_median_number_of_actions": 2
+      },
+      "4": {
+        "avg_number_of_actions": 332.5,
+        "median_number_of_actions": 332.5,
+        "number_of_players": 12,
+        "number_of_players_solved_level": 2,
+        "number_of_players_below_average_number_of_actions": 1,
+        "number_of_players_below_median_number_of_actions": 1
+      },
+      "5": {
+        "avg_number_of_actions": 419,
+        "median_number_of_actions": 419.0,
+        "number_of_players": 12,
+        "number_of_players_solved_level": 2,
+        "number_of_players_below_average_number_of_actions": 1,
+        "number_of_players_below_median_number_of_actions": 1
+      },
+      "6": {
+        "avg_number_of_actions": 470,
+        "median_number_of_actions": 470.0,
+        "number_of_players": 12,
+        "number_of_players_solved_level": 2,
+        "number_of_players_below_average_number_of_actions": 1,
+        "number_of_players_below_median_number_of_actions": 1
+      },
+      "7": {
+        "avg_number_of_actions": 525,
+        "median_number_of_actions": 525.0,
+        "number_of_players": 12,
+        "number_of_players_solved_level": 2,
+        "number_of_players_below_average_number_of_actions": 1,
+        "number_of_players_below_median_number_of_actions": 1
+      }
+    }
+  },
+  "ka59": {
+    "levels": {
+      "1": {
+        "avg_number_of_actions": 32.142857142857146,
+        "median_number_of_actions": 28,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 7,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 3
+      },
+      "2": {
+        "avg_number_of_actions": 149.4,
+        "median_number_of_actions": 125,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 5,
+        "number_of_players_below_average_number_of_actions": 3,
+        "number_of_players_below_median_number_of_actions": 2
+      },
+      "3": {
+        "avg_number_of_actions": 209.8,
+        "median_number_of_actions": 176,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 5,
+        "number_of_players_below_average_number_of_actions": 3,
+        "number_of_players_below_median_number_of_actions": 2
+      },
+      "4": {
+        "avg_number_of_actions": 266,
+        "median_number_of_actions": 227,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 5,
+        "number_of_players_below_average_number_of_actions": 3,
+        "number_of_players_below_median_number_of_actions": 2
+      },
+      "5": {
+        "avg_number_of_actions": 300.2,
+        "median_number_of_actions": 259,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 5,
+        "number_of_players_below_average_number_of_actions": 3,
+        "number_of_players_below_median_number_of_actions": 2
+      },
+      "6": {
+        "avg_number_of_actions": 370.75,
+        "median_number_of_actions": 369.5,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 4,
+        "number_of_players_below_average_number_of_actions": 2,
+        "number_of_players_below_median_number_of_actions": 2
+      },
+      "7": {
+        "avg_number_of_actions": 723.6666666666666,
+        "median_number_of_actions": 826,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 3,
+        "number_of_players_below_average_number_of_actions": 1,
+        "number_of_players_below_median_number_of_actions": 1
+      }
+    }
+  },
+  "lf52": {
+    "levels": {
+      "1": {
+        "avg_number_of_actions": 33.90909090909091,
+        "median_number_of_actions": 32,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 11,
+        "number_of_players_below_average_number_of_actions": 6,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "2": {
+        "avg_number_of_actions": 114.625,
+        "median_number_of_actions": 116.0,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 8,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "3": {
+        "avg_number_of_actions": 186.25,
+        "median_number_of_actions": 179.0,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 8,
+        "number_of_players_below_average_number_of_actions": 5,
+        "number_of_players_below_median_number_of_actions": 3
+      },
+      "4": {
+        "avg_number_of_actions": 253.25,
+        "median_number_of_actions": 248.0,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 8,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "5": {
+        "avg_number_of_actions": 478.75,
+        "median_number_of_actions": 478.0,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 8,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "6": {
+        "avg_number_of_actions": 659.25,
+        "median_number_of_actions": 687.5,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 8,
+        "number_of_players_below_average_number_of_actions": 3,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "7": {
+        "avg_number_of_actions": 917.75,
+        "median_number_of_actions": 932.0,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 8,
+        "number_of_players_below_average_number_of_actions": 3,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "8": {
+        "avg_number_of_actions": 1021.5,
+        "median_number_of_actions": 1038.5,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 8,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "9": {
+        "avg_number_of_actions": 1186.625,
+        "median_number_of_actions": 1185.5,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 8,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "10": {
+        "avg_number_of_actions": 1327.5,
+        "median_number_of_actions": 1231.0,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 4,
+        "number_of_players_below_average_number_of_actions": 3,
+        "number_of_players_below_median_number_of_actions": 2
+      }
+    }
+  },
+  "lp85": {
+    "levels": {
+      "1": {
+        "avg_number_of_actions": 23.025,
+        "median_number_of_actions": 18.0,
+        "number_of_players": 54,
+        "number_of_players_solved_level": 40,
+        "number_of_players_below_average_number_of_actions": 27,
+        "number_of_players_below_median_number_of_actions": 19
+      },
+      "2": {
+        "avg_number_of_actions": 100.03125,
+        "median_number_of_actions": 55.5,
+        "number_of_players": 54,
+        "number_of_players_solved_level": 32,
+        "number_of_players_below_average_number_of_actions": 21,
+        "number_of_players_below_median_number_of_actions": 16
+      },
+      "3": {
+        "avg_number_of_actions": 153.6551724137931,
+        "median_number_of_actions": 93,
+        "number_of_players": 54,
+        "number_of_players_solved_level": 29,
+        "number_of_players_below_average_number_of_actions": 19,
+        "number_of_players_below_median_number_of_actions": 13
+      },
+      "4": {
+        "avg_number_of_actions": 179.82142857142858,
+        "median_number_of_actions": 113.5,
+        "number_of_players": 54,
+        "number_of_players_solved_level": 28,
+        "number_of_players_below_average_number_of_actions": 19,
+        "number_of_players_below_median_number_of_actions": 14
+      },
+      "5": {
+        "avg_number_of_actions": 234,
+        "median_number_of_actions": 143,
+        "number_of_players": 54,
+        "number_of_players_solved_level": 23,
+        "number_of_players_below_average_number_of_actions": 16,
+        "number_of_players_below_median_number_of_actions": 11
+      },
+      "6": {
+        "avg_number_of_actions": 248.57894736842104,
+        "median_number_of_actions": 197,
+        "number_of_players": 54,
+        "number_of_players_solved_level": 19,
+        "number_of_players_below_average_number_of_actions": 13,
+        "number_of_players_below_median_number_of_actions": 9
+      },
+      "7": {
+        "avg_number_of_actions": 326.3888888888889,
+        "median_number_of_actions": 274.5,
+        "number_of_players": 54,
+        "number_of_players_solved_level": 18,
+        "number_of_players_below_average_number_of_actions": 11,
+        "number_of_players_below_median_number_of_actions": 9
+      },
+      "8": {
+        "avg_number_of_actions": 450.93333333333334,
+        "median_number_of_actions": 403,
+        "number_of_players": 54,
+        "number_of_players_solved_level": 15,
+        "number_of_players_below_average_number_of_actions": 11,
+        "number_of_players_below_median_number_of_actions": 7
+      }
+    }
+  },
+  "ls20": {
+    "levels": {
+      "1": {
+        "avg_number_of_actions": 36.63636363636363,
+        "median_number_of_actions": 22,
+        "number_of_players": 13,
+        "number_of_players_solved_level": 11,
+        "number_of_players_below_average_number_of_actions": 7,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "2": {
+        "avg_number_of_actions": 159.22222222222223,
+        "median_number_of_actions": 144,
+        "number_of_players": 13,
+        "number_of_players_solved_level": 9,
+        "number_of_players_below_average_number_of_actions": 5,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "3": {
+        "avg_number_of_actions": 244.875,
+        "median_number_of_actions": 236.0,
+        "number_of_players": 13,
+        "number_of_players_solved_level": 8,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "4": {
+        "avg_number_of_actions": 326,
+        "median_number_of_actions": 307.5,
+        "number_of_players": 13,
+        "number_of_players_solved_level": 8,
+        "number_of_players_below_average_number_of_actions": 5,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "5": {
+        "avg_number_of_actions": 463.625,
+        "median_number_of_actions": 409.0,
+        "number_of_players": 13,
+        "number_of_players_solved_level": 8,
+        "number_of_players_below_average_number_of_actions": 5,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "6": {
+        "avg_number_of_actions": 588,
+        "median_number_of_actions": 528.5,
+        "number_of_players": 13,
+        "number_of_players_solved_level": 6,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 3
+      },
+      "7": {
+        "avg_number_of_actions": 766.5,
+        "median_number_of_actions": 681.5,
+        "number_of_players": 13,
+        "number_of_players_solved_level": 6,
+        "number_of_players_below_average_number_of_actions": 3,
+        "number_of_players_below_median_number_of_actions": 3
+      }
+    }
+  },
+  "m0r0": {
+    "levels": {
+      "1": {
+        "avg_number_of_actions": 31.181818181818183,
+        "median_number_of_actions": 30,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 11,
+        "number_of_players_below_average_number_of_actions": 6,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "2": {
+        "avg_number_of_actions": 154.88888888888889,
+        "median_number_of_actions": 156,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 9,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "3": {
+        "avg_number_of_actions": 333.55555555555554,
+        "median_number_of_actions": 359,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 9,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "4": {
+        "avg_number_of_actions": 372.44444444444446,
+        "median_number_of_actions": 408,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 9,
+        "number_of_players_below_average_number_of_actions": 3,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "5": {
+        "avg_number_of_actions": 868,
+        "median_number_of_actions": 858.0,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 8,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "6": {
+        "avg_number_of_actions": 1100.142857142857,
+        "median_number_of_actions": 1130,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 7,
+        "number_of_players_below_average_number_of_actions": 2,
+        "number_of_players_below_median_number_of_actions": 3
+      }
+    }
+  },
+  "r11l": {
+    "levels": {
+      "1": {
+        "avg_number_of_actions": 17.5,
+        "median_number_of_actions": 17.5,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 10,
+        "number_of_players_below_average_number_of_actions": 5,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "2": {
+        "avg_number_of_actions": 55.9,
+        "median_number_of_actions": 52.5,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 10,
+        "number_of_players_below_average_number_of_actions": 7,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "3": {
+        "avg_number_of_actions": 129.4,
+        "median_number_of_actions": 101.5,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 10,
+        "number_of_players_below_average_number_of_actions": 7,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "4": {
+        "avg_number_of_actions": 160,
+        "median_number_of_actions": 123.5,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 10,
+        "number_of_players_below_average_number_of_actions": 8,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "5": {
+        "avg_number_of_actions": 219.2,
+        "median_number_of_actions": 179.0,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 10,
+        "number_of_players_below_average_number_of_actions": 7,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "6": {
+        "avg_number_of_actions": 293.9,
+        "median_number_of_actions": 237.5,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 10,
+        "number_of_players_below_average_number_of_actions": 7,
+        "number_of_players_below_median_number_of_actions": 5
+      }
+    }
+  },
+  "re86": {
+    "levels": {
+      "1": {
+        "avg_number_of_actions": 38.45454545454545,
+        "median_number_of_actions": 26,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 11,
+        "number_of_players_below_average_number_of_actions": 9,
+        "number_of_players_below_median_number_of_actions": 3
+      },
+      "2": {
+        "avg_number_of_actions": 93.81818181818181,
+        "median_number_of_actions": 66,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 11,
+        "number_of_players_below_average_number_of_actions": 9,
+        "number_of_players_below_median_number_of_actions": 1
+      },
+      "3": {
+        "avg_number_of_actions": 240.25,
+        "median_number_of_actions": 152.5,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 8,
+        "number_of_players_below_average_number_of_actions": 6,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "4": {
+        "avg_number_of_actions": 410.625,
+        "median_number_of_actions": 291.0,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 8,
+        "number_of_players_below_average_number_of_actions": 6,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "5": {
+        "avg_number_of_actions": 616.75,
+        "median_number_of_actions": 486.5,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 8,
+        "number_of_players_below_average_number_of_actions": 6,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "6": {
+        "avg_number_of_actions": 803,
+        "median_number_of_actions": 634.0,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 8,
+        "number_of_players_below_average_number_of_actions": 6,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "7": {
+        "avg_number_of_actions": 974.2,
+        "median_number_of_actions": 964,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 5,
+        "number_of_players_below_average_number_of_actions": 3,
+        "number_of_players_below_median_number_of_actions": 2
+      },
+      "8": {
+        "avg_number_of_actions": 1214,
+        "median_number_of_actions": 1213,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 5,
+        "number_of_players_below_average_number_of_actions": 3,
+        "number_of_players_below_median_number_of_actions": 2
+      }
+    }
+  },
+  "reduced_ar25_1_player_2_last_actions": {
+    "levels": {
+      "1": {
+        "avg_number_of_actions": 36,
+        "median_number_of_actions": 36.0,
+        "number_of_players": 2,
+        "number_of_players_solved_level": 2,
+        "number_of_players_below_average_number_of_actions": 1,
+        "number_of_players_below_median_number_of_actions": 1
+      },
+      "2": {
+        "avg_number_of_actions": 71,
+        "median_number_of_actions": 71.0,
+        "number_of_players": 2,
+        "number_of_players_solved_level": 2,
+        "number_of_players_below_average_number_of_actions": 0,
+        "number_of_players_below_median_number_of_actions": 0
+      },
+      "3": {
+        "avg_number_of_actions": 138,
+        "median_number_of_actions": 138.0,
+        "number_of_players": 2,
+        "number_of_players_solved_level": 2,
+        "number_of_players_below_average_number_of_actions": 1,
+        "number_of_players_below_median_number_of_actions": 1
+      },
+      "4": {
+        "avg_number_of_actions": 164.5,
+        "median_number_of_actions": 164.5,
+        "number_of_players": 2,
+        "number_of_players_solved_level": 2,
+        "number_of_players_below_average_number_of_actions": 1,
+        "number_of_players_below_median_number_of_actions": 1
+      },
+      "5": {
+        "avg_number_of_actions": 385,
+        "median_number_of_actions": 385.0,
+        "number_of_players": 2,
+        "number_of_players_solved_level": 2,
+        "number_of_players_below_average_number_of_actions": 1,
+        "number_of_players_below_median_number_of_actions": 1
+      },
+      "6": {
+        "avg_number_of_actions": 734.5,
+        "median_number_of_actions": 734.5,
+        "number_of_players": 2,
+        "number_of_players_solved_level": 2,
+        "number_of_players_below_average_number_of_actions": 1,
+        "number_of_players_below_median_number_of_actions": 1
+      },
+      "7": {
+        "avg_number_of_actions": 1548,
+        "median_number_of_actions": 1548,
+        "number_of_players": 2,
+        "number_of_players_solved_level": 1,
+        "number_of_players_below_average_number_of_actions": 0,
+        "number_of_players_below_median_number_of_actions": 0
+      },
+      "8": {
+        "avg_number_of_actions": 1621,
+        "median_number_of_actions": 1621,
+        "number_of_players": 2,
+        "number_of_players_solved_level": 1,
+        "number_of_players_below_average_number_of_actions": 0,
+        "number_of_players_below_median_number_of_actions": 0
+      }
+    }
+  },
+  "s5i5": {
+    "levels": {
+      "1": {
+        "avg_number_of_actions": 30,
+        "median_number_of_actions": 20,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 11,
+        "number_of_players_below_average_number_of_actions": 10,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "2": {
+        "avg_number_of_actions": 194.4,
+        "median_number_of_actions": 98.0,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 10,
+        "number_of_players_below_average_number_of_actions": 9,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "3": {
+        "avg_number_of_actions": 200.85714285714286,
+        "median_number_of_actions": 179,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 7,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 2
+      },
+      "4": {
+        "avg_number_of_actions": 296.42857142857144,
+        "median_number_of_actions": 296,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 7,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 3
+      },
+      "5": {
+        "avg_number_of_actions": 436.6,
+        "median_number_of_actions": 433,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 5,
+        "number_of_players_below_average_number_of_actions": 3,
+        "number_of_players_below_median_number_of_actions": 2
+      },
+      "6": {
+        "avg_number_of_actions": 511.2,
+        "median_number_of_actions": 476,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 5,
+        "number_of_players_below_average_number_of_actions": 3,
+        "number_of_players_below_median_number_of_actions": 2
+      },
+      "7": {
+        "avg_number_of_actions": 613.4,
+        "median_number_of_actions": 558,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 5,
+        "number_of_players_below_average_number_of_actions": 3,
+        "number_of_players_below_median_number_of_actions": 2
+      },
+      "8": {
+        "avg_number_of_actions": 630,
+        "median_number_of_actions": 632.0,
+        "number_of_players": 11,
+        "number_of_players_solved_level": 4,
+        "number_of_players_below_average_number_of_actions": 2,
+        "number_of_players_below_median_number_of_actions": 2
+      }
+    }
+  },
+  "sb26": {
+    "levels": {
+      "1": {
+        "avg_number_of_actions": 35.72727272727273,
+        "median_number_of_actions": 18,
+        "number_of_players": 12,
+        "number_of_players_solved_level": 11,
+        "number_of_players_below_average_number_of_actions": 8,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "2": {
+        "avg_number_of_actions": 74.7,
+        "median_number_of_actions": 55.0,
+        "number_of_players": 12,
+        "number_of_players_solved_level": 10,
+        "number_of_players_below_average_number_of_actions": 6,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "3": {
+        "avg_number_of_actions": 99.9,
+        "median_number_of_actions": 70.5,
+        "number_of_players": 12,
+        "number_of_players_solved_level": 10,
+        "number_of_players_below_average_number_of_actions": 6,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "4": {
+        "avg_number_of_actions": 120.8,
+        "median_number_of_actions": 94.0,
+        "number_of_players": 12,
+        "number_of_players_solved_level": 10,
+        "number_of_players_below_average_number_of_actions": 6,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "5": {
+        "avg_number_of_actions": 164.14285714285714,
+        "median_number_of_actions": 160,
+        "number_of_players": 12,
+        "number_of_players_solved_level": 7,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 3
+      },
+      "6": {
+        "avg_number_of_actions": 192.42857142857142,
+        "median_number_of_actions": 182,
+        "number_of_players": 12,
+        "number_of_players_solved_level": 7,
+        "number_of_players_below_average_number_of_actions": 5,
+        "number_of_players_below_median_number_of_actions": 3
+      },
+      "7": {
+        "avg_number_of_actions": 240.5,
+        "median_number_of_actions": 225.5,
+        "number_of_players": 12,
+        "number_of_players_solved_level": 6,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 3
+      },
+      "8": {
+        "avg_number_of_actions": 247.6,
+        "median_number_of_actions": 244,
+        "number_of_players": 12,
+        "number_of_players_solved_level": 5,
+        "number_of_players_below_average_number_of_actions": 3,
+        "number_of_players_below_median_number_of_actions": 2
+      }
+    }
+  },
+  "sc25": {
+    "levels": {
+      "1": {
+        "avg_number_of_actions": 43.92307692307692,
+        "median_number_of_actions": 36,
+        "number_of_players": 15,
+        "number_of_players_solved_level": 13,
+        "number_of_players_below_average_number_of_actions": 11,
+        "number_of_players_below_median_number_of_actions": 6
+      },
+      "2": {
+        "avg_number_of_actions": 52.53846153846154,
+        "median_number_of_actions": 44,
+        "number_of_players": 15,
+        "number_of_players_solved_level": 13,
+        "number_of_players_below_average_number_of_actions": 10,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "3": {
+        "avg_number_of_actions": 91.07692307692308,
+        "median_number_of_actions": 76,
+        "number_of_players": 15,
+        "number_of_players_solved_level": 13,
+        "number_of_players_below_average_number_of_actions": 9,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "4": {
+        "avg_number_of_actions": 222.30769230769232,
+        "median_number_of_actions": 145,
+        "number_of_players": 15,
+        "number_of_players_solved_level": 13,
+        "number_of_players_below_average_number_of_actions": 10,
+        "number_of_players_below_median_number_of_actions": 6
+      },
+      "5": {
+        "avg_number_of_actions": 368.27272727272725,
+        "median_number_of_actions": 302,
+        "number_of_players": 15,
+        "number_of_players_solved_level": 11,
+        "number_of_players_below_average_number_of_actions": 8,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "6": {
+        "avg_number_of_actions": 358.8,
+        "median_number_of_actions": 336.0,
+        "number_of_players": 15,
+        "number_of_players_solved_level": 10,
+        "number_of_players_below_average_number_of_actions": 6,
+        "number_of_players_below_median_number_of_actions": 5
+      }
+    }
+  },
+  "sk48": {
+    "levels": {
+      "1": {
+        "avg_number_of_actions": 90.92857142857143,
+        "median_number_of_actions": 53.5,
+        "number_of_players": 14,
+        "number_of_players_solved_level": 14,
+        "number_of_players_below_average_number_of_actions": 10,
+        "number_of_players_below_median_number_of_actions": 7
+      },
+      "2": {
+        "avg_number_of_actions": 278.0769230769231,
+        "median_number_of_actions": 220,
+        "number_of_players": 14,
+        "number_of_players_solved_level": 13,
+        "number_of_players_below_average_number_of_actions": 8,
+        "number_of_players_below_median_number_of_actions": 6
+      },
+      "3": {
+        "avg_number_of_actions": 425.38461538461536,
+        "median_number_of_actions": 312,
+        "number_of_players": 14,
+        "number_of_players_solved_level": 13,
+        "number_of_players_below_average_number_of_actions": 8,
+        "number_of_players_below_median_number_of_actions": 6
+      },
+      "4": {
+        "avg_number_of_actions": 582.8,
+        "median_number_of_actions": 352.0,
+        "number_of_players": 14,
+        "number_of_players_solved_level": 10,
+        "number_of_players_below_average_number_of_actions": 7,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "5": {
+        "avg_number_of_actions": 823.75,
+        "median_number_of_actions": 573.5,
+        "number_of_players": 14,
+        "number_of_players_solved_level": 8,
+        "number_of_players_below_average_number_of_actions": 6,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "6": {
+        "avg_number_of_actions": 998.75,
+        "median_number_of_actions": 773.0,
+        "number_of_players": 14,
+        "number_of_players_solved_level": 8,
+        "number_of_players_below_average_number_of_actions": 5,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "7": {
+        "avg_number_of_actions": 1170.5,
+        "median_number_of_actions": 900.5,
+        "number_of_players": 14,
+        "number_of_players_solved_level": 8,
+        "number_of_players_below_average_number_of_actions": 5,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "8": {
+        "avg_number_of_actions": 1075.7142857142858,
+        "median_number_of_actions": 944,
+        "number_of_players": 14,
+        "number_of_players_solved_level": 7,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 3
+      }
+    }
+  },
+  "sp80": {
+    "levels": {
+      "1": {
+        "avg_number_of_actions": 32.72727272727273,
+        "median_number_of_actions": 39,
+        "number_of_players": 12,
+        "number_of_players_solved_level": 11,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "2": {
+        "avg_number_of_actions": 123.14285714285714,
+        "median_number_of_actions": 84,
+        "number_of_players": 12,
+        "number_of_players_solved_level": 7,
+        "number_of_players_below_average_number_of_actions": 5,
+        "number_of_players_below_median_number_of_actions": 3
+      },
+      "3": {
+        "avg_number_of_actions": 96.8,
+        "median_number_of_actions": 87,
+        "number_of_players": 12,
+        "number_of_players_solved_level": 5,
+        "number_of_players_below_average_number_of_actions": 3,
+        "number_of_players_below_median_number_of_actions": 2
+      },
+      "4": {
+        "avg_number_of_actions": 239.4,
+        "median_number_of_actions": 218,
+        "number_of_players": 12,
+        "number_of_players_solved_level": 5,
+        "number_of_players_below_average_number_of_actions": 3,
+        "number_of_players_below_median_number_of_actions": 1
+      },
+      "5": {
+        "avg_number_of_actions": 363.6666666666667,
+        "median_number_of_actions": 337,
+        "number_of_players": 12,
+        "number_of_players_solved_level": 3,
+        "number_of_players_below_average_number_of_actions": 2,
+        "number_of_players_below_median_number_of_actions": 1
+      },
+      "6": {
+        "avg_number_of_actions": 456.5,
+        "median_number_of_actions": 456.5,
+        "number_of_players": 12,
+        "number_of_players_solved_level": 2,
+        "number_of_players_below_average_number_of_actions": 1,
+        "number_of_players_below_median_number_of_actions": 1
+      }
+    }
+  },
+  "su15": {
+    "levels": {
+      "1": {
+        "avg_number_of_actions": 26.615384615384617,
+        "median_number_of_actions": 22,
+        "number_of_players": 13,
+        "number_of_players_solved_level": 13,
+        "number_of_players_below_average_number_of_actions": 9,
+        "number_of_players_below_median_number_of_actions": 6
+      },
+      "2": {
+        "avg_number_of_actions": 74,
+        "median_number_of_actions": 53.0,
+        "number_of_players": 13,
+        "number_of_players_solved_level": 8,
+        "number_of_players_below_average_number_of_actions": 5,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "3": {
+        "avg_number_of_actions": 104.5,
+        "median_number_of_actions": 92.0,
+        "number_of_players": 13,
+        "number_of_players_solved_level": 8,
+        "number_of_players_below_average_number_of_actions": 5,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "4": {
+        "avg_number_of_actions": 226.5,
+        "median_number_of_actions": 240.5,
+        "number_of_players": 13,
+        "number_of_players_solved_level": 6,
+        "number_of_players_below_average_number_of_actions": 2,
+        "number_of_players_below_median_number_of_actions": 3
+      },
+      "5": {
+        "avg_number_of_actions": 281,
+        "median_number_of_actions": 265,
+        "number_of_players": 13,
+        "number_of_players_solved_level": 3,
+        "number_of_players_below_average_number_of_actions": 2,
+        "number_of_players_below_median_number_of_actions": 1
+      },
+      "6": {
+        "avg_number_of_actions": 312,
+        "median_number_of_actions": 296,
+        "number_of_players": 13,
+        "number_of_players_solved_level": 3,
+        "number_of_players_below_average_number_of_actions": 2,
+        "number_of_players_below_median_number_of_actions": 1
+      },
+      "7": {
+        "avg_number_of_actions": 333.6666666666667,
+        "median_number_of_actions": 346,
+        "number_of_players": 13,
+        "number_of_players_solved_level": 3,
+        "number_of_players_below_average_number_of_actions": 1,
+        "number_of_players_below_median_number_of_actions": 1
+      },
+      "8": {
+        "avg_number_of_actions": 415.3333333333333,
+        "median_number_of_actions": 521,
+        "number_of_players": 13,
+        "number_of_players_solved_level": 3,
+        "number_of_players_below_average_number_of_actions": 1,
+        "number_of_players_below_median_number_of_actions": 1
+      },
+      "9": {
+        "avg_number_of_actions": 477.6666666666667,
+        "median_number_of_actions": 566,
+        "number_of_players": 13,
+        "number_of_players_solved_level": 3,
+        "number_of_players_below_average_number_of_actions": 1,
+        "number_of_players_below_median_number_of_actions": 1
+      }
+    }
+  },
+  "tn36": {
+    "levels": {
+      "1": {
+        "avg_number_of_actions": 53.7,
+        "median_number_of_actions": 30.0,
+        "number_of_players": 14,
+        "number_of_players_solved_level": 10,
+        "number_of_players_below_average_number_of_actions": 8,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "2": {
+        "avg_number_of_actions": 101.33333333333333,
+        "median_number_of_actions": 100,
+        "number_of_players": 14,
+        "number_of_players_solved_level": 9,
+        "number_of_players_below_average_number_of_actions": 5,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "3": {
+        "avg_number_of_actions": 146.55555555555554,
+        "median_number_of_actions": 140,
+        "number_of_players": 14,
+        "number_of_players_solved_level": 9,
+        "number_of_players_below_average_number_of_actions": 5,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "4": {
+        "avg_number_of_actions": 193.55555555555554,
+        "median_number_of_actions": 168,
+        "number_of_players": 14,
+        "number_of_players_solved_level": 9,
+        "number_of_players_below_average_number_of_actions": 5,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "5": {
+        "avg_number_of_actions": 233.44444444444446,
+        "median_number_of_actions": 246,
+        "number_of_players": 14,
+        "number_of_players_solved_level": 9,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "6": {
+        "avg_number_of_actions": 283.3333333333333,
+        "median_number_of_actions": 312,
+        "number_of_players": 14,
+        "number_of_players_solved_level": 9,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "7": {
+        "avg_number_of_actions": 335.5,
+        "median_number_of_actions": 315.0,
+        "number_of_players": 14,
+        "number_of_players_solved_level": 6,
+        "number_of_players_below_average_number_of_actions": 3,
+        "number_of_players_below_median_number_of_actions": 3
+      }
+    }
+  },
+  "tr87": {
+    "levels": {
+      "1": {
+        "avg_number_of_actions": 67.9090909090909,
+        "median_number_of_actions": 54,
+        "number_of_players": 12,
+        "number_of_players_solved_level": 11,
+        "number_of_players_below_average_number_of_actions": 8,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "2": {
+        "avg_number_of_actions": 145,
+        "median_number_of_actions": 135,
+        "number_of_players": 12,
+        "number_of_players_solved_level": 11,
+        "number_of_players_below_average_number_of_actions": 8,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "3": {
+        "avg_number_of_actions": 203.0909090909091,
+        "median_number_of_actions": 167,
+        "number_of_players": 12,
+        "number_of_players_solved_level": 11,
+        "number_of_players_below_average_number_of_actions": 8,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "4": {
+        "avg_number_of_actions": 218.3,
+        "median_number_of_actions": 206.5,
+        "number_of_players": 12,
+        "number_of_players_solved_level": 10,
+        "number_of_players_below_average_number_of_actions": 7,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "5": {
+        "avg_number_of_actions": 301.44444444444446,
+        "median_number_of_actions": 283,
+        "number_of_players": 12,
+        "number_of_players_solved_level": 9,
+        "number_of_players_below_average_number_of_actions": 6,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "6": {
+        "avg_number_of_actions": 458.3333333333333,
+        "median_number_of_actions": 442.5,
+        "number_of_players": 12,
+        "number_of_players_solved_level": 6,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 3
+      }
+    }
+  },
+  "tu93": {
+    "levels": {
+      "1": {
+        "avg_number_of_actions": 20.76923076923077,
+        "median_number_of_actions": 19,
+        "number_of_players": 13,
+        "number_of_players_solved_level": 13,
+        "number_of_players_below_average_number_of_actions": 8,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "2": {
+        "avg_number_of_actions": 41.30769230769231,
+        "median_number_of_actions": 39,
+        "number_of_players": 13,
+        "number_of_players_solved_level": 13,
+        "number_of_players_below_average_number_of_actions": 8,
+        "number_of_players_below_median_number_of_actions": 6
+      },
+      "3": {
+        "avg_number_of_actions": 75.53846153846153,
+        "median_number_of_actions": 77,
+        "number_of_players": 13,
+        "number_of_players_solved_level": 13,
+        "number_of_players_below_average_number_of_actions": 6,
+        "number_of_players_below_median_number_of_actions": 6
+      },
+      "4": {
+        "avg_number_of_actions": 137.27272727272728,
+        "median_number_of_actions": 120,
+        "number_of_players": 13,
+        "number_of_players_solved_level": 11,
+        "number_of_players_below_average_number_of_actions": 7,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "5": {
+        "avg_number_of_actions": 252.33333333333334,
+        "median_number_of_actions": 221,
+        "number_of_players": 13,
+        "number_of_players_solved_level": 9,
+        "number_of_players_below_average_number_of_actions": 5,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "6": {
+        "avg_number_of_actions": 337.22222222222223,
+        "median_number_of_actions": 341,
+        "number_of_players": 13,
+        "number_of_players_solved_level": 9,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "7": {
+        "avg_number_of_actions": 355.77777777777777,
+        "median_number_of_actions": 359,
+        "number_of_players": 13,
+        "number_of_players_solved_level": 9,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "8": {
+        "avg_number_of_actions": 382.1111111111111,
+        "median_number_of_actions": 382,
+        "number_of_players": 13,
+        "number_of_players_solved_level": 9,
+        "number_of_players_below_average_number_of_actions": 5,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "9": {
+        "avg_number_of_actions": 483.77777777777777,
+        "median_number_of_actions": 440,
+        "number_of_players": 13,
+        "number_of_players_solved_level": 9,
+        "number_of_players_below_average_number_of_actions": 5,
+        "number_of_players_below_median_number_of_actions": 4
+      }
+    }
+  },
+  "vc33": {
+    "levels": {
+      "1": {
+        "avg_number_of_actions": 14.333333333333334,
+        "median_number_of_actions": 13,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 9,
+        "number_of_players_below_average_number_of_actions": 5,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "2": {
+        "avg_number_of_actions": 37.333333333333336,
+        "median_number_of_actions": 34,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 9,
+        "number_of_players_below_average_number_of_actions": 6,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "3": {
+        "avg_number_of_actions": 132.5,
+        "median_number_of_actions": 125.5,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 8,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "4": {
+        "avg_number_of_actions": 208.42857142857142,
+        "median_number_of_actions": 157,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 7,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 3
+      },
+      "5": {
+        "avg_number_of_actions": 350.7142857142857,
+        "median_number_of_actions": 245,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 7,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 3
+      },
+      "6": {
+        "avg_number_of_actions": 393.7142857142857,
+        "median_number_of_actions": 319,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 7,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 3
+      },
+      "7": {
+        "avg_number_of_actions": 577,
+        "median_number_of_actions": 461.5,
+        "number_of_players": 10,
+        "number_of_players_solved_level": 6,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 3
+      }
+    }
+  },
+  "wa30": {
+    "levels": {
+      "1": {
+        "avg_number_of_actions": 95.6923076923077,
+        "median_number_of_actions": 71,
+        "number_of_players": 14,
+        "number_of_players_solved_level": 13,
+        "number_of_players_below_average_number_of_actions": 9,
+        "number_of_players_below_median_number_of_actions": 6
+      },
+      "2": {
+        "avg_number_of_actions": 204.45454545454547,
+        "median_number_of_actions": 183,
+        "number_of_players": 14,
+        "number_of_players_solved_level": 11,
+        "number_of_players_below_average_number_of_actions": 7,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "3": {
+        "avg_number_of_actions": 406.4,
+        "median_number_of_actions": 342.0,
+        "number_of_players": 14,
+        "number_of_players_solved_level": 10,
+        "number_of_players_below_average_number_of_actions": 7,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "4": {
+        "avg_number_of_actions": 535.3,
+        "median_number_of_actions": 479.5,
+        "number_of_players": 14,
+        "number_of_players_solved_level": 10,
+        "number_of_players_below_average_number_of_actions": 6,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "5": {
+        "avg_number_of_actions": 851.7,
+        "median_number_of_actions": 869.5,
+        "number_of_players": 14,
+        "number_of_players_solved_level": 10,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 5
+      },
+      "6": {
+        "avg_number_of_actions": 904.8888888888889,
+        "median_number_of_actions": 944,
+        "number_of_players": 14,
+        "number_of_players_solved_level": 9,
+        "number_of_players_below_average_number_of_actions": 3,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "7": {
+        "avg_number_of_actions": 961.625,
+        "median_number_of_actions": 1033.5,
+        "number_of_players": 14,
+        "number_of_players_solved_level": 8,
+        "number_of_players_below_average_number_of_actions": 3,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "8": {
+        "avg_number_of_actions": 1430.375,
+        "median_number_of_actions": 1429.0,
+        "number_of_players": 14,
+        "number_of_players_solved_level": 8,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 4
+      },
+      "9": {
+        "avg_number_of_actions": 1741.8,
+        "median_number_of_actions": 1616,
+        "number_of_players": 14,
+        "number_of_players_solved_level": 5,
+        "number_of_players_below_average_number_of_actions": 4,
+        "number_of_players_below_median_number_of_actions": 2
+      }
+    }
+  }
+}

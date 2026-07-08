@@ -10,12 +10,11 @@ import math
 from typing import Any
 
 MODEL_INPUT_SLOTS: tuple[tuple[str, str], ...] = (
-    ("agent", "Agent X"),
-    ("change", "Change Summary"),
-    ("historizer", "Context Historizer"),
-    ("world_model", "World Model"),
-    ("updater_agent", "Agent Updater"),
-    ("updater_general", "General Updater"),
+    ("backbone", "Backbone"),
+    ("planner", "Planner"),
+    ("replay", "Replay"),
+    ("learner", "Learner"),
+    ("agent", "Decision"),
 )
 
 
@@ -115,7 +114,7 @@ def sent_images(record: dict[str, Any]) -> list[SentImage]:
             if part_payload.get("type") != "image_url":
                 continue
             images.append(
-                _decode_vllm_image_url(
+                _decode_chat_image_url(
                     part_payload.get("image_url"),
                     label=f"Message {message_index} content {content_index}",
                 )
@@ -292,7 +291,7 @@ def _decode_ollama_image(value: Any, *, label: str) -> SentImage:
     return _decode_base64_image(value, label=label)
 
 
-def _decode_vllm_image_url(value: Any, *, label: str) -> SentImage:
+def _decode_chat_image_url(value: Any, *, label: str) -> SentImage:
     payload = _dict(value)
     image_url = payload.get("url") if payload else value
     if not isinstance(image_url, str) or not image_url:

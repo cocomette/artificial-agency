@@ -1,137 +1,131 @@
-# FACE-OF-AGI
+# FACE-OF-AGI VLM Online Adapter
 
-Minimal Python framework for an ARC-AGI-3 agent.
+This branch implements the Level 0 online learner runtime for ARC-AGI-3.
+The primary target is Kaggle submission execution with bundled Hugging Face
+Transformers model weights. The frozen backbone runs in-process, exposes visual
+representations, and only small online learner components update during a run.
 
-This repo contains a Python runtime shell, an ARC-AGI environment adapter,
-orchestration loop scaffolding, vLLM-backed model-role adapters, text
-observation serialization, and SQLite-backed memory. Architecture context lives
-under `doc/architecture/`.
+There is no active vLLM, hosted API, Ollama, prompt-role, playback, or updater
+runtime path in this branch.
 
-The only real model backend is vLLM through its OpenAI-compatible Chat
-Completions API. The `openai` Python package remains a transport client for
-that vLLM endpoint; it is not OpenAI provider support.
+## Runtime
 
-## Setup
-
-Use Python 3.12 and `uv` from the repo root:
-
-```bash
-uv sync --no-dev
-uv run --no-dev python -c "import face_of_agi"
-```
-
-Dependency profiles:
-
-- `uv sync --no-dev`: minimal runtime plus the vLLM HTTP transport client.
-- `uv sync --group test --no-dev`: lightweight regression-test environment.
-- `uv sync --group debug`: local Streamlit dashboard.
-- `uv sync --group dev`: full development environment with tests and notebooks.
-
-For Linux window rendering with `render_mode: human`, install Tk once:
-
-```bash
-sudo apt-get install python3-tk
-```
-
-## First Run
-
-Create or refresh the local game catalog before using `game_index`:
-
-```bash
-uv run --no-dev python -m face_of_agi.runtime.shell --list-games
-```
-
-This writes the ignored file `src/face_of_agi/environment/local_games.json`.
-The starter loop uses `game_index` from
-`src/face_of_agi/runtime/configs/starter_loop.yaml` to choose one of those
-catalog entries.
-
-Run the starter config:
-
-```bash
-uv run --no-dev python -m face_of_agi.runtime.shell --config src/face_of_agi/runtime/configs/starter_loop.yaml
-```
-
-The starter config expects a vLLM OpenAI-compatible server at the configured
-`models.shared_vlm.base_url`. It runs real vLLM-backed agent, change,
-historizer, and updater roles.
-
-Quick copy-paste runtime commands also live in `doc/run_runtime.md`.
-
-## Runtime Configs
-
-Ready-to-run configs live under `src/face_of_agi/runtime/configs/`:
-
-- `starter_loop.yaml`: default vLLM-first runtime config.
-- `vllm/**`: hardware/model-specific vLLM runtime variants.
-
-The model config shape is:
+The runtime config uses `agent:`, not `models:`:
 
 ```yaml
-models:
-  observation_text:
-    crop_cells: 3
-    overflow_chars_per_frame: 12000
-    include_rows: true
-    include_component_runs: true
-  shared_vlm:
-    backend: vllm
-    model: Qwen/Qwen3.6-35B-A3B-FP8
-    base_url: http://127.0.0.1:8000/v1
-    api_key: EMPTY
-  agent:
-    backend: vllm
-    max_tool_calls: 0
-    repair_attempts: 1
-  change:
-    backend: vllm
-  historizer:
-    backend: vllm
-  updater:
-    agent:
-      backend: vllm
-    general:
-      backend: vllm
+agent:
+  backbone:
+    backend: transformers
+    model_family: qwen3_5_moe_multimodal
+    model_path: /kaggle/input/face-of-agi-qwen36-35b-fp8-weights
+    processor_path: null
+    device: auto
+    dtype: auto
+    image_size: 224x224
+    local_files_only: true
+    representation_layer: image_tokens_mean
+    model_kwargs:
+      device_map: auto
+  online:
+    buffer_size: 512
+    adapter_rank: 16
+    ensemble_size: 5
+    hidden_dim: 512
+    learning_rate: 0.001
+    batch_size: 32
+  replay:
+    max_updates_per_turn: 8
+    max_seconds_per_turn: 0.5
+    solved_level_updates: 32
+  planner:
+    horizon: 3
+    candidate_count: 64
+    coordinate_candidates: 16
+    diagnostic_turns: 4
 ```
 
-Runtime rejects OpenAI, Ollama, HuggingFace, Diffusers, world, and goal backend
-keys. Model-facing observations are serialized as cropped text with original ARC
-grid coordinates and uppercase hex symbols `0..F`. Image payloads, image URLs,
-base64 data URLs, and image input config fields are not accepted by model-input
-capture.
+Committed configs:
 
-Clear memory database rows without starting ARC:
+- `src/face_of_agi/runtime/configs/kaggle_transformers.yaml`: Competition Mode
+  submission config. The Kaggle entrypoint overrides operation mode to
+  competition and runs one worker per selected game with isolated SQLite files.
+- `src/face_of_agi/runtime/configs/kaggle_debug_transformers.yaml`: Kaggle
+  public-games debug config.
+- `src/face_of_agi/runtime/configs/starter_loop.yaml`: local shell harness for
+  the same Transformers-backed agent.
+
+## Local Shell
+
+Install test/runtime dependencies with uv, then run a local game config:
 
 ```bash
-uv run --no-dev python -m face_of_agi.runtime.shell --clean-db
+uv run --group dev python -m face_of_agi.runtime.shell \
+  --config src/face_of_agi/runtime/configs/starter_loop.yaml \
+  --database runs/memory.sqlite
 ```
 
-If you installed the dev environment, use the same commands with
-`uv run --group dev` instead of `uv run --no-dev`.
+The local shell requires the configured Transformers model path to exist. For
+model-free automated tests, fake deterministic backbones are used directly in
+test code instead of through YAML.
 
-For the full config reference, see `doc/architecture/software/config.md`.
-For runtime notes and copy-paste command variants, see `doc/run_runtime.md`.
-
-## Debug Dashboard
-
-The local Streamlit dashboard can launch saved runtime configs and inspect
-persisted FACE-OF-AGI memory turns from SQLite. ARC and vLLM run only when you
-explicitly click `RUN config` in the Runner page.
+Reset disposable local SQLite state after schema changes:
 
 ```bash
-uv sync --group debug
-uv run --group debug streamlit run debug/dashboard/app.py -- --database runs/memory.sqlite
+uv run --no-dev python -m face_of_agi.runtime.shell \
+  --config src/face_of_agi/runtime/configs/starter_loop.yaml \
+  --database runs/memory.sqlite \
+  --clean-db
 ```
 
-Normal runtime runs prune `M` to the latest state per game. For a debug run
-where every `m_states` row should remain inspectable, set
-`debug_keep_all_m_states: true` in the runtime YAML.
+## Kaggle
 
-The Runner page uses the same runtime shell entrypoint as terminal runs and
-includes a collapsible config editor under the config selector. It lists YAML
-files from `src/face_of_agi/runtime/configs/`, validates edits, and supports
-`Save` or `Save As`. The sidebar can clear the selected SQLite memory database
-through the runtime shell's `--clean-db` path.
+The Kaggle path expects:
+
+- a model input named `face-of-agi-qwen36-35b-fp8-weights` containing the
+  Hugging Face Qwen3.6 35B FP8 model and processor files at the dataset root;
+- a `face-of-agi-transformers-wheelhouse` dataset built from
+  `kaggle/requirements-kaggle.txt`;
+- Kaggle's ARC gateway/scorecard environment during competition reruns.
+
+Build the offline wheelhouse:
+
+```bash
+cd kaggle
+make wheelhouse
+```
+
+Build the submission notebook:
+
+```bash
+cd kaggle
+make notebook
+```
+
+Submit when Kaggle credentials are configured in `kaggle/.env`:
+
+```bash
+cd kaggle
+make submit
+```
+
+The generated notebook installs offline dependencies, rewrites the configured
+model path to the Kaggle input, and invokes `face_of_agi.runtime.kaggle`
+directly. It does not start a model server.
+
+## Memory And Dashboard
+
+SQLite `m_states` rows store committed learner turns: current observation,
+chosen action, learner snapshot, learner trace, turn metrics, and run metadata.
+Learner artifacts are stored in `learner_artifacts`; old `E` experiment tables
+are not migrated.
+
+Run the debug dashboard:
+
+```bash
+uv run --group dev streamlit run debug/dashboard/app.py
+```
+
+Dashboard verification is manual. Automated tests do not cover dashboard UI.
 
 ## Tests
 
@@ -141,18 +135,8 @@ Run the model-free regression suite:
 uv run --locked --group test --no-dev python -m pytest -q
 ```
 
-GitHub Actions runs this command automatically for pull requests. This gate
-uses only the lightweight `test` dependency group and does not call external
-model APIs or a live vLLM server.
-
-Testing details live in `doc/test/test_suite.md` and `doc/test/end_to_end.md`.
-
-## License
-
-Project source, scripts, configs, docs, and supporting materials are offered
-under `Apache-2.0`. Third-party dependencies, datasets, model weights, and
-other external artifacts remain under their own license terms. See `LICENSE`,
-`NOTICE`, and `THIRD_PARTY_LICENSES.md`.
+The default tests use fake backbones and do not load real model weights, call
+hosted APIs, or start external model servers.
 
 ## Pull Requests
 
@@ -174,10 +158,8 @@ wp/<work-package-or-step-summary>
 
 ## Docs
 
-- `doc/architecture/system_architecture.md`: high-level agent architecture.
+- `doc/architecture/system_architecture.md`: high-level learner architecture.
 - `doc/architecture/software/`: target software module boundaries.
 - `doc/architecture/software/config.md`: runtime config reference.
-- `doc/test/`: regression and end-to-end test commands.
-- `doc/architecture/techstack.md`: current tools, frameworks, and runtime stack.
 - `doc/run_runtime.md`: runtime command notes.
-- `kaggle/README.md`: optional Kaggle notebook build and upload workflow.
+- `doc/test/`: test commands and scope.

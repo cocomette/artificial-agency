@@ -1,22 +1,25 @@
 # End-To-End Checks
 
-No provider-specific OpenAI, Ollama, HuggingFace, or Diffusers E2E runners are
-kept in the repository. The supported real-model path is the runtime shell
-against a vLLM OpenAI-compatible Chat Completions server.
+The active E2E path is the Kaggle submission notebook or local shell with real
+bundled Transformers weights. Automated CI does not run these checks.
 
-Run commands from the repo root after starting vLLM separately:
-
-```bash
-uv run --group dev python -m face_of_agi.runtime.shell --config src/face_of_agi/runtime/configs/starter_loop.yaml
-```
-
-or choose one of the hardware-specific vLLM configs:
+Local real-weight smoke run:
 
 ```bash
-uv run --group dev python -m face_of_agi.runtime.shell --config src/face_of_agi/runtime/configs/vllm/vllm_h100_qwen36_35b_fp8.yaml
+uv run --group dev python -m face_of_agi.runtime.shell \
+  --config src/face_of_agi/runtime/configs/starter_loop.yaml \
+  --database runs/memory.sqlite
 ```
 
-External-model E2E checks are manual because they depend on local hardware,
-served model weights, and vLLM availability. Do not add them to the default
-test suite, and do not run external API or live model tests unless explicitly
-requested.
+Kaggle notebook build smoke:
+
+```bash
+cd kaggle
+make notebook
+```
+
+Run the full model-free suite before any real-weight E2E:
+
+```bash
+uv run --locked --group test --no-dev python -m pytest -q
+```

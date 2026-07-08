@@ -31,67 +31,36 @@ KAGGLE_SUBMISSION_CONFIG_ENV = "FACE_OF_AGI_KAGGLE_SUBMISSION_CONFIG"
 KAGGLE_MODEL_DATASET_SLUG_ENV = "FACE_OF_AGI_KAGGLE_MODEL_DATASET_SLUG"
 KAGGLE_KERNEL_ID_ENV = "FACE_OF_AGI_KAGGLE_SUBMISSION_KERNEL_ID"
 KAGGLE_KERNEL_TITLE_ENV = "FACE_OF_AGI_KAGGLE_SUBMISSION_KERNEL_TITLE"
-DEFAULT_CONFIG_RELATIVE_PATH = (
-    "src/face_of_agi/runtime/configs/vllm/"
-    "vllm_rtx6000_qwen36_35b_fp8_parallel.yaml"
-)
+DEFAULT_CONFIG_RELATIVE_PATH = "src/face_of_agi/runtime/configs/kaggle_transformers.yaml"
 CONFIG_RELATIVE_PATH = os.environ.get(
     KAGGLE_SUBMISSION_CONFIG_ENV,
     DEFAULT_CONFIG_RELATIVE_PATH,
 ).strip() or DEFAULT_CONFIG_RELATIVE_PATH
 PROJECT_DIR = "/kaggle/working/face-of-agi"
-WHEELHOUSE_DATASET_SLUG = "face-of-agi-wheelhouse"
+WHEELHOUSE_DATASET_SLUG = "face-of-agi-transformers-wheelhouse"
 COMPETITION_SLUG = "arc-prize-2026-arc-agi-3"
 DEFAULT_MODEL_DATASET_SLUG = "face-of-agi-qwen36-35b-fp8-weights"
 MODEL_DATASET_SLUG = os.environ.get(
     KAGGLE_MODEL_DATASET_SLUG_ENV,
     DEFAULT_MODEL_DATASET_SLUG,
 ).strip() or DEFAULT_MODEL_DATASET_SLUG
-CONFIG_MODEL_PATH = f"/kaggle/input/{MODEL_DATASET_SLUG}"
 DATASET_SOURCE_SLUGS = (WHEELHOUSE_DATASET_SLUG, MODEL_DATASET_SLUG)
 KAGGLE_KERNEL_ID = os.environ.get(KAGGLE_KERNEL_ID_ENV, "").strip()
 KAGGLE_KERNEL_TITLE = os.environ.get(KAGGLE_KERNEL_TITLE_ENV, "").strip()
-VLLM_VERSION = "0.19.1"
 RUNTIME_PACKAGES = (
     "arc-agi",
+    "accelerate",
+    "numpy",
+    "pillow",
     "python-dotenv",
     "pyyaml",
     "rich",
-    "openai",
     "pandas",
     "pyarrow",
-)
-VLLM_STACK_PACKAGES = (
-    "compressed-tensors==0.15.0.1",
-    "flashinfer-python==0.6.6",
-    "quack-kernels==0.4.1",
-    "torch-c-dlpack-ext",
-    f"vllm=={VLLM_VERSION}",
-    "xgrammar==0.2.1",
-)
-VLLM_TORCH_DEPENDENCY_PACKAGES = (
-    "apache-tvm-ffi>=0.1.2",
-    "click",
-    "cloudpickle",
-    "cuda-tile",
-    "einops",
-    "loguru",
-    "ml-dtypes",
-    "ninja",
-    "numpy>=1.23.5",
-    "nvidia-cudnn-frontend>=1.13.0",
-    "nvidia-cutlass-dsl==4.6.0.dev0",
-    "nvidia-ml-py",
-    "packaging>=24.2",
-    "psutil",
-    "pydantic>=2.0",
-    "requests",
-    "setuptools",
-    "tabulate",
-    "tqdm>=4.62.3",
-    "transformers>=4.45.0",
-    "typing-extensions>=4.10.0",
-    "z3-solver<4.15.5,>=4.13.0",
+    "safetensors",
+    "torch",
+    "torchvision",
+    "transformers",
 )
 KAGGLE_HARD_TIMEOUT_SECONDS = 9 * 60 * 60
 KAGGLE_SHUTDOWN_BUFFER_SECONDS = 10 * 60
@@ -161,10 +130,7 @@ def _install_cell() -> dict:
             f"""\
             import subprocess
             import sys
-            import zipfile
             from pathlib import Path
-            from pip._vendor.packaging.requirements import Requirement
-            from pip._vendor.packaging.utils import canonicalize_name
 
             __KAGGLE_INPUT_HELPERS__
 
@@ -189,59 +155,7 @@ def _install_cell() -> dict:
                     command.append("--no-deps")
                 subprocess.check_call(command + list(packages))
 
-            def wheel_for(distribution, version=None):
-                normalized = canonicalize_name(distribution).replace("-", "_")
-                pattern = (
-                    f"{{normalized}}-*.whl"
-                    if version is None
-                    else f"{{normalized}}-{{version}}*.whl"
-                )
-                matches = sorted(wheelhouse_input.glob(pattern))
-                if not matches:
-                    raise FileNotFoundError(
-                        f"Could not find {{distribution}} wheel in {{wheelhouse_input}}"
-                    )
-                return matches[-1]
-
-            def vllm_dependency_requirements():
-                skipped = {{
-                    "torch",
-                    "torchaudio",
-                    "torchvision",
-                    "triton",
-                    "vllm",
-                    "cuda-toolkit",
-                    "compressed-tensors",
-                    "flashinfer-python",
-                    "quack-kernels",
-                    "tilelang",
-                    "tokenspeed-mla",
-                    "torch-c-dlpack-ext",
-                    "xgrammar",
-                }}
-                with zipfile.ZipFile(wheel_for("vllm", {VLLM_VERSION!r})) as wheel:
-                    metadata_name = next(
-                        name
-                        for name in wheel.namelist()
-                        if name.endswith(".dist-info/METADATA")
-                    )
-                    metadata = wheel.read(metadata_name).decode("utf-8")
-                requirements = []
-                for line in metadata.splitlines():
-                    if not line.startswith("Requires-Dist: "):
-                        continue
-                    requirement = Requirement(line.removeprefix("Requires-Dist: "))
-                    if canonicalize_name(requirement.name) in skipped:
-                        continue
-                    if requirement.marker is not None and not requirement.marker.evaluate({{"extra": ""}}):
-                        continue
-                    requirements.append(str(requirement))
-                return requirements
-
             pip_install({RUNTIME_PACKAGES!r})
-            pip_install({VLLM_TORCH_DEPENDENCY_PACKAGES!r})
-            pip_install(vllm_dependency_requirements())
-            pip_install({VLLM_STACK_PACKAGES!r}, no_deps=True)
             """
         ).replace("__KAGGLE_INPUT_HELPERS__", _kaggle_input_helpers())
     )
@@ -271,9 +185,8 @@ def _run_rerun_cell() -> dict:
             import subprocess
             import sys
             import time
-            import urllib.error
-            import urllib.request
             from pathlib import Path
+            import yaml
 
             if os.getenv("KAGGLE_IS_COMPETITION_RERUN"):
                 clean_deadline_epoch_seconds = (
@@ -293,9 +206,6 @@ def _run_rerun_cell() -> dict:
                     "ENVIRONMENTS_DIR": "",
                     "RECORDINGS_DIR": "/kaggle/working/server_recording",
                     "MPLBACKEND": "agg",
-                    "VLLM_API_KEY": "EMPTY",
-                    "VLLM_DISABLE_LOG_LOGO": "1",
-                    "VLLM_LOGGING_LEVEL": "ERROR",
                 }})
                 source_dir = str(project_dir / "src")
                 existing_pythonpath = os.environ.get("PYTHONPATH")
@@ -308,70 +218,33 @@ def _run_rerun_cell() -> dict:
 
                 __KAGGLE_INPUT_HELPERS__
 
-                from face_of_agi.runtime.vllm_server import (
-                    vllm_server_command,
-                    vllm_server_config_from_config_text,
-                )
-
                 model_input = kaggle_dataset_input({MODEL_DATASET_SLUG!r})
-                config_text = config_path.read_text(encoding="utf-8").replace(
-                    {CONFIG_MODEL_PATH!r},
-                    str(model_input),
-                )
+                config_data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+                config_data.setdefault("agent", {{}}).setdefault("backbone", {{}})[
+                    "model_path"
+                ] = str(model_input)
                 runtime_config_path = Path("/kaggle/working/runtime_config.yaml")
-                runtime_config_path.write_text(config_text, encoding="utf-8")
-
-                vllm_config = vllm_server_config_from_config_text(
-                    config_text
+                runtime_config_path.write_text(
+                    yaml.safe_dump(config_data, sort_keys=False),
+                    encoding="utf-8",
                 )
-                if vllm_config is None:
-                    raise RuntimeError("Kaggle config does not define a vLLM server")
-                command = list(vllm_server_command(vllm_config))
-                print("Starting vLLM:", " ".join(command))
-                process = subprocess.Popen(command, cwd=str(project_dir))
 
-                def wait_for_vllm() -> None:
-                    deadline = time.monotonic() + 900
-                    url = f"{{vllm_config.base_url}}/models"
-                    while time.monotonic() < deadline:
-                        if process.poll() is not None:
-                            raise RuntimeError(
-                                "vLLM exited before becoming ready with return code "
-                                f"{{process.returncode}}"
-                            )
-                        try:
-                            api_key = os.environ.get("VLLM_API_KEY", "")
-                            request = urllib.request.Request(
-                                url,
-                                headers={{"Authorization": f"Bearer {{api_key}}"}},
-                            )
-                            with urllib.request.urlopen(request, timeout=5) as response:
-                                if 200 <= response.status < 500:
-                                    return
-                        except (TimeoutError, urllib.error.URLError):
-                            time.sleep(2)
-                    raise RuntimeError("vLLM did not become ready inside Kaggle")
-
-                try:
-                    wait_for_vllm()
-                    subprocess.check_call(
-                        [
-                            sys.executable,
-                            "-m",
-                            "face_of_agi.runtime.kaggle",
-                            "--config",
-                            str(runtime_config_path),
-                            "--database-dir",
-                            "/kaggle/working/runs",
-                            "--tags",
-                            "face-of-agi,kaggle,rtx6000",
-                            "--deadline-epoch-seconds",
-                            str(clean_deadline_epoch_seconds),
-                        ],
-                        cwd=str(project_dir),
-                    )
-                finally:
-                    process.terminate()
+                subprocess.check_call(
+                    [
+                        sys.executable,
+                        "-m",
+                        "face_of_agi.runtime.kaggle",
+                        "--config",
+                        str(runtime_config_path),
+                        "--database-dir",
+                        "/kaggle/working/runs",
+                        "--tags",
+                        "face-of-agi,kaggle,transformers",
+                        "--deadline-epoch-seconds",
+                        str(clean_deadline_epoch_seconds),
+                    ],
+                    cwd=str(project_dir),
+                )
             """
         ).replace(
             "    __KAGGLE_INPUT_HELPERS__",

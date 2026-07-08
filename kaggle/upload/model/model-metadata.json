@@ -1,0 +1,11 @@
+{
+  "ownerSlug": "your-kaggle-username",
+  "title": "FACE-OF-AGI Qwen3.6 35B FP8",
+  "slug": "face-of-agi-qwen36-35b-fp8",
+  "subtitle": "Qwen3.6 35B FP8 weights for FACE-OF-AGI ARC-AGI-3 submissions",
+  "isPrivate": true,
+  "licenseName": "Apache 2.0",
+  "description": "Private Kaggle model artifact used by the FACE-OF-AGI ARC-AGI-3 submission notebook.",
+  "publishTime": "",
+  "provenanceSources": "https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8"
+}

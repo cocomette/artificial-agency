@@ -1,44 +1,46 @@
-# First run `--list-games`, which writes the indexed game catalog file.
-# This config intentionally uses real providers for every active model role.
 game_index: 0
-max_actions_per_level: 10
 operation_mode: offline
 game_catalog_path: src/face_of_agi/environment/local_games.json
 environments_dir: environment_files
 recordings_dir: recordings
-enable_visualization: true
-render_mode: human
 seed: 0
 save_recording: false
-experimental_memory_turn_buffer: 2
-agent_action_history_window: 8
-agent_updater_action_history_window: 8
-agent_context_history_window: 8
-debug_keep_all_m_states: false
+use_learned_contexts: false
+experimental_memory_turn_buffer: 1
+debug_keep_all_m_states: true
+enable_visualization: true
+render_mode: human
 debug_trace: minimal
 debug_color: auto
-models:
-  observation_text:
-    crop_cells: 3
-    overflow_chars_per_frame: 12000
-    include_rows: true
-    include_component_runs: true
-  shared_vlm:
-    backend: vllm
-    model: Qwen/Qwen3.6-35B-A3B-FP8
-    input_image_size: 2048x2048
-    base_url: http://127.0.0.1:8000/v1
-    api_key: EMPTY
-  agent:
-    backend: vllm
-    max_tool_calls: 0
-    repair_attempts: 1
-  change:
-    backend: vllm
-  historizer:
-    backend: vllm
-  updater:
-    agent:
-      backend: vllm
-    general:
-      backend: vllm
+max_actions_per_level: 20
+animation_keyframe_pixel_threshold: 8
+action_history_window: 8
+agent:
+  backbone:
+    backend: transformers
+    model_family: qwen3_5_moe_multimodal
+    model_path: /kaggle/input/face-of-agi-qwen36-35b-fp8-weights
+    processor_path: null
+    device: auto
+    dtype: auto
+    image_size: 224x224
+    local_files_only: true
+    representation_layer: image_tokens_mean
+    model_kwargs:
+      device_map: auto
+  online:
+    buffer_size: 256
+    adapter_rank: 16
+    ensemble_size: 5
+    hidden_dim: 512
+    learning_rate: 0.001
+    batch_size: 32
+  replay:
+    max_updates_per_turn: 4
+    max_seconds_per_turn: 0.25
+    solved_level_updates: 16
+  planner:
+    horizon: 3
+    candidate_count: 64
+    coordinate_candidates: 16
+    diagnostic_turns: 4

@@ -10,8 +10,7 @@ import yaml
 
 DEFAULT_CONFIG_DIR = Path("src/face_of_agi/runtime/configs")
 CONFIG_SUFFIXES = {".yaml", ".yml"}
-REQUIRED_TOP_LEVEL_KEYS = {"game_index", "max_actions_per_level", "models"}
-REQUIRED_UPDATER_SLOTS = {"agent", "general"}
+REQUIRED_TOP_LEVEL_KEYS = {"max_actions_per_level", "agent"}
 
 
 @dataclass(frozen=True)
@@ -39,15 +38,6 @@ def list_config_files(
     directory = config_dir_path(config_dir, root=root)
     if not directory.exists():
         return []
-    if not _allows_nested_config_paths(config_dir, root=root):
-        return sorted(
-            [
-                path
-                for path in directory.iterdir()
-                if path.is_file() and path.suffix in CONFIG_SUFFIXES
-            ],
-            key=lambda path: path.name,
-        )
     return sorted(
         [
             path
@@ -139,26 +129,36 @@ def validate_config_text(text: str) -> ConfigValidation:
             f"Missing required config keys: {', '.join(sorted(missing))}.",
         )
 
-    for key in ("game_index", "max_actions_per_level"):
+    if not any(
+        key in loaded
+        for key in ("game_index", "game_indices", "game_ids", "game_selection")
+    ):
+        return ConfigValidation(
+            False,
+            "Config must select game_index, game_indices, game_ids, or game_selection.",
+        )
+
+    for key in ("max_actions_per_level",):
         try:
             int(loaded[key])
         except (TypeError, ValueError):
             return ConfigValidation(False, f"{key} must be an integer.")
 
-    models = loaded.get("models")
-    if not isinstance(models, dict):
-        return ConfigValidation(False, "models must be a mapping.")
+    agent = loaded.get("agent")
+    if not isinstance(agent, dict):
+        return ConfigValidation(False, "agent must be a mapping.")
 
-    updater = models.get("updater")
-    if not isinstance(updater, dict):
-        return ConfigValidation(False, "models.updater must be a mapping.")
+    backbone = agent.get("backbone")
+    if not isinstance(backbone, dict):
+        return ConfigValidation(False, "agent.backbone must be a mapping.")
 
-    missing_slots = REQUIRED_UPDATER_SLOTS - updater.keys()
-    if missing_slots:
+    if backbone.get("backend") != "transformers":
         return ConfigValidation(
             False,
-            "Missing updater slots: " + ", ".join(sorted(missing_slots)) + ".",
+            "agent.backbone.backend must be transformers.",
         )
+    if not backbone.get("model_path"):
+        return ConfigValidation(False, "agent.backbone.model_path is required.")
 
     return ConfigValidation(True, "Config YAML is valid.", loaded)
 
@@ -190,8 +190,6 @@ def safe_config_path(
     except ValueError as exc:
         raise ValueError(f"config path must stay within {base_dir}") from exc
 
-    if not _allows_nested_config_paths(config_dir, root=root) and len(relative.parts) != 1:
-        raise ValueError("config files must be direct children of the config directory")
     if any(part in {"", ".", ".."} for part in relative.parts):
         raise ValueError("config path must stay within the config directory")
     if candidate.suffix not in CONFIG_SUFFIXES:
@@ -217,17 +215,6 @@ def _starts_with_default_config_dir(path: Path) -> bool:
     parts = path.parts
     default_parts = DEFAULT_CONFIG_DIR.parts
     return parts[: len(default_parts)] == default_parts
-
-
-def _allows_nested_config_paths(
-    config_dir: str | Path,
-    *,
-    root: str | Path | None = None,
-) -> bool:
-    return config_dir_path(config_dir, root=root) == config_dir_path(
-        DEFAULT_CONFIG_DIR,
-        root=root,
-    )
 
 
 def _with_trailing_newline(text: str) -> str:

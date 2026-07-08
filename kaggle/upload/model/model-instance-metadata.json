@@ -1,0 +1,14 @@
+{
+  "ownerSlug": "your-kaggle-username",
+  "modelSlug": "face-of-agi-qwen36-35b-fp8",
+  "instanceSlug": "default",
+  "framework": "pytorch",
+  "overview": "Qwen3.6 35B FP8 weights loaded by the in-process Transformers backbone inside the ARC-AGI-3 Kaggle notebook.",
+  "usage": "The generated submission notebook loads this variation with the in-process Transformers Qwen backbone.",
+  "licenseName": "Apache 2.0",
+  "fineTunable": false,
+  "trainingData": [],
+  "modelInstanceType": "Unspecified",
+  "baseModelInstance": "",
+  "externalBaseModelUrl": ""
+}

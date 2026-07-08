@@ -42,7 +42,7 @@ def capture_model_input(
     )
 
 
-def capture_vllm_model_input(
+def capture_openai_model_input(
     target: object,
     *,
     call_slot: str,
@@ -54,18 +54,9 @@ def capture_vllm_model_input(
     metadata: dict[str, Any] | None = None,
     attempt: int | None = None,
 ) -> None:
-    """Capture a raw vLLM chat request plus provider usage metadata."""
+    """Capture a raw OpenAI-style request plus generic response metadata."""
 
-    from face_of_agi.models.providers.vllm import (
-        chat_message_content,
-        chat_response_metadata,
-    )
-
-    response_metadata = chat_response_metadata(response)
-    try:
-        response_text = chat_message_content(response) if response is not None else None
-    except Exception:
-        response_text = None
+    response_metadata = _response_usage_metadata(response)
     capture_model_input(
         target,
         call_slot=call_slot,
@@ -79,7 +70,78 @@ def capture_vllm_model_input(
             "backend": provider,
             "model": model,
             **response_metadata,
-            "response_output_text": response_text,
+            "response_output_text": _response_text(response),
+            "response_metadata": response_metadata,
+            "response_payload": _jsonable(response),
+            **(metadata or {}),
+        },
+    )
+
+
+def capture_ollama_model_input(
+    target: object,
+    *,
+    call_slot: str,
+    provider: str,
+    model: str | None,
+    phase: str,
+    request: dict[str, Any],
+    response: Any | None,
+    metadata: dict[str, Any] | None = None,
+    attempt: int | None = None,
+) -> None:
+    """Capture a raw Ollama-style chat request plus generic response metadata."""
+
+    response_metadata = _response_usage_metadata(response)
+    capture_model_input(
+        target,
+        call_slot=call_slot,
+        provider=provider,
+        model=model,
+        phase=phase,
+        attempt=attempt,
+        request=request,
+        usage=response_metadata.get("usage"),
+        metadata={
+            "backend": provider,
+            "model": model,
+            "response_output_text": _ollama_response_output_text(response),
+            "response_metadata": response_metadata,
+            "response_payload": _jsonable(response),
+            **(metadata or {}),
+        },
+    )
+
+
+def capture_chat_model_input(
+    target: object,
+    *,
+    call_slot: str,
+    provider: str,
+    model: str | None,
+    phase: str,
+    request: dict[str, Any],
+    response: Any | None,
+    metadata: dict[str, Any] | None = None,
+    attempt: int | None = None,
+) -> None:
+    """Capture a raw OpenAI-compatible chat request plus generic metadata."""
+
+    response_metadata = _response_usage_metadata(response)
+    capture_model_input(
+        target,
+        call_slot=call_slot,
+        provider=provider,
+        model=model,
+        phase=phase,
+        attempt=attempt,
+        request=request,
+        usage=response_metadata.get("usage"),
+        metadata={
+            "backend": provider,
+            "model": model,
+            **response_metadata,
+            "response_output_text": _response_text(response),
             "response_metadata": response_metadata,
             "response_payload": _jsonable(response),
             **(metadata or {}),
@@ -159,3 +221,45 @@ def _jsonable(value: Any) -> Any:
             if not str(key).startswith("_")
         }
     return repr(value)
+
+
+def _ollama_response_output_text(response: Any | None) -> str | None:
+    if response is None:
+        return None
+    if isinstance(response, dict):
+        message = response.get("message") or {}
+    else:
+        message = getattr(response, "message", {}) or {}
+    if isinstance(message, dict):
+        content = message.get("content")
+    else:
+        content = getattr(message, "content", None)
+    if isinstance(content, str):
+        return content
+    return None
+
+
+def _response_usage_metadata(response: Any | None) -> dict[str, Any]:
+    if response is None:
+        return {}
+    usage = getattr(response, "usage", None)
+    return {"usage": _jsonable(usage)} if usage is not None else {}
+
+
+def _response_text(response: Any | None) -> str | None:
+    if response is None:
+        return None
+    text = getattr(response, "output_text", None)
+    if isinstance(text, str):
+        return text
+    choices = getattr(response, "choices", None)
+    if isinstance(choices, list) and choices:
+        message = getattr(choices[0], "message", None)
+        content = getattr(message, "content", None)
+        if isinstance(content, str):
+            return content
+    if isinstance(response, dict):
+        output_text = response.get("output_text")
+        if isinstance(output_text, str):
+            return output_text
+    return None

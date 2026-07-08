@@ -12,11 +12,16 @@ if str(ROOT) not in sys.path:
 
 import streamlit as st
 
+from debug.dashboard.modal_snapshot import (
+    DEFAULT_MODAL_DATABASE,
+    DEFAULT_MODAL_SNAPSHOT,
+    DEFAULT_MODAL_VOLUME,
+)
 from debug.dashboard.UI.live_play import render_live_play
 from debug.dashboard.UI.offline_inspector import render_offline_inspector
 from debug.dashboard.UI.runner_view import render_runner
 from debug.dashboard.UI.scoring import render_scoring
-from debug.dashboard.UI.sidebar import render_sidebar
+from debug.dashboard.UI.sidebar import pull_dashboard_modal_snapshot, render_sidebar
 from debug.dashboard.UI.style import (
     apply_dashboard_style,
     render_dashboard_header,
@@ -32,25 +37,39 @@ def main() -> None:
     """Render the local debug dashboard."""
 
     args = _parse_args()
-    st.set_page_config(page_title="FACE-OF-AGI Debug", layout="wide")
+    page_title = "FACE-OF-AGI Modal Debug" if args.modal else "FACE-OF-AGI Debug"
+    st.set_page_config(page_title=page_title, layout="wide")
 
     sidebar = render_sidebar(
         default_database=args.database,
+        modal_enabled=args.modal,
+        default_local_database=args.local_database,
+        default_modal_volume=args.modal_volume,
+        default_modal_database=args.modal_database,
+        default_modal_snapshot=args.modal_snapshot,
     )
     theme = resolve_dashboard_theme()
     apply_dashboard_style()
 
     page = sidebar.page
     render_dashboard_header(page, theme=theme)
+    refresh_database = (
+        (lambda: pull_dashboard_modal_snapshot(sidebar.modal_snapshot))
+        if sidebar.modal_snapshot is not None
+        else None
+    )
     if page == "Runner":
-        render_runner(sidebar.local_database)
+        render_runner(
+            sidebar.local_database,
+            modal_snapshot=sidebar.modal_snapshot,
+        )
     elif page == "Test Workshop":
         render_test_workshop()
     elif page == "Live Play":
         render_live_play(
             sidebar.inspection_database,
-            refresh_database=None,
-            require_running_runtime=True,
+            refresh_database=refresh_database,
+            require_running_runtime=sidebar.modal_snapshot is None,
         )
     elif page == "Scoring":
         render_scoring(sidebar.database_folder)
@@ -61,8 +80,15 @@ def main() -> None:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--database", default=DEFAULT_DATABASE_FOLDER)
+    parser.add_argument("--modal", action="store_true")
+    parser.add_argument("--modal-volume", default=DEFAULT_MODAL_VOLUME)
+    parser.add_argument("--modal-database", default=DEFAULT_MODAL_DATABASE)
+    parser.add_argument("--modal-snapshot", default=DEFAULT_MODAL_SNAPSHOT)
+    parser.add_argument("--local-database", default=DEFAULT_LOCAL_DATABASE)
     args, _ = parser.parse_known_args(sys.argv[1:])
     args.database = str(Path(args.database))
+    args.local_database = str(Path(args.local_database))
+    args.modal_snapshot = str(Path(args.modal_snapshot))
     return args
 
 

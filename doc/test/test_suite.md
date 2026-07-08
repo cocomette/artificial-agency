@@ -1,8 +1,8 @@
 # Test Suite
 
 Use the test suite for model-free regression coverage. It should be fast,
-deterministic, and safe to run without hosted credentials or a live vLLM
-server.
+deterministic, and safe to run without hosted credentials, Ollama, or local
+model weights.
 
 ## Setup
 
@@ -34,9 +34,4 @@ uv run --locked --group test --no-dev python -m pytest tests/suites/test_runtime
 
 GitHub Actions runs the full model-free command automatically for pull
 requests. This gate uses only the lightweight `test` dependency group and does
-not call external model APIs or a live vLLM server.
-
-The focused coverage includes `ObservationText` serialization, vLLM request
-assembly with text-only payloads, runtime config rejection of removed
-backends, ACTION6 ARC-grid coordinates, SQLite smoke coverage, and dashboard
-config validation.
+not load real Transformers weights or call external services.

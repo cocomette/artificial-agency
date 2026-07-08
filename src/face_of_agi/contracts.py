@@ -14,9 +14,14 @@ from typing import Any, Literal, TypeAlias
 from arcengine import FrameDataRaw, GameAction, GameState
 
 MemoryDomain = Literal["state", "experimental"]
-ToolName = str
 ActionId: TypeAlias = GameAction | str
 FrameControlReason = Literal["animation_unroll", "real_environment_turn"]
+VisualCoordinateSpace = Literal["pixel", "normalized_1000"]
+VisualBBoxOrder = Literal["xyxy", "yxyx"]
+VisualAxisFrame = Literal["top_left_x_right_y_down"]
+CANONICAL_VISUAL_BBOX_ORDER: VisualBBoxOrder = "xyxy"
+CANONICAL_VISUAL_AXIS_FRAME: VisualAxisFrame = "top_left_x_right_y_down"
+
 NONE_ACTION_ID = "NONE"
 
 
@@ -30,7 +35,6 @@ class ActionSpec:
 
     action_id: ActionId
     data: dict[str, Any] | None = None
-    target: str | None = None
 
     @classmethod
     def none(cls) -> "ActionSpec":
@@ -139,26 +143,6 @@ class FrameSourceRef:
 
 
 @dataclass(slots=True)
-class UpdaterFrameTransitionInput:
-    """Updater input for an observed frame transition."""
-
-    current_observation_ref: ObservationRef
-    actual_next_observation_ref: ObservationRef | None
-    decision_trace: "AgentTrace"
-    actual_next_observation: Observation | None = None
-    turn_metrics: "TurnMetrics" = field(
-        default_factory=lambda: TurnMetrics()
-    )
-    submitted_action: ActionSpec | None = None
-    synthetic_none_action: ActionSpec | None = None
-    action_history_entry: "ActionHistoryEntry | None" = None
-    action_history_score_advance_marker: (
-        ActionHistoryScoreAdvanceMarker | None
-    ) = None
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(slots=True)
 class EnvironmentInfo:
     """ARC-AGI environment metadata exposed to the starter runtime.
 
@@ -184,15 +168,12 @@ class ObservationRef:
 
 @dataclass(slots=True)
 class ActionHistoryEntry:
-    """Persisted raw frame-turn action and compact outcome signal."""
+    """Persisted frame-turn action and compact normalized outcome signal."""
 
     action: ActionSpec
     controllable: bool
-    changed_pixel_count: int
-    change_summary: str
-    changed_cell_percent: float | None = None
-    completed_levels: int | None = None
-    action_count: int | None = None
+    changed_pixel_percent: float
+    transition_summary: str
     skipped_intermediate_animation_frame_count: int = 0
 
 
@@ -221,54 +202,14 @@ ActionHistoryItem: TypeAlias = (
 
 
 @dataclass(slots=True)
-class ActionOutcomeEvidence:
-    """Deterministic low-information action evidence for model prompts."""
-
-    suppression_threshold: int = 0
-    # Prompt-facing action-choice labels, not necessarily whole action classes.
-    suppressed_actions: tuple[str, ...] = ()
-    suppression_reason: str = ""
-    suppression_disabled_reason: str = ""
-    latest_repeated_action: str = ""
-    latest_repeated_action_count: int = 0
-    latest_same_action_zero_changed_pixel_turn_count: int = 0
-    stagnation_warning_threshold: int = 0
-    stagnation_warning: bool = False
-
-
-@dataclass(slots=True)
-class ToolCall:
-    """Agent X tool-call shape used by the provider loop and E schema."""
-
-    tool: ToolName
-    source_state_id: int
-    action: ActionSpec | None = None
-
-
-@dataclass(slots=True)
-class ToolResult:
-    """Generic Agent X tool output."""
-
-    id: str
-    tool: ToolName
-    output: Any
-    source_observation_ref: ObservationRef
-    source_state_id: int | None = None
-    action: ActionSpec | None = None
-    explanation: str | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(slots=True)
 class AgentTrace:
-    """Trace produced by the agent for one decision step."""
+    """Trace produced by the online learner for one decision step."""
 
     step: int
     first_observation_ref: ObservationRef
     current_observation_ref: ObservationRef
     final_action: ActionSpec
-    tool_calls: list[ToolCall] = field(default_factory=list)
-    tool_results: list[ToolResult] = field(default_factory=list)
+    diagnostics: list[dict[str, Any]] = field(default_factory=list)
     reasoning_summary: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -283,35 +224,61 @@ class TurnMetrics:
 
 
 @dataclass(slots=True)
-class RoleContext:
-    """Text context documents for one model role.
-
-    `general` corresponds to K in the architecture docs. `game` corresponds to
-    the current game-specific L document.
-    """
-
-    general: str = ""
-    game: str = ""
-
-    def composed(self) -> str:
-        """Return the current K + L text used for a model call."""
-
-        return "\n\n".join(part for part in (self.general, self.game) if part)
-
-
-@dataclass(slots=True)
-class ContextDocuments:
-    """Context documents for the agent role."""
-
-    agent: RoleContext = field(default_factory=RoleContext)
-
-
-@dataclass(slots=True)
 class DecisionResult:
-    """Agent decision output for the current barebones runtime."""
+    """Online learner decision output for the current runtime."""
 
     final_action: ActionSpec
     trace: AgentTrace
+
+
+@dataclass(slots=True)
+class TransitionRecord:
+    """Action-conditioned observed transition used for online learning."""
+
+    previous_observation_ref: ObservationRef
+    next_observation_ref: ObservationRef
+    action: ActionSpec
+    controllable: bool
+    changed_pixel_percent: float
+    score_delta: float | None = None
+    completed_levels: int | None = None
+    prediction_error: float | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class ReplayStats:
+    """Bounded replay/update work completed after one observed transition."""
+
+    real_update_count: int = 0
+    replay_update_count: int = 0
+    elapsed_seconds: float = 0.0
+    sampled_transition_ids: tuple[str, ...] = ()
+    mean_prediction_error: float | None = None
+
+
+@dataclass(slots=True)
+class PlannerCandidate:
+    """One action candidate scored by the local planner."""
+
+    action: ActionSpec
+    score: float
+    predicted_value: float = 0.0
+    uncertainty: float = 0.0
+    information_gain: float = 0.0
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class LearnerTurnTrace:
+    """Structured learner trace persisted for dashboard inspection."""
+
+    decision: DecisionResult
+    transition: TransitionRecord | None = None
+    replay: ReplayStats = field(default_factory=ReplayStats)
+    planner_candidates: tuple[PlannerCandidate, ...] = ()
+    backbone_metadata: dict[str, Any] = field(default_factory=dict)
+    learner_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -336,8 +303,8 @@ class MStateRecord:
     frame_count: int
     current_observation: dict[str, Any]
     chosen_action: dict[str, Any] | None
-    agent_context: RoleContext
-    agent_trace: dict[str, Any] | None
+    learner_snapshot: dict[str, Any]
+    learner_trace: dict[str, Any] | None
     metadata: dict[str, Any]
     created_at: str
     turn_metrics: TurnMetrics = field(
@@ -358,31 +325,6 @@ class RunMetadataRecord:
 
 
 @dataclass(slots=True)
-class EExperimentRecord:
-    """One experimental tool output stored in rolling memory E."""
-
-    id: int
-    game_id: str
-    run_id: str
-    turn_id: int
-    tool_name: ToolName
-    source_state_id: int
-    tool_call: dict[str, Any]
-    output_description: dict[str, Any]
-    tool_result: dict[str, Any]
-    metadata: dict[str, Any]
-    created_at: str
-
-
-@dataclass(slots=True)
-class ExperimentToolInvocationResult:
-    """Result of an orchestration-mediated tool call persisted to E."""
-
-    tool_result: ToolResult
-    experiment_record: EExperimentRecord
-
-
-@dataclass(slots=True)
 class GameRunResult:
     """Result of a runtime boundary for one game."""
 
@@ -395,7 +337,6 @@ class GameRunResult:
     step_count: int = 0
     completed_levels: int = 0
     last_state: GameState | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
