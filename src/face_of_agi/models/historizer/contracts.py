@@ -1,100 +1,52 @@
-"""Contracts for the agent context historizer model role."""
+"""Contracts for the historizer model role."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-AGENT_CONTEXT_HISTORY_KEYS = (
-    "goals",
-    "game_mechanics",
-    "policy",
-    "history",
-    "extras",
-)
-DEFAULT_FIELD_EVOLUTION_MAX_CHARS = 2000
+from face_of_agi.contracts import ActionHistoryItem
 
 
-def agent_context_history_json_schema(
-    *,
-    field_evolution_max_chars: int | None = DEFAULT_FIELD_EVOLUTION_MAX_CHARS,
-) -> dict[str, Any]:
-    """Return the provider-neutral historizer output JSON schema."""
+def historizer_summary_json_schema() -> dict[str, Any]:
+    """Return the provider-neutral historizer output schema."""
 
-    descriptions = {
-        "goals": "How objective and goal hypotheses changed over the context history.",
-        "game_mechanics": "How mechanics/action-effect beliefs changed over time.",
-        "policy": "How action-selection guidance changed over time.",
-        "history": "How learned outcome/progress lessons changed over time.",
-        "extras": "How miscellaneous guidance changed over time.",
-    }
     return {
         "type": "object",
         "properties": {
-            "field_evolution": {
-                "type": "object",
-                "description": (
-                    "Summary of how each agent game-context field evolved "
-                    "across the provided oldest-to-newest context history."
-                ),
-                "properties": {
-                    key: {
-                        "type": "string",
-                        "description": descriptions[key],
-                        **(
-                            {"maxLength": int(field_evolution_max_chars)}
-                            if field_evolution_max_chars is not None
-                            else {}
-                        ),
-                    }
-                    for key in AGENT_CONTEXT_HISTORY_KEYS
-                },
-                "required": list(AGENT_CONTEXT_HISTORY_KEYS),
-                "additionalProperties": False,
-            },
+            "action_history_summary": {"type": "string"},
+            "strategy_history_summary": {"type": "string"},
         },
-        "required": ["field_evolution"],
+        "required": ["action_history_summary", "strategy_history_summary"],
         "additionalProperties": False,
     }
 
 
 @dataclass(slots=True)
-class AgentContextHistoryInput:
-    """Input for summarizing prior agent game-context evolution."""
+class HistorizerInput:
+    """Input for compacting current-level history for updater P."""
 
+    run_id: str
     game_id: str
-    context_window: int
-    contexts: tuple[str, ...]
+    action_history: tuple[ActionHistoryItem, ...]
+    strategy_history: tuple[str, ...]
+    world_model_context: str = ""
+    previous_history_summary: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
-class AgentContextHistorySummary:
-    """Summary of how prior agent game-context fields evolved."""
+class HistorizerSummary:
+    """Compacted current-level action and strategy history."""
 
-    field_evolution: dict[str, str]
+    action_history_summary: str
+    strategy_history_summary: str
     metadata: dict[str, Any] = field(default_factory=dict)
-
-    @classmethod
-    def not_available(cls) -> "AgentContextHistorySummary":
-        """Return an explicit summary for unavailable context history."""
-
-        return cls(
-            field_evolution={
-                key: "not available" for key in AGENT_CONTEXT_HISTORY_KEYS
-            },
-            metadata={"available": False},
-        )
-
-    def is_available(self) -> bool:
-        """Return whether this summary came from prior context history."""
-
-        return bool(self.metadata.get("available", True))
 
 
 @dataclass(slots=True)
 class PromptHistorizerRequest:
-    """Provider-neutral prompt request for the historizer role."""
+    """Provider-neutral prompt request for historizer calls."""
 
     instructions: str
     text: str
@@ -116,14 +68,14 @@ class PromptHistorizerProvider(Protocol):
     backend: str
     model: str | None
 
-    def summarize_context_history(
+    def summarize_history(
         self,
         request: PromptHistorizerRequest,
     ) -> PromptHistorizerProviderResponse:
-        """Return raw provider text for a context-history summary."""
+        """Return raw provider text for a historizer summary."""
         ...
 
-    def repair_context_history(
+    def repair_history(
         self,
         request: PromptHistorizerRequest,
         *,
@@ -131,16 +83,27 @@ class PromptHistorizerProvider(Protocol):
         validation_error: str,
         attempt: int,
     ) -> PromptHistorizerProviderResponse:
-        """Return repaired raw provider text for invalid structured output."""
+        """Return repaired raw provider text for invalid historizer output."""
         ...
 
 
-class AgentContextHistorizerModel(Protocol):
-    """Model role that summarizes prior agent-context field evolution."""
+class HistorizerModel(Protocol):
+    """Model role that compacts action and strategy history."""
 
-    def summarize_agent_context_history(
+    def summarize_history(
         self,
-        history_input: AgentContextHistoryInput,
-    ) -> AgentContextHistorySummary:
-        """Return a field-evolution summary."""
+        historizer_input: HistorizerInput,
+    ) -> HistorizerSummary:
+        """Return compact current-level history summaries."""
         ...
+
+
+__all__ = [
+    "HistorizerInput",
+    "HistorizerModel",
+    "HistorizerSummary",
+    "PromptHistorizerProvider",
+    "PromptHistorizerProviderResponse",
+    "PromptHistorizerRequest",
+    "historizer_summary_json_schema",
+]

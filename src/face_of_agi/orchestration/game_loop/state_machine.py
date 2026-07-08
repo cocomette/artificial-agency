@@ -13,23 +13,22 @@ from face_of_agi.environment.adapter import EnvironmentAdapter
 from face_of_agi.environment.config import EnvironmentConfig
 from face_of_agi.memory import StateMemory
 from face_of_agi.models.change import ChangeSummaryModel, ChangeSummaryResult
-from face_of_agi.models.historizer import AgentContextHistorySummary
-from face_of_agi.models.adapters import (
-    AgentContextHistorizerModel,
-    OrchestratorAgentModel,
-)
 from face_of_agi.models.orchestrator_agent import AgentToolRuntime
 from face_of_agi.models.updater import UpdaterTaskRegistry
+from face_of_agi.models.compacter import AgentCompacterModel
 from face_of_agi.debug.bus import DebugBus
-from face_of_agi.debug.events import FrameTurnCompleted, RunStopped
+from face_of_agi.debug.events import FrameTurnCompleted
 from face_of_agi.orchestration.game_loop.actions import steps
+from face_of_agi.orchestration.game_loop.simulation import (
+    maybe_run_known_state_simulation,
+)
 from face_of_agi.orchestration.game_loop.lifecycle import (
     check_lifecycle,
     check_runtime_deadline,
     finish_run,
+    reset_after_game_over,
     start_run,
-    startup_error_result,
-    stop_for_framework_error,
+    stop_session,
 )
 from face_of_agi.runtime import timing as runtime_timing
 
@@ -52,18 +51,16 @@ class GameLoopStateMachine:
         *,
         state_memory: StateMemory | None,
         contexts: ContextDocuments,
-        agent: OrchestratorAgentModel,
         change_summary_model: ChangeSummaryModel,
-        agent_context_historizer: AgentContextHistorizerModel | None,
+        compacter: AgentCompacterModel,
         updater_tasks: UpdaterTaskRegistry,
         tool_runtime_factory: AgentToolRuntimeFactory | None = None,
         debug: DebugBus,
     ) -> None:
         self.state_memory = state_memory
         self.contexts = contexts
-        self.agent = agent
         self.change_summary_model = change_summary_model
-        self.agent_context_historizer = agent_context_historizer
+        self.compacter = compacter
         self.updater_tasks = updater_tasks
         self.tool_runtime_factory = tool_runtime_factory
         self.debug = debug
@@ -77,37 +74,27 @@ class GameLoopStateMachine:
     ) -> GameRunResult:
         """Run one selected ARC game until a terminal loop condition."""
 
-        try:
-            session = start_run(
-                config=config,
-                environment=environment,
-                environment_config=environment_config,
-                contexts=self.contexts,
-                state_memory=self.state_memory,
-                debug=self.debug,
-            )
-        except Exception as exc:
-            result = startup_error_result(
-                config=config,
-                environment_config=environment_config,
-                error=exc,
-            )
-            self.debug.emit(RunStopped(result))
-            return result
+        session = start_run(
+            config=config,
+            environment=environment,
+            environment_config=environment_config,
+            contexts=self.contexts,
+            state_memory=self.state_memory,
+            debug=self.debug,
+        )
 
         with ThreadPoolExecutor(max_workers=2) as turn_executor:
             while session.running:
-                context_history_future: Future[AgentContextHistorySummary] | None = None
                 change_future: Future[ChangeSummaryResult] | None = None
 
-                try:
-                    session.process_turn = True
-                    if check_runtime_deadline(session):
-                        continue
-                    check_lifecycle(session)
-                except Exception as exc:
-                    stop_for_framework_error(session, error=exc)
+                session.process_turn = True
+                if check_runtime_deadline(session):
                     continue
+                check_lifecycle(
+                    session,
+                    state_memory=self.state_memory,
+                    debug=self.debug,
+                )
                 if not session.process_turn:
                     continue
 
@@ -119,6 +106,7 @@ class GameLoopStateMachine:
                         contexts=self.contexts,
                         state_memory=self.state_memory,
                         tool_runtime_factory=self.tool_runtime_factory,
+                        change_model=self.change_summary_model,
                         debug=self.debug,
                     )
                     current = steps.require_current(session)
@@ -130,81 +118,208 @@ class GameLoopStateMachine:
                     if check_runtime_deadline(session):
                         continue
 
-                    if run_context_updates:
-                        context_history_future = turn_executor.submit(
-                            steps.summarize_agent_context_history,
-                            session,
-                            state_memory=self.state_memory,
-                            agent_context_historizer=self.agent_context_historizer,
-                            debug=self.debug,
-                        )
-                    steps.decide(
-                        session,
-                        agent=self.agent,
-                        contexts=self.contexts,
-                        debug=self.debug,
-                    )
-                    if check_runtime_deadline(session):
-                        continue
-                    steps.resolve_next_snapshot(session, debug=self.debug)
-                    if check_runtime_deadline(session):
-                        continue
-
-                    current = steps.require_current(session)
-                    change_future = turn_executor.submit(
-                        steps.summarize_change_model,
-                        session,
-                        change_model=self.change_summary_model,
-                        debug=self.debug,
-                    )
-                    try:
-                        change_result = _wait_for_future(
-                            change_future,
-                            span_name="game_loop.change_summary.wait",
-                            turn_id=current.turn_id,
-                            step=current.observation.step,
-                        )
-                    finally:
-                        steps.capture_change_summary_inputs(
+                    if steps.has_observed_transition(session):
+                        steps.prepare_observed_transition(session)
+                        changed_pixel_count = steps.change_summary_changed_pixel_count(
                             session,
                             change_model=self.change_summary_model,
-                            debug=self.debug,
                         )
-                        change_future = None
-                    steps.attach_change_summary(session, result=change_result)
-                    if check_runtime_deadline(session):
-                        continue
+                        if changed_pixel_count == 0 and not (
+                            steps.observed_transition_has_animation_bundle(session)
+                        ):
+                            steps.attach_unchanged_frame_summary(
+                                session,
+                                change_model=self.change_summary_model,
+                                changed_pixel_count=changed_pixel_count,
+                            )
+                            steps.clear_queued_actions_after_net_noop_transition(
+                                session
+                            )
+                            if check_runtime_deadline(session):
+                                continue
+                        else:
+                            current = steps.require_current(session)
+                            change_future = turn_executor.submit(
+                                steps.summarize_change_model,
+                                session,
+                                change_model=self.change_summary_model,
+                                debug=self.debug,
+                            )
+                            try:
+                                change_result = _wait_for_future(
+                                    change_future,
+                                    span_name="game_loop.change_summary.wait",
+                                    turn_id=current.turn_id,
+                                    step=current.observation.step,
+                                )
+                            finally:
+                                steps.capture_change_summary_inputs(
+                                    session,
+                                    change_model=self.change_summary_model,
+                                    debug=self.debug,
+                                )
+                                change_future = None
+                            steps.attach_change_summary(
+                                session,
+                                result=change_result,
+                                change_model=self.change_summary_model,
+                                changed_pixel_count=changed_pixel_count,
+                            )
+                            steps.clear_queued_actions_after_net_noop_transition(
+                                session
+                            )
+                            if check_runtime_deadline(session):
+                                continue
 
-                    if run_context_updates:
-                        if context_history_future is None:
-                            raise RuntimeError(
-                                "frame turn is missing agent context history work"
-                            )
-                        try:
-                            agent_context_history = _wait_for_future(
-                                context_history_future,
-                                span_name="historizer.agent_context_history.wait",
-                                turn_id=current.turn_id,
-                                step=current.observation.step,
-                            )
-                        finally:
-                            self.debug.capture_model_inputs(
-                                current.to_frame_context(),
-                                current.turn_id,
-                                self.agent_context_historizer,
-                            )
-                            context_history_future = None
-                        if check_runtime_deadline(session):
-                            continue
-
-                        steps.run_updaters(
+                        if run_context_updates:
+                            if current.control_mode.controllable:
+                                steps.run_compacter(
+                                    session,
+                                    compacter=self.compacter,
+                                    state_memory=self.state_memory,
+                                    debug=self.debug,
+                                )
+                                if steps.should_run_updaters(session):
+                                    steps.run_updaters(
+                                        session,
+                                        contexts=self.contexts,
+                                        updater_tasks=self.updater_tasks,
+                                        state_memory=self.state_memory,
+                                        debug=self.debug,
+                                    )
+                                    if session.pending_terminal_stop:
+                                        steps.attach_terminal_stop_decision(session)
+                                        steps.persist(
+                                            session,
+                                            contexts=self.contexts,
+                                            state_memory=self.state_memory,
+                                            debug=self.debug,
+                                        )
+                                        current = steps.require_current(session)
+                                        decision = steps.require_decision(session)
+                                        self.debug.emit(
+                                            FrameTurnCompleted(
+                                                run_id=session.config.run_id,
+                                                game_id=session.game_id,
+                                                game_index=(
+                                                    session.environment_config.game_index
+                                                ),
+                                                turn_id=current.turn_id,
+                                                env_step=current.observation.step,
+                                                frame_index=current.frame_index,
+                                                frame_count=current.frame_count,
+                                                controllable=False,
+                                                action=decision.final_action,
+                                                turn_duration_seconds=(
+                                                    perf_counter() - turn_started_at
+                                                ),
+                                                completed_levels=(
+                                                    _completed_levels_after_turn(
+                                                        session
+                                                    )
+                                                ),
+                                                remaining_actions=(
+                                                    session.remaining_actions
+                                                ),
+                                                max_actions_per_level=(
+                                                    session.environment_config
+                                                    .max_actions_per_level
+                                                ),
+                                            )
+                                        )
+                                        steps.record_action_history(session)
+                                        stop_session(
+                                            session,
+                                            stop_reason="game_end",
+                                            completed_levels=session.completed_levels,
+                                            last_state=(
+                                                session.current_info.state
+                                                if session.current_info is not None
+                                                else None
+                                            ),
+                                        )
+                                        continue
+                                    if maybe_run_known_state_simulation(
+                                        session,
+                                        contexts=self.contexts,
+                                        compacter=self.compacter,
+                                        updater_tasks=self.updater_tasks,
+                                        state_memory=self.state_memory,
+                                        debug=self.debug,
+                                    ):
+                                        continue
+                    elif run_context_updates:
+                        steps.bootstrap_agent_updater_decision(
                             session,
                             contexts=self.contexts,
-                            agent_context_history=agent_context_history,
+                            compacter=self.compacter,
                             updater_tasks=self.updater_tasks,
                             state_memory=self.state_memory,
                             debug=self.debug,
                         )
+                        if maybe_run_known_state_simulation(
+                            session,
+                            contexts=self.contexts,
+                            compacter=self.compacter,
+                            updater_tasks=self.updater_tasks,
+                            state_memory=self.state_memory,
+                            debug=self.debug,
+                        ):
+                            continue
+
+                    if session.pending_game_over_reset:
+                        steps.attach_game_over_reset_decision(session)
+                        steps.persist(
+                            session,
+                            contexts=self.contexts,
+                            state_memory=self.state_memory,
+                            debug=self.debug,
+                        )
+                        current = steps.require_current(session)
+                        decision = steps.require_decision(session)
+                        if current.control_mode is None:
+                            raise RuntimeError(
+                                "completed frame turn is missing control mode"
+                            )
+                        self.debug.emit(
+                            FrameTurnCompleted(
+                                run_id=session.config.run_id,
+                                game_id=session.game_id,
+                                game_index=session.environment_config.game_index,
+                                turn_id=current.turn_id,
+                                env_step=current.observation.step,
+                                frame_index=current.frame_index,
+                                frame_count=current.frame_count,
+                                controllable=False,
+                                action=decision.final_action,
+                                turn_duration_seconds=perf_counter()
+                                - turn_started_at,
+                                completed_levels=_completed_levels_after_turn(
+                                    session
+                                ),
+                                remaining_actions=session.remaining_actions,
+                                max_actions_per_level=(
+                                    session.environment_config.max_actions_per_level
+                                ),
+                            )
+                        )
+                        steps.record_action_history(session)
+                        reset_after_game_over(session)
+                        continue
+
+                    steps.decide(
+                        session,
+                        debug=self.debug,
+                    )
+                    if check_runtime_deadline(session):
+                        continue
+                    steps.resolve_next_snapshot(
+                        session,
+                        debug=self.debug,
+                        change_model=self.change_summary_model,
+                    )
+                    if check_runtime_deadline(session):
+                        continue
                     steps.persist(
                         session,
                         contexts=self.contexts,
@@ -229,11 +344,12 @@ class GameLoopStateMachine:
                             turn_duration_seconds=perf_counter() - turn_started_at,
                             completed_levels=_completed_levels_after_turn(session),
                             remaining_actions=session.remaining_actions,
+                            max_actions_per_level=(
+                                session.environment_config.max_actions_per_level
+                            ),
                         )
                     )
                     steps.advance(session)
-                except Exception as exc:
-                    stop_for_framework_error(session, error=exc)
                 finally:
                     _settle_abandoned_turn_future(
                         change_future,
@@ -244,19 +360,12 @@ class GameLoopStateMachine:
                         ),
                     )
                     _settle_abandoned_turn_future(
-                        context_history_future,
-                        capture=lambda: _capture_agent_context_history_inputs(
-                            session,
-                            historizer=self.agent_context_historizer,
-                            debug=self.debug,
-                        ),
+                        None,
+                        capture=lambda: None,
                     )
 
         return finish_run(
             session,
-            contexts=self.contexts,
-            updater_tasks=self.updater_tasks,
-            state_memory=self.state_memory,
             debug=self.debug,
         )
 
@@ -290,26 +399,7 @@ def _settle_abandoned_turn_future(
     except Exception:
         pass
     finally:
-        try:
-            capture()
-        except Exception:
-            pass
-
-
-def _capture_agent_context_history_inputs(
-    session,
-    *,
-    historizer: AgentContextHistorizerModel | None,
-    debug: DebugBus,
-) -> None:
-    current = session.current
-    if current is None:
-        return
-    debug.capture_model_inputs(
-        current.to_frame_context(),
-        current.turn_id,
-        historizer,
-    )
+        capture()
 
 
 def _completed_levels_after_turn(session) -> int:

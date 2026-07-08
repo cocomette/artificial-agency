@@ -1,22 +1,70 @@
 # End-To-End Checks
 
-No provider-specific OpenAI, Ollama, HuggingFace, or Diffusers E2E runners are
-kept in the repository. The supported real-model path is the runtime shell
-against a vLLM OpenAI-compatible Chat Completions server.
+Use these checks when you need to exercise model adapters or full runtime paths
+outside the model-free regression suite. Run commands from the repo root.
 
-Run commands from the repo root after starting vLLM separately:
+E2E runners live under `tests/e2e/`, share fixtures from `tests/fixtures/`, and
+write artifacts under `runs/`.
+
+## OpenAI
+
+Install model dependencies and provide `OPENAI_API_KEY` through the environment
+or a local `.env` file:
 
 ```bash
-uv run --group dev python -m face_of_agi.runtime.shell --config src/face_of_agi/runtime/configs/starter_loop.yaml
+uv sync --extra ml --no-dev
 ```
 
-or choose one of the hardware-specific vLLM configs:
+Run role-level OpenAI description checks:
 
 ```bash
-uv run --group dev python -m face_of_agi.runtime.shell --config src/face_of_agi/runtime/configs/vllm/vllm_h100_qwen36_35b_fp8.yaml
+uv run --env-file .env --locked --extra ml --no-dev python tests/e2e/openai_goal_model_e2e.py
+uv run --env-file .env --locked --extra ml --no-dev python tests/e2e/openai_orchestrator_agent_e2e.py
 ```
 
-External-model E2E checks are manual because they depend on local hardware,
-served model weights, and vLLM availability. Do not add them to the default
-test suite, and do not run external API or live model tests unless explicitly
-requested.
+Run OpenAI S/G updater checks:
+
+```bash
+uv run --env-file .env --locked --extra ml --no-dev python tests/e2e/openai_updater_e2e.py
+```
+
+## Ollama
+
+Install model dependencies, start Ollama, and pull the configured model:
+
+```bash
+uv sync --extra ml --no-dev
+ollama serve
+ollama pull gemma4:e4b
+```
+
+Run the Ollama orchestrator check:
+
+```bash
+uv run --locked --extra ml --no-dev python tests/e2e/ollama_orchestrator_agent_e2e.py
+```
+
+Run role-level Ollama S/G description checks:
+
+```bash
+uv run --locked --extra ml --no-dev python tests/e2e/ollama_world_description_e2e.py
+uv run --locked --extra ml --no-dev python tests/e2e/ollama_goal_description_e2e.py
+```
+
+Run the Ollama two-image change-description check:
+
+```bash
+uv run --locked --extra ml --no-dev python tests/e2e/ollama_image_change_e2e.py
+```
+
+Run the Ollama image-2 change check from an image-1 description:
+
+```bash
+uv run --locked --extra ml --no-dev python tests/e2e/ollama_image_change_2_e2e.py
+```
+
+Run the Ollama single-image structured area-description check:
+
+```bash
+uv run --locked --extra ml --no-dev python tests/e2e/ollama_image_description_e2e.py
+```

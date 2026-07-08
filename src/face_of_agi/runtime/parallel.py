@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 import sys
 import threading
-import time
 from typing import Any, TextIO
 
 from face_of_agi.contracts import (
@@ -31,12 +30,10 @@ class ParallelGameRunSpec:
     environment_config: EnvironmentConfig
     arc_environment: Any | None = None
     live_turn_monitor: Any | None = None
-    attempt_index: int = 0
     deadline_monotonic: float | None = None
 
 
 ParallelGameRunner = Callable[[ParallelGameRunSpec, TextIO], GameRunResult]
-ParallelRetrySpecFactory = Callable[[ParallelGameRunSpec, int], ParallelGameRunSpec]
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,9 +92,6 @@ class ParallelRuntimeLoop:
         batch_run_id: str,
         specs: Sequence[ParallelGameRunSpec],
         max_parallel_games: int | None = None,
-        max_game_retries: int = 0,
-        retry_spec_factory: ParallelRetrySpecFactory | None = None,
-        deadline_monotonic: float | None = None,
     ) -> ParallelGameRunResult:
         """Run the selected games concurrently, continuing after failures."""
 
@@ -105,24 +99,18 @@ class ParallelRuntimeLoop:
             raise ValueError("parallel runtime requires at least one game")
         if max_parallel_games is not None and max_parallel_games < 1:
             raise ValueError("max_parallel_games must be at least 1")
-        if max_game_retries < 0:
-            raise ValueError("max_game_retries must be non-negative")
 
         max_workers = max_parallel_games or len(specs)
         output = LockedTextIO(self.trace_output, threading.Lock())
         successes: dict[int, ParallelGameRunSuccess] = {}
         failures: dict[int, ParallelGameRunFailure] = {}
-        build_retry_spec = retry_spec_factory or retry_parallel_game_spec
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_specs = {
                 executor.submit(
-                    self._run_game_with_retries,
+                    self._run_game_once,
                     spec,
                     output,
-                    max_game_retries,
-                    build_retry_spec,
-                    deadline_monotonic,
                 ): (index, spec)
                 for index, spec in enumerate(specs)
             }
@@ -178,70 +166,23 @@ class ParallelRuntimeLoop:
             ),
         )
 
-    def _run_game_with_retries(
+    def _run_game_once(
         self,
         spec: ParallelGameRunSpec,
         output: TextIO,
-        max_game_retries: int,
-        retry_spec_factory: ParallelRetrySpecFactory,
-        deadline_monotonic: float | None,
     ) -> _ParallelGameOutcome:
-        """Run one game, retrying with isolated run/db ids after failures."""
+        """Run one game once and capture worker failures."""
 
-        active_spec = spec
-        for attempt_index in range(max_game_retries + 1):
-            try:
-                active_spec = (
-                    spec
-                    if attempt_index == 0
-                    else retry_spec_factory(spec, attempt_index)
-                )
-                return _ParallelGameOutcome(
-                    spec=active_spec,
-                    attempt_count=attempt_index + 1,
-                    result=self.run_game(active_spec, output),
-                )
-            except Exception as exc:
-                if attempt_index >= max_game_retries or _deadline_expired(
-                    deadline_monotonic
-                ):
-                    return _ParallelGameOutcome(
-                        spec=active_spec,
-                        attempt_count=attempt_index + 1,
-                        exception_type=type(exc).__name__,
-                        message=str(exc),
-                    )
-                output.write(
-                    "retrying:"
-                    f" game_index={spec.game_index}"
-                    f" game_id={spec.game_id}"
-                    f" attempt={attempt_index + 1}"
-                    f" next_attempt={attempt_index + 2}"
-                    f" error={type(exc).__name__}: {exc}\n"
-                )
-                output.flush()
-
-
-def retry_parallel_game_spec(
-    spec: ParallelGameRunSpec,
-    attempt_index: int,
-) -> ParallelGameRunSpec:
-    """Return an isolated retry spec for a non-initial attempt."""
-
-    if attempt_index < 1:
-        raise ValueError("retry attempt_index must be at least 1")
-    return replace(
-        spec,
-        run_id=f"{spec.run_id}-retry-{attempt_index}",
-        database_path=_retry_database_path(spec.database_path, attempt_index),
-        arc_environment=None,
-        attempt_index=attempt_index,
-    )
-
-
-def _retry_database_path(path: Path, attempt_index: int) -> Path:
-    return path.with_name(f"{path.stem}-retry-{attempt_index}{path.suffix}")
-
-
-def _deadline_expired(deadline_monotonic: float | None) -> bool:
-    return deadline_monotonic is not None and time.monotonic() >= deadline_monotonic
+        try:
+            return _ParallelGameOutcome(
+                spec=spec,
+                attempt_count=1,
+                result=self.run_game(spec, output),
+            )
+        except Exception as exc:
+            return _ParallelGameOutcome(
+                spec=spec,
+                attempt_count=1,
+                exception_type=type(exc).__name__,
+                message=str(exc),
+            )

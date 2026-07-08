@@ -1,22 +1,22 @@
-"""Provider-neutral adapter for the agent context historizer role."""
+"""Provider-neutral adapter for the historizer role."""
 
 from __future__ import annotations
 
 import json
 import re
 from pathlib import Path
-from typing import Any
 
+from face_of_agi.models.action_history import (
+    grouped_action_history_text,
+    model_facing_action_text,
+)
 from face_of_agi.models.historizer.config import HistorizerConfig
 from face_of_agi.models.historizer.contracts import (
-    AGENT_CONTEXT_HISTORY_KEYS,
-    AgentContextHistoryInput,
-    AgentContextHistorySummary,
-    DEFAULT_FIELD_EVOLUTION_MAX_CHARS,
+    HistorizerInput,
+    HistorizerSummary,
     PromptHistorizerProvider,
-    PromptHistorizerProviderResponse,
     PromptHistorizerRequest,
-    agent_context_history_json_schema,
+    historizer_summary_json_schema,
 )
 from face_of_agi.models.structured_output import (
     append_output_schema_to_instructions,
@@ -24,15 +24,17 @@ from face_of_agi.models.structured_output import (
     validate_with_repair,
 )
 
-DEFAULT_INSTRUCTION_PATH = Path(__file__).parent / "instructions" / "instruction_prompt.md"
+DEFAULT_INSTRUCTION_PATH = (
+    Path(__file__).parent / "instructions" / "historizer_prompt.md"
+)
 
 
 class HistorizerOutputError(RuntimeError):
     """Raised when a historizer backend returns invalid output."""
 
 
-class AgentContextHistorizerAdapter:
-    """Provider-neutral historizer that delegates only the model call."""
+class HistorizerAdapter:
+    """Historizer that delegates only the model call."""
 
     def __init__(
         self,
@@ -42,20 +44,21 @@ class AgentContextHistorizerAdapter:
         self.config = config or HistorizerConfig()
         self.provider = provider
 
-    def summarize_agent_context_history(
+    def summarize_history(
         self,
-        history_input: AgentContextHistoryInput,
-    ) -> AgentContextHistorySummary:
-        """Summarize how prior agent context fields evolved."""
+        historizer_input: HistorizerInput,
+    ) -> HistorizerSummary:
+        """Summarize current-level action and strategy history."""
 
-        field_evolution_max_chars = getattr(
-            self.config,
-            "field_evolution_max_chars",
-            DEFAULT_FIELD_EVOLUTION_MAX_CHARS,
-        )
-        output_schema = agent_context_history_json_schema(
-            field_evolution_max_chars=field_evolution_max_chars,
-        )
+        output_schema = historizer_summary_json_schema()
+        metadata = {
+            "backend": self.provider.backend,
+            "model": self.provider.model,
+            "run_id": historizer_input.run_id,
+            "game_id": historizer_input.game_id,
+            "action_history_count": len(historizer_input.action_history),
+            "strategy_history_count": len(historizer_input.strategy_history),
+        }
         instructions = append_output_schema_to_instructions(
             load_historizer_instructions(self.config.instruction_path),
             output_schema,
@@ -63,28 +66,23 @@ class AgentContextHistorizerAdapter:
         )
         request = PromptHistorizerRequest(
             instructions=instructions,
-            text=_history_prompt_text(history_input),
+            text=_historizer_prompt_text(historizer_input),
             output_schema=output_schema,
             metadata={
-                "backend": self.provider.backend,
-                "model": self.provider.model,
-                "game_id": history_input.game_id,
-                "context_window": history_input.context_window,
-                "context_count": len(history_input.contexts),
+                **metadata,
+                "task": "history_summary",
+                "schema_name": "historizer_summary",
             },
         )
-        response = self.provider.summarize_context_history(request)
+        response = self.provider.summarize_history(request)
         validated = validate_with_repair(
             label=f"{self.provider.backend} historizer",
             response=response,
             text_of=lambda item: item.text,
-            validate=lambda text: parse_agent_context_history_output(
-                text,
-                field_evolution_max_chars=field_evolution_max_chars,
-            ),
+            validate=parse_historizer_summary_output,
             repair=provider_repair_callback(
                 self.provider,
-                "repair_context_history",
+                "repair_history",
                 args=(request,),
             ),
             max_repair_attempts=self.config.repair_attempts,
@@ -92,9 +90,7 @@ class AgentContextHistorizerAdapter:
         )
         summary = validated.value
         summary.metadata = {
-            **request.metadata,
             **validated.response.metadata,
-            "available": True,
             "repair_attempts": validated.repair_attempts,
         }
         return summary
@@ -107,92 +103,74 @@ def load_historizer_instructions(path: str | Path | None = None) -> str:
     return instruction_path.read_text(encoding="utf-8").strip()
 
 
-def parse_agent_context_history_output(
-    text: str,
-    *,
-    field_evolution_max_chars: int | None = DEFAULT_FIELD_EVOLUTION_MAX_CHARS,
-) -> AgentContextHistorySummary:
-    """Parse the required JSON historizer output contract."""
+def parse_historizer_summary_output(text: str) -> HistorizerSummary:
+    """Parse historizer JSON output."""
 
     try:
         loaded = json.loads(_strip_json_fence(text))
     except json.JSONDecodeError as exc:
         preview = text.strip().replace("\n", "\\n")[:300]
         raise HistorizerOutputError(
-            "historizer response must be JSON with a 'field_evolution' object; "
-            f"raw response preview: {preview!r}"
+            "historizer response must be JSON with action_history_summary and "
+            f"strategy_history_summary; raw response preview: {preview!r}"
         ) from exc
     if not isinstance(loaded, dict):
         raise HistorizerOutputError("historizer response must be a JSON object")
-    field_evolution = loaded.get("field_evolution")
-    if not isinstance(field_evolution, dict):
+    action_history_summary = loaded.get("action_history_summary")
+    strategy_history_summary = loaded.get("strategy_history_summary")
+    if not isinstance(action_history_summary, str):
         raise HistorizerOutputError(
-            "historizer response JSON is missing object field 'field_evolution'"
+            "historizer response JSON is missing string field "
+            "'action_history_summary'"
         )
-    missing = [
-        key for key in AGENT_CONTEXT_HISTORY_KEYS if key not in field_evolution
-    ]
-    if missing:
+    if not isinstance(strategy_history_summary, str):
         raise HistorizerOutputError(
-            "historizer field_evolution is missing keys: " + ", ".join(missing)
+            "historizer response JSON is missing string field "
+            "'strategy_history_summary'"
         )
     unexpected = sorted(
-        set(field_evolution) - set(AGENT_CONTEXT_HISTORY_KEYS)
+        set(loaded) - {"action_history_summary", "strategy_history_summary"}
     )
     if unexpected:
         raise HistorizerOutputError(
-            "historizer field_evolution has unexpected keys: "
-            + ", ".join(unexpected)
+            "historizer response JSON has unexpected keys: " + ", ".join(unexpected)
         )
-    invalid = [
-        key for key, value in field_evolution.items() if not isinstance(value, str)
-    ]
-    if invalid:
-        raise HistorizerOutputError(
-            "historizer field_evolution values must be strings: "
-            + ", ".join(sorted(invalid))
-        )
-    if field_evolution_max_chars is not None:
-        max_chars = int(field_evolution_max_chars)
-        oversized = [
-            key
-            for key, value in field_evolution.items()
-            if len(value.strip()) > max_chars
-        ]
-        if oversized:
-            raise HistorizerOutputError(
-                "historizer field_evolution values are too long: "
-                + ", ".join(sorted(oversized))
-                + f" exceed the {max_chars} character cap"
-            )
-    ordered = {key: field_evolution[key] for key in AGENT_CONTEXT_HISTORY_KEYS}
-    return AgentContextHistorySummary(field_evolution=ordered)
+    return HistorizerSummary(
+        action_history_summary=action_history_summary,
+        strategy_history_summary=strategy_history_summary,
+    )
 
 
-def _history_prompt_text(history_input: AgentContextHistoryInput) -> str:
+def _historizer_prompt_text(historizer_input: HistorizerInput) -> str:
     return "\n\n".join(
         [
-            "## Game\n\n" + history_input.game_id,
-            "## Context history window\n\n"
-            + f"- prior_agent_context_window: {history_input.context_window}",
-            "## Agent game context history\n\n"
-            + _numbered_context_history_text(history_input.contexts),
+            "## World model\n\n"
+            + _text_or_none(historizer_input.world_model_context),
+            "## Previous history summaries\n\n"
+            + _text_or_none(historizer_input.previous_history_summary),
+            "## Action history\n\n"
+            + grouped_action_history_text(
+                historizer_input.action_history,
+                action_text=model_facing_action_text,
+                numbered=True,
+            ),
+            "## Strategy history\n\n"
+            + _numbered_text(
+                historizer_input.strategy_history,
+                tag_latest=True,
+            ),
         ]
     )
 
 
-def _numbered_context_history_text(contexts: tuple[str, ...]) -> str:
-    if not contexts:
-        return "not available"
-    lines = [
-        (
-            "Numbered oldest-to-newest. Each item is a complete prior agent "
-            "game context returned by the updater."
-        )
-    ]
-    for index, context in enumerate(contexts, start=1):
-        lines.append(f"{index}. {_text_or_none(context)}")
-    return "\n\n".join(lines)
+def _numbered_text(history: tuple[str, ...], *, tag_latest: bool = False) -> str:
+    if not history:
+        return "none"
+    lines: list[str] = []
+    for index, item in enumerate(history, start=1):
+        latest_tag = " [latest]" if tag_latest and index == len(history) else ""
+        lines.extend([f"{index}.{latest_tag}", _indent_text(_text_or_none(item))])
+    return "\n".join(lines)
 
 
 def _text_or_none(value: str | None) -> str:
@@ -202,13 +180,22 @@ def _text_or_none(value: str | None) -> str:
     return text if text else "none"
 
 
+def _indent_text(value: str, *, spaces: int = 3) -> str:
+    indent = " " * spaces
+    return "\n".join(f"{indent}{line}" for line in value.splitlines())
+
+
 def _strip_json_fence(text: str) -> str:
     stripped = text.strip()
-    match = re.fullmatch(
-        r"```(?:json)?\s*(.*?)\s*```",
-        stripped,
-        flags=re.DOTALL | re.IGNORECASE,
-    )
-    if match is None:
-        return stripped
-    return match.group(1).strip()
+    match = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", stripped, flags=re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return stripped
+
+
+__all__ = [
+    "HistorizerAdapter",
+    "HistorizerOutputError",
+    "load_historizer_instructions",
+    "parse_historizer_summary_output",
+]

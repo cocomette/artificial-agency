@@ -10,7 +10,7 @@
   "enable_internet": false,
   "keywords": [],
   "dataset_sources": [
-    "kaggle-owner/face-of-agi-wheelhouse",
+    "kaggle-owner/face-of-agi-wheelhouse-new",
     "kaggle-owner/face-of-agi-public-games",
     "kaggle-owner/face-of-agi-qwen36-35b-fp8-weights"
   ],

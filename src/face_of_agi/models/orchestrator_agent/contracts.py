@@ -6,7 +6,6 @@ from typing import Any, Protocol, Sequence
 
 from face_of_agi.contracts import (
     ActionHistoryItem,
-    ActionOutcomeEvidence,
     ActionSpec,
     DecisionResult,
     ExperimentToolInvocationResult,
@@ -59,7 +58,6 @@ class OrchestratorAgentModel(Protocol):
         glossary_actions: Sequence[ActionSpec],
         first_observation_ref: ObservationRef | None = None,
         recent_action_history_available: bool = True,
-        action_outcome_evidence: ActionOutcomeEvidence | None = None,
     ) -> DecisionResult:
         """Return one final action and its decision trace."""
         ...

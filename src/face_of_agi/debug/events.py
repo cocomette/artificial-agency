@@ -91,6 +91,19 @@ class EnvironmentStepRecorded:
 
 
 @dataclass(frozen=True, slots=True)
+class KnownStateSimulationCompleted:
+    run_id: str
+    game_id: str
+    game_index: int | None
+    turn_id: int
+    duration_seconds: float
+    simulated_row_count: int
+    simulated_action_count: int
+    catchup_action_count: int
+    saved_environment_action_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class UpdaterInputCaptured:
     role: str
     update_input: Any
@@ -128,6 +141,7 @@ class FrameTurnCompleted:
     turn_duration_seconds: float
     completed_levels: int
     remaining_actions: int
+    max_actions_per_level: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +159,7 @@ DebugEvent: TypeAlias = (
     | ToolProviderInputCaptured
     | ToolResultRecorded
     | EnvironmentStepRecorded
+    | KnownStateSimulationCompleted
     | UpdaterInputCaptured
     | UpdaterProviderOutputCaptured
     | ModelCallCompleted

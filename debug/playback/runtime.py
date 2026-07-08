@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from face_of_agi.contracts import (
-    ActionHistoryItem,
-    ActionOutcomeEvidence,
+    ActionHistoryEntry,
     ActionSpec,
     AgentTrace,
     ContextDocuments,
@@ -25,7 +25,7 @@ from face_of_agi.models import ModelRegistry, UpdaterTaskRegistry
 from face_of_agi.models.orchestrator_agent import AgentToolRuntime
 from face_of_agi.models.updater import (
     AgentGameContextUpdateInput,
-    GeneralKnowledgeUpdateInput,
+    AgentGameContextUpdateResult,
 )
 
 
@@ -157,12 +157,11 @@ class PlaybackAgent:
         current_observation: Observation,
         action_space: Sequence[ActionSpec],
         tool_runtime: AgentToolRuntime | None = None,
-        recent_action_history: tuple[ActionHistoryItem, ...] = (),
+        recent_action_history: tuple[ActionHistoryEntry, ...] = (),
         *,
         glossary_actions: Sequence[ActionSpec],
         first_observation_ref: ObservationRef | None = None,
         recent_action_history_available: bool = True,
-        action_outcome_evidence: ActionOutcomeEvidence | None = None,
     ) -> DecisionResult:
         """Return a stored replay decision or delegate to live Agent X."""
 
@@ -176,7 +175,6 @@ class PlaybackAgent:
                 glossary_actions=glossary_actions,
                 first_observation_ref=first_observation_ref,
                 recent_action_history_available=recent_action_history_available,
-                action_outcome_evidence=action_outcome_evidence,
             )
 
         row = self.timeline.current()
@@ -209,34 +207,30 @@ class PlaybackAgentUpdater:
         self.provider = _capture_target(live_updater)
         self._provider = live_updater
 
-    def update_agent_game_context(
+    def update_agent_context(
         self,
         update_input: AgentGameContextUpdateInput,
-    ) -> RoleContext:
-        """Return stored game context during replay, otherwise delegate."""
+    ) -> AgentGameContextUpdateResult:
+        """Return stored strategy during replay, otherwise delegate."""
 
         if not self.timeline.active():
-            return self.live_updater.update_agent_game_context(update_input)
-        context = self.timeline.current().agent_context
-        self.timeline.advance()
-        return context
+            return self.live_updater.update_agent_context(update_input)
+        return self._update_agent_context(update_input)
 
-
-class PlaybackGeneralUpdater:
-    """General updater wrapper; replay never short-circuits end-of-run updates."""
-
-    def __init__(self, *, live_updater: Any) -> None:
-        self.live_updater = live_updater
-        self.provider = _capture_target(live_updater)
-        self._provider = live_updater
-
-    def update_general_knowledge(
+    def _update_agent_context(
         self,
-        update_input: GeneralKnowledgeUpdateInput,
-    ) -> RoleContext:
-        """Delegate end-of-run updates to the live general updater."""
-
-        return self.live_updater.update_general_knowledge(update_input)
+        update_input: AgentGameContextUpdateInput,
+    ) -> AgentGameContextUpdateResult:
+        context = self.timeline.current().agent_context
+        replay_action = _action_from_payload(
+            self.timeline.current().chosen_action,
+            update_input.allowed_actions,
+        )
+        self.timeline.advance()
+        return AgentGameContextUpdateResult(
+            context=_stored_agent_game_context(context.game),
+            next_actions=(replay_action,),
+        )
 
 
 def _wrap_models(
@@ -245,21 +239,16 @@ def _wrap_models(
 ) -> ModelRegistry:
     live_updaters = live_models.require_updater_tasks()
     return ModelRegistry(
-        agent_context_historizer_model=(
-            live_models.agent_context_historizer_model
-        ),
         change_summary_model=live_models.require_change_summary_model(),
+        compacter=live_models.require_compacter(),
         orchestrator_agent=PlaybackAgent(
             timeline=timeline,
             live_agent=live_models.require_orchestrator_agent(),
         ),
         updater_tasks=UpdaterTaskRegistry(
-            agent_game_updater=PlaybackAgentUpdater(
+            agent_updater=PlaybackAgentUpdater(
                 timeline=timeline,
-                live_updater=live_updaters.require_agent_game_updater(),
-            ),
-            general_updater=PlaybackGeneralUpdater(
-                live_updater=live_updaters.require_general_updater(),
+                live_updater=live_updaters.require_agent_updater(),
             ),
         ),
     )
@@ -321,6 +310,24 @@ def _action_from_payload(
     raise PlaybackError(
         f"recorded action {action_name!r} is not available during replay; "
         f"allowed actions: {allowed}"
+    )
+
+
+def _stored_agent_game_context(text: str) -> str:
+    try:
+        loaded = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise PlaybackError("recorded agent game context must be JSON") from exc
+    if not isinstance(loaded, dict):
+        raise PlaybackError("recorded agent game context must be a JSON object")
+    required = ("current_strategy",)
+    for key in required:
+        if not isinstance(loaded.get(key), str):
+            raise PlaybackError(f"recorded agent game context is missing {key!r}")
+    return json.dumps(
+        {key: loaded[key] for key in required},
+        indent=2,
+        ensure_ascii=False,
     )
 
 

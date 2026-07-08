@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
-import copy
-from collections.abc import Callable
+import json
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from time import perf_counter
-from typing import Any
 
 from face_of_agi.contracts import (
-    ActionHistoryScoreAdvanceMarker,
+    ActionHistoryEntry,
+    ActionHistoryItem,
+    ActionHistoryResetMarker,
+    ActionSpec,
+    AgentTrace,
+    ChangeSummaryElement,
     ContextDocuments,
     DecisionResult,
     FrameTurnContext,
@@ -16,14 +21,13 @@ from face_of_agi.contracts import (
     UpdaterFrameTransitionInput,
 )
 from face_of_agi.memory import StateMemory
-from face_of_agi.models.adapters import (
-    AgentContextHistorizerModel,
-    OrchestratorAgentModel,
-)
+from face_of_agi.frames import observation_frame_hash
+from face_of_agi.models.arc_grid_crop import normalize_arc_grid_crop_edges
 from face_of_agi.models.change import ChangeSummaryModel, ChangeSummaryResult
-from face_of_agi.models.historizer import AgentContextHistorySummary
+from face_of_agi.models.change import change_summary_elements_text
 from face_of_agi.models.orchestrator_agent import AgentToolRuntime
 from face_of_agi.models.updater import UpdaterTaskRegistry
+from face_of_agi.models.compacter import AgentCompacterSummary, AgentCompacterModel
 from face_of_agi.debug.bus import DebugBus
 from face_of_agi.debug.events import (
     EnvironmentStepRecorded,
@@ -31,25 +35,33 @@ from face_of_agi.debug.events import (
     ModelCallCompleted,
 )
 from face_of_agi.orchestration.game_loop.actions.context_updates import (
+    apply_agent_context_update,
     apply_context_updates,
-    summarize_agent_context_history as build_agent_context_history_summary,
+    agent_context_strategy_snapshot,
+    compact_agent_context as build_compacter_context,
+    previous_level_summary_text,
+    updater_action_history,
 )
 from face_of_agi.orchestration.game_loop.actions.metrics import (
     effective_trace_cost_seconds,
+    levels_completed as observation_levels_completed,
     turn_metrics,
 )
 from face_of_agi.orchestration.game_loop.helpers import (
+    UNCHANGED_FRAME_CHANGE_SUMMARY,
+    action_allowed,
+    average_consecutive_visible_changed_pixel_count,
     build_action_history_entry,
     bounded_agent_action_history,
+    bounded_action_history,
+    bundle_frame_observations,
+    change_summary_observation_snapshot,
+    change_summary_visible_changed_pixel_count,
+    change_summary_transition_frame_observations,
     decide_frame_turn,
     frame_control_mode,
     unroll_observation,
     validate_decision,
-)
-from face_of_agi.orchestration.game_loop.fallbacks import (
-    fallback_change_summary_result,
-    fallback_decision_result,
-    model_observation_text_config,
 )
 from face_of_agi.orchestration.game_loop.persistence import (
     persist_turn,
@@ -66,18 +78,33 @@ AgentToolRuntimeFactory = Callable[
     AgentToolRuntime,
 ]
 
+UNCERTAIN_ACTION_CHANGE_SUMMARY = (
+    "This action produced changes but it is uncertain what changed exactly."
+)
+UNCERTAIN_ANIMATION_CHANGE_SUMMARY = (
+    "animation produced changes but it is uncertain what changed exactly."
+)
+LEVEL_SOLVED_RESET_NOTICE = (
+    "You just solved a level, you start solving a new level now"
+)
+LEVEL_COMPLETION_CHANGE_EVIDENCE_KEY = "level_completion_change_summary_evidence"
+
+
+@dataclass(frozen=True, slots=True)
+class UpdaterHistoryInput:
+    """Action/strategy inputs selected for one updater turn."""
+
+    level_completed: bool
+    agent_action_history: tuple[ActionHistoryItem, ...]
+    agent_strategy_history: tuple[str, ...]
+
 
 def load_frame_buffer_if_needed(session: GameLoopSession) -> None:
     """Normalize the latest environment response into frame turns."""
 
     if session.frame_buffer and session.frame_index < len(session.frame_buffer):
         return
-    session.frame_buffer = unroll_observation(
-        session.latest_environment_observation,
-        animation_keyframe_pixel_threshold=(
-            session.environment_config.animation_keyframe_pixel_threshold
-        ),
-    )
+    session.frame_buffer = unroll_observation(session.latest_environment_observation)
     session.frame_index = 0
 
 
@@ -87,6 +114,7 @@ def enter_frame_turn(
     contexts: ContextDocuments,
     state_memory: StateMemory | None,
     tool_runtime_factory: AgentToolRuntimeFactory | None,
+    change_model: ChangeSummaryModel | None = None,
     debug: DebugBus,
 ) -> None:
     """Create the immutable current-frame snapshot and emit turn trace."""
@@ -100,21 +128,26 @@ def enter_frame_turn(
     )
     current_ref = session.current_ref_for(current_observation)
     turn_id = session.frame_turn_count + 1
-    source_state = None
-    if state_memory is not None:
-        try:
-            source_state = state_memory.prewrite_frame_turn_source(
-                run_id=session.config.run_id,
-                game_id=session.game_id,
-                turn_id=turn_id,
-                current_observation=current_observation,
-                frame_index=session.frame_index,
-                frame_count=frame_count,
-                control_mode=control_mode,
-                contexts=contexts,
-            )
-        except Exception:
-            source_state = None
+    frame_hash_crop_edges = _current_frame_hash_crop_edges(change_model)
+    source_state = (
+        state_memory.prewrite_frame_turn_source(
+            run_id=session.config.run_id,
+            game_id=session.game_id,
+            turn_id=turn_id,
+            current_observation=current_observation,
+            frame_index=session.frame_index,
+            frame_count=frame_count,
+            control_mode=control_mode,
+            contexts=contexts,
+            current_frame_hash=observation_frame_hash(
+                current_observation,
+                crop_edges=frame_hash_crop_edges,
+            ),
+            current_frame_hash_crop_edges=frame_hash_crop_edges,
+        )
+        if state_memory is not None
+        else None
+    )
 
     if session.first_observation is None:
         session.first_observation = current_observation
@@ -176,8 +209,6 @@ def enter_frame_turn(
 def decide(
     session: GameLoopSession,
     *,
-    agent: OrchestratorAgentModel,
-    contexts: ContextDocuments,
     debug: DebugBus,
 ) -> None:
     """Select or synthesize the current frame-turn action."""
@@ -185,18 +216,9 @@ def decide(
     current = require_current(session)
     frame_context = current.to_frame_context()
     decision, decision_duration_seconds = decide_frame_turn(
-        agent=agent,
-        contexts=contexts,
         debug=debug,
         frame_context=frame_context,
-        recent_action_history_available=(
-            session.environment_config.agent_action_history_window != 0
-        ),
-        tool_runtime=session.tool_runtime,
-        turn_id=current.turn_id,
-        action_suppression_zero_changed_pixel_turns=(
-            session.environment_config.action_suppression_zero_changed_pixel_turns
-        ),
+        queued_actions=session.queued_updater_actions,
     )
     session.decision = decision
     session.decision_duration_seconds = decision_duration_seconds
@@ -209,23 +231,9 @@ def decide(
 
     if current.control_mode is None:
         raise RuntimeError("current frame snapshot is missing control mode")
-    try:
-        validate_decision(decision.final_action, control_mode=current.control_mode)
-    except Exception as exc:
-        decision = fallback_decision_result(
-            frame_context=frame_context,
-            turn_id=current.turn_id,
-            action_space=current.control_mode.allowed_actions,
-            error=exc,
-            observation_text_config=model_observation_text_config(agent),
-        )
-        session.decision = decision
-        session.trace_cost_seconds = effective_trace_cost_seconds(
-            decision=decision,
-            wall_clock_seconds=decision_duration_seconds,
-        )
-        session.last_decision = decision
-        validate_decision(decision.final_action, control_mode=current.control_mode)
+    validate_decision(decision.final_action, control_mode=current.control_mode)
+    if current.control_mode.controllable:
+        session.queued_updater_actions = session.queued_updater_actions[1:]
     write_frame_trace(
         debug=debug,
         frame_turn=session.frame_turn_count,
@@ -235,7 +243,12 @@ def decide(
     )
 
 
-def resolve_next_snapshot(session: GameLoopSession, *, debug: DebugBus) -> None:
+def resolve_next_snapshot(
+    session: GameLoopSession,
+    *,
+    debug: DebugBus,
+    change_model: ChangeSummaryModel | None = None,
+) -> None:
     """Resolve the observed next frame and assemble transition data."""
 
     current = require_current(session)
@@ -244,8 +257,14 @@ def resolve_next_snapshot(session: GameLoopSession, *, debug: DebugBus) -> None:
         raise RuntimeError("current frame snapshot is missing control mode")
 
     if current.control_mode.controllable:
-        previous_evidence_observation = snapshot_observation(current.observation)
         session.real_step_count += 1
+        session.level_action_count += 1
+        session.last_submitted_level_action_count = session.level_action_count
+        change_summary_crop_edges = _change_summary_image_config(change_model)
+        previous_transition_observation = change_summary_observation_snapshot(
+            current.observation,
+            crop_edges=change_summary_crop_edges,
+        )
         with runtime_timing.span(
             "game_loop.environment_step",
             turn_id=current.turn_id,
@@ -261,19 +280,30 @@ def resolve_next_snapshot(session: GameLoopSession, *, debug: DebugBus) -> None:
                 remaining_actions=session.remaining_actions,
             )
         )
-        next_frame_buffer = unroll_observation(
-            next_observation,
-            animation_keyframe_pixel_threshold=(
-                session.environment_config.animation_keyframe_pixel_threshold
-            ),
-            anchor_frame=previous_evidence_observation.frame,
+        result_frames = bundle_frame_observations(next_observation)
+        transition_frame_observations = change_summary_transition_frame_observations(
+            previous_observation=previous_transition_observation,
+            next_observation=next_observation,
+            crop_edges=change_summary_crop_edges,
         )
-        session.transition_frame_observations = (
-            previous_evidence_observation,
-            *next_frame_buffer,
+        level_completed = _observation_completed_level(session, next_observation)
+        if level_completed:
+            transition_frame_observations = (
+                _level_completion_change_summary_evidence(
+                    transition_frame_observations
+                )
+            )
+        next_frame_buffer = (result_frames[-1],)
+        session.next_frame_buffer = next_frame_buffer
+        session.last_transition_frame_observations = (
+            transition_frame_observations
+            if (
+                (level_completed and transition_frame_observations)
+                or len(transition_frame_observations) >= 2
+            )
+            else ()
         )
-        next_frame = next_frame_buffer[-1]
-        session.next_frame_buffer = (next_frame,)
+        next_frame = result_frames[-1]
         next_frame_index = 0
         next_frame_count = 1
         next_control_mode = None
@@ -286,20 +316,12 @@ def resolve_next_snapshot(session: GameLoopSession, *, debug: DebugBus) -> None:
             frame_count=next_frame_count,
             real_actions=session.real_actions,
         )
-        session.transition_frame_observations = (
-            current.observation,
-            next_frame,
-        )
 
     next_ref = session.current_ref_for(next_frame)
     session.turn_metrics = turn_metrics(
         actual_next_observation=next_frame,
         trace_cost_seconds=session.trace_cost_seconds,
         cumulative_time_cost=float(session.real_step_count),
-    )
-    score_advance_marker = build_score_advance_marker(
-        previous_score=session.last_observed_cumulative_score,
-        new_score=session.turn_metrics.cumulative_score,
     )
     next_recent_history = bounded_agent_action_history(
         session.action_history,
@@ -319,21 +341,64 @@ def resolve_next_snapshot(session: GameLoopSession, *, debug: DebugBus) -> None:
         previous_observation_ref=current.observation_ref,
         recent_action_history=next_recent_history,
     )
-    session.update_input = UpdaterFrameTransitionInput(
-        current_observation_ref=current.observation_ref,
-        actual_next_observation_ref=next_ref,
-        decision_trace=decision.trace,
-        actual_next_observation=next_frame,
-        turn_metrics=session.turn_metrics,
-        submitted_action=(
-            decision.final_action if current.control_mode.controllable else None
-        ),
-        synthetic_none_action=(
-            None if current.control_mode.controllable else decision.final_action
-        ),
-        action_history_score_advance_marker=score_advance_marker,
-        metadata={"controllable": current.control_mode.controllable},
+    if session.update_input is None:
+        session.update_input = UpdaterFrameTransitionInput(
+            current_observation_ref=current.observation_ref,
+            actual_next_observation_ref=next_ref,
+            decision_trace=decision.trace,
+            actual_next_observation=next_frame,
+            turn_metrics=session.turn_metrics,
+            submitted_action=(
+                decision.final_action if current.control_mode.controllable else None
+            ),
+            synthetic_none_action=(
+                None if current.control_mode.controllable else decision.final_action
+            ),
+            frame_observations=(current.observation, next_frame),
+            metadata={"controllable": current.control_mode.controllable},
+        )
+
+
+def prepare_observed_transition(session: GameLoopSession) -> None:
+    """Assemble previous-to-current transition input before the next decision."""
+
+    current = require_current(session)
+    previous_observation = require_previous_observation(session)
+    previous_decision = require_previous_decision(session)
+    if current.previous_observation_ref is None:
+        raise RuntimeError("observed transition is missing previous observation ref")
+    action = previous_decision.final_action
+    frame_observations = session.last_transition_frame_observations or (
+        previous_observation,
+        current.observation,
     )
+    session.last_transition_frame_observations = ()
+    session.update_input = UpdaterFrameTransitionInput(
+        current_observation_ref=current.previous_observation_ref,
+        actual_next_observation_ref=current.observation_ref,
+        decision_trace=previous_decision.trace,
+        actual_next_observation=current.observation,
+        turn_metrics=turn_metrics(
+            actual_next_observation=current.observation,
+            trace_cost_seconds=None,
+            cumulative_time_cost=float(session.real_step_count),
+        ),
+        submitted_action=action if not action.is_none() else None,
+        synthetic_none_action=action if action.is_none() else None,
+        frame_observations=frame_observations,
+        metadata={
+            "controllable": not action.is_none(),
+            "previous_observation_id": previous_observation.id,
+            "animation_frame_count": _animation_frame_count(frame_observations),
+            "change_summary_frame_observations_override": (
+                _uses_level_completion_change_summary_evidence(frame_observations)
+            ),
+        },
+    )
+
+
+def has_observed_transition(session: GameLoopSession) -> bool:
+    return session.previous_observation is not None and session.last_decision is not None
 
 
 def summarize_change(
@@ -343,6 +408,20 @@ def summarize_change(
     debug: DebugBus,
 ) -> None:
     """Summarize the observed frame transition for compact action history."""
+
+    changed_pixel_count = change_summary_changed_pixel_count(
+        session,
+        change_model=change_model,
+    )
+    if changed_pixel_count == 0 and not observed_transition_has_animation_bundle(
+        session
+    ):
+        attach_unchanged_frame_summary(
+            session,
+            change_model=change_model,
+            changed_pixel_count=changed_pixel_count,
+        )
+        return
 
     result = summarize_change_model(
         session,
@@ -357,6 +436,8 @@ def summarize_change(
     attach_change_summary(
         session,
         result=result,
+        change_model=change_model,
+        changed_pixel_count=changed_pixel_count,
     )
 
 
@@ -364,43 +445,37 @@ def summarize_change_model(
     session: GameLoopSession,
     *,
     change_model: ChangeSummaryModel,
-    debug: DebugBus | None = None,
+    debug: DebugBus,
 ) -> ChangeSummaryResult:
     """Run the change-summary model without mutating turn state."""
 
     current = require_current(session)
-    next_snapshot = require_next(session)
-    decision = require_decision(session)
+    previous_observation = _change_previous_observation(session)
+    current_observation = _change_current_observation(session)
+    decision = _change_decision(session)
     frame_context = current.to_frame_context()
-    frame_observations = transition_frame_observations(session)
-    started_at = perf_counter()
     with runtime_timing.span(
         "game_loop.change_summary",
         turn_id=current.turn_id,
         step=current.observation.step,
     ):
+        started_at = perf_counter()
         try:
             return change_model.summarize(
-                frame_observations[0],
-                frame_observations[-1],
+                previous_observation,
+                current_observation,
                 decision.final_action,
                 glossary_actions=frame_context.control_mode.allowed_actions,
-                frame_observations=frame_observations,
-            )
-        except Exception as exc:
-            return fallback_change_summary_result(
-                observations=frame_observations,
-                error=exc,
-                observation_text_config=model_observation_text_config(change_model),
+                frame_observations=_change_frame_observations(session),
+                previous_change_elements=_previous_change_elements(session),
             )
         finally:
-            if debug is not None:
-                debug.emit(
-                    ModelCallCompleted(
-                        role="change",
-                        duration_seconds=perf_counter() - started_at,
-                    )
+            debug.emit(
+                ModelCallCompleted(
+                    role="change",
+                    duration_seconds=perf_counter() - started_at,
                 )
+            )
 
 
 def capture_change_summary_inputs(
@@ -420,45 +495,280 @@ def attach_change_summary(
     session: GameLoopSession,
     *,
     result: ChangeSummaryResult,
+    change_model: ChangeSummaryModel | None = None,
+    changed_pixel_count: float | None = None,
 ) -> None:
     """Attach a completed change summary to the pending updater input."""
 
     current = require_current(session)
-    next_snapshot = require_next(session)
-    decision = require_decision(session)
+    previous_observation = _change_previous_observation(session)
+    current_observation = _change_current_observation(session)
+    decision = _change_decision(session)
     update_input = require_update_input(session)
     frame_context = current.to_frame_context()
-    update_input.action_history_entry = build_action_history_entry(
+    crop_edges = _change_summary_image_config(change_model)
+    action_changed_pixel_count = (
+        changed_pixel_count
+        if changed_pixel_count is not None
+        else change_summary_visible_changed_pixel_count(
+            previous_observation,
+            current_observation,
+            crop_edges=crop_edges,
+        )
+    )
+    action_entry = build_action_history_entry(
         frame_context=frame_context,
         final_action=decision.final_action,
-        next_observation=next_snapshot.observation,
-        changed_pixel_count=result.changed_pixel_count,
-        change_summary=result.summary,
-        changed_cell_percent=result.changed_cell_percent,
-        completed_levels=_completed_levels_after_transition(session),
-        action_count=_current_level_action_count(session),
+        previous_observation=previous_observation,
+        next_observation=current_observation,
+        change_summary=_change_summary_for_visible_evidence(
+            result,
+            changed_pixel_count=action_changed_pixel_count,
+            fallback_summary=UNCERTAIN_ACTION_CHANGE_SUMMARY,
+        ),
+        change_elements=result.elements,
+        change_summary_crop_edges=crop_edges,
+        supplied_changed_pixel_count=action_changed_pixel_count,
+        completed_levels=_completed_levels_after_turn(session),
+        action_count=(
+            session.last_submitted_level_action_count
+            if not decision.final_action.is_none()
+            else None
+        ),
+        controllable=not decision.final_action.is_none(),
+    )
+    entries = [action_entry]
+    animation_frame_count = _animation_frame_count(update_input.frame_observations)
+    if animation_frame_count > 1:
+        avg_changed_pixel_count = average_consecutive_visible_changed_pixel_count(
+            update_input.frame_observations,
+            crop_edges=crop_edges,
+        )
+        entries.append(
+            build_action_history_entry(
+                frame_context=frame_context,
+                final_action=ActionSpec.none(),
+                previous_observation=previous_observation,
+                next_observation=current_observation,
+                change_summary=_change_summary_for_visible_evidence(
+                    result,
+                    changed_pixel_count=avg_changed_pixel_count,
+                    fallback_summary=UNCERTAIN_ANIMATION_CHANGE_SUMMARY,
+                ),
+                change_elements=result.elements,
+                change_summary_crop_edges=crop_edges,
+                supplied_changed_pixel_count=avg_changed_pixel_count,
+                completed_levels=_completed_levels_after_turn(session),
+                action_count=None,
+                controllable=False,
+                animation_frame_count=animation_frame_count,
+                avg_changed_pixel_count=avg_changed_pixel_count,
+            )
+        )
+    update_input.action_history_entry = action_entry
+    update_input.action_history_entries = tuple(entries)
+
+
+def _change_summary_for_visible_evidence(
+    result: ChangeSummaryResult,
+    *,
+    changed_pixel_count: float,
+    fallback_summary: str,
+) -> str:
+    if changed_pixel_count == 0:
+        return UNCHANGED_FRAME_CHANGE_SUMMARY
+    if result.change_detected:
+        summary = change_summary_elements_text(result.elements)
+        if summary:
+            return summary
+        return ""
+    return _fallback_summary_with_element_descriptions(fallback_summary, result.elements)
+
+
+def _fallback_summary_with_element_descriptions(
+    fallback_summary: str,
+    elements: Sequence[ChangeSummaryElement],
+) -> str:
+    element_descriptions = _change_element_descriptions_text(elements)
+    if not element_descriptions:
+        return fallback_summary
+    return (
+        f"{fallback_summary}\n"
+        "Visible elements reported by change summary:\n"
+        f"{element_descriptions}"
     )
 
 
-def _completed_levels_after_transition(session: GameLoopSession) -> int:
-    metrics = session.turn_metrics
-    if metrics is not None and metrics.cumulative_score is not None:
-        return int(metrics.cumulative_score)
-    return int(session.completed_levels)
+def _change_element_descriptions_text(
+    elements: Sequence[ChangeSummaryElement],
+) -> str:
+    lines: list[str] = []
+    for element in elements:
+        name = element.element_name.strip()
+        description = element.element_description.strip()
+        if name and description:
+            lines.append(f"- {name}: {description}")
+    return "\n".join(lines)
 
 
-def _current_level_action_count(session: GameLoopSession) -> int:
-    return max(
-        0,
-        session.environment_config.max_actions_per_level - session.remaining_actions,
+def attach_unchanged_frame_summary(
+    session: GameLoopSession,
+    *,
+    change_model: ChangeSummaryModel | None,
+    changed_pixel_count: float = 0.0,
+) -> None:
+    """Attach a local identical-frame summary without calling the model."""
+
+    attach_change_summary(
+        session,
+        result=ChangeSummaryResult(
+            elements=_change_elements_without_mutations(
+                _previous_change_elements(session)
+            ),
+            change_detected=False,
+            metadata={"skipped_change_summary": True},
+        ),
+        change_model=change_model,
+        changed_pixel_count=changed_pixel_count,
     )
+
+
+def _change_elements_without_mutations(
+    elements: Sequence[ChangeSummaryElement],
+) -> tuple[ChangeSummaryElement, ...]:
+    return tuple(
+        ChangeSummaryElement(
+            element_name=element.element_name,
+            element_description=element.element_description,
+            element_mutation="",
+        )
+        for element in elements
+    )
+
+
+def change_summary_changed_pixel_count(
+    session: GameLoopSession,
+    *,
+    change_model: ChangeSummaryModel | None,
+) -> float:
+    """Return the current transition's visible changed-pixel percentage."""
+
+    update_input = session.update_input
+    if update_input is not None and len(update_input.frame_observations) >= 2:
+        previous_observation = update_input.frame_observations[0]
+        current_observation = update_input.frame_observations[-1]
+    else:
+        previous_observation = _change_previous_observation(session)
+        current_observation = _change_current_observation(session)
+    crop_edges = _change_summary_image_config(change_model)
+    return change_summary_visible_changed_pixel_count(
+        previous_observation,
+        current_observation,
+        crop_edges=crop_edges,
+    )
+
+
+def observed_transition_has_animation_bundle(session: GameLoopSession) -> bool:
+    """Return whether the current observed transition has bundled animation."""
+
+    update_input = require_update_input(session)
+    return _animation_frame_count(update_input.frame_observations) > 1
+
+
+def _change_summary_image_config(
+    change_model: ChangeSummaryModel | None,
+) -> object | None:
+    """Return image rendering settings used by the change-summary role."""
+
+    config = getattr(change_model, "config", None)
+    if config is None:
+        return None
+    return getattr(config, "input_image_crop_arc_grid_edges", None)
+
+
+def _current_frame_hash_crop_edges(
+    change_model: ChangeSummaryModel | None,
+) -> tuple[int, int, int, int]:
+    return normalize_arc_grid_crop_edges(_change_summary_image_config(change_model))
+
+
+def run_compacter(
+    session: GameLoopSession,
+    *,
+    compacter: AgentCompacterModel | None,
+    state_memory: StateMemory | None,
+    debug: DebugBus,
+) -> None:
+    """Update compact game context for the current transition."""
+
+    current = require_current(session)
+    update_input = require_update_input(session)
+    environment_config = session.environment_config
+    frame_context = current.to_frame_context()
+    current_level_action_history = tuple(
+        session.action_history[session.compacter_action_history_start_index :]
+    )
+    compacter_prior_action_history = bounded_action_history(
+        current_level_action_history,
+        window=environment_config.compacter_action_history_window,
+        key="compacter_action_history_window",
+    )
+    compacter_action_history = updater_action_history(
+        update_input,
+        prior_action_history=compacter_prior_action_history,
+        updater_label="compacter",
+    )
+    current_level_action_history = updater_action_history(
+        update_input,
+        prior_action_history=current_level_action_history,
+        updater_label="compacter",
+    )
+    strategy_history = tuple(session.strategy_history_buffer)
+    summary = build_compacter_context(
+        state_memory=state_memory,
+        frame_context=frame_context,
+        compacter=compacter,
+        current_observation=_compacter_current_observation(session),
+        action_history=compacter_action_history,
+        strategy_history=strategy_history,
+        allowed_actions=frame_context.control_mode.allowed_actions,
+        turn_id=current.turn_id,
+        debug=debug,
+    )
+    debug.capture_model_inputs(frame_context, current.turn_id, compacter)
+    _store_compacter_context(session, summary)
+    if _latest_action_completed_level_increase(
+        current_level_action_history,
+        current_action_item_count=_current_action_history_item_count(update_input),
+        previous_completed_level=(
+            _latest_completed_level(
+                tuple(
+                    session.action_history[
+                        : session.compacter_action_history_start_index
+                    ]
+                )
+            )
+            or 0
+        ),
+    ):
+        next_action_history_start_index = (
+            len(session.action_history)
+            + _current_action_history_item_count(update_input)
+        )
+        _store_solved_level_compacter_summary(
+            session,
+            state_memory=state_memory,
+            frame_context=frame_context,
+            action_history=current_level_action_history,
+            summary=summary,
+            next_action_history_start_index=next_action_history_start_index,
+        )
 
 
 def run_updaters(
     session: GameLoopSession,
     *,
     contexts: ContextDocuments,
-    agent_context_history: AgentContextHistorySummary,
     updater_tasks: UpdaterTaskRegistry,
     state_memory: StateMemory | None,
     debug: DebugBus,
@@ -468,62 +778,315 @@ def run_updaters(
     current = require_current(session)
     update_input = require_update_input(session)
     environment_config = session.environment_config
+    frame_context = current.to_frame_context()
+    current_level_action_history = tuple(
+        session.action_history[session.compacter_action_history_start_index :]
+    )
+    full_action_history = updater_action_history(
+        update_input,
+        prior_action_history=current_level_action_history,
+        updater_label="updater",
+    )
+    strategy_history = tuple(session.strategy_history_buffer)
+    history_input = _updater_history_input(
+        action_history=full_action_history,
+        strategy_history=strategy_history,
+        current_action_item_count=_current_action_history_item_count(update_input),
+        max_buffer_items=environment_config.updater_context_history_window,
+        previous_completed_level=(
+            _latest_completed_level(
+                tuple(
+                    session.action_history[
+                        : session.compacter_action_history_start_index
+                    ]
+                )
+            )
+            or 0
+        ),
+    )
+    previous_level_summary = previous_level_summary_text(
+        state_memory=state_memory,
+        run_id=session.config.run_id,
+        game_id=session.game_id,
+    )
+    session.strategy_history_buffer = list(history_input.agent_strategy_history)
     with runtime_timing.span(
         "game_loop.apply_context_updates",
         turn_id=current.turn_id,
         step=current.observation.step,
     ):
-        apply_context_updates(
+        next_actions = apply_context_updates(
             update_input,
             contexts=contexts,
             updater_tasks=updater_tasks,
             debug=debug,
-            state_memory=state_memory,
-            frame_context=current.to_frame_context(),
-            prior_action_history=session.action_history,
-            agent_updater_action_history_window=(
-                environment_config.agent_updater_action_history_window
-            ),
-            agent_context_history=agent_context_history,
-            action_suppression_zero_changed_pixel_turns=(
-                environment_config.action_suppression_zero_changed_pixel_turns
-            ),
-            updater_stagnation_warning_zero_changed_pixel_turns=(
-                environment_config.updater_stagnation_warning_zero_changed_pixel_turns
-            ),
+            frame_context=frame_context,
+            compacter_context=session.compacter_context_summary,
             game_last_started_turns_ago=max(
                 0,
                 current.turn_id - session.game_start_turn_id,
             ),
-            score_last_advanced_turns_ago=score_last_advanced_turns_ago(
-                session,
-                current_turn_id=current.turn_id,
-                update_input=update_input,
-            ),
             game_start_reason=session.game_start_reason,
-            game_restart_count=session.game_restart_count,
+            updater_actions_window=environment_config.updater_actions_window,
             turn_id=current.turn_id,
+            action_history=history_input.agent_action_history,
+            strategy_history=history_input.agent_strategy_history,
+            previous_level_summary=previous_level_summary,
+            reset_notice=(
+                LEVEL_SOLVED_RESET_NOTICE if history_input.level_completed else ""
+            ),
+    )
+    _store_agent_context_strategy_snapshot(session, contexts)
+    session.queued_updater_actions = next_actions
+
+
+def _updater_history_input(
+    action_history: tuple[ActionHistoryItem, ...],
+    strategy_history: tuple[str, ...],
+    current_action_item_count: int,
+    max_buffer_items: int,
+    previous_completed_level: int = 0,
+) -> UpdaterHistoryInput:
+    if max_buffer_items < 0:
+        raise ValueError("updater_context_history_window must be non-negative")
+    level_completed = _latest_action_completed_level_increase(
+        action_history,
+        current_action_item_count=current_action_item_count,
+        previous_completed_level=previous_completed_level,
+    )
+    if level_completed:
+        return UpdaterHistoryInput(
+            level_completed=True,
+            agent_action_history=(),
+            agent_strategy_history=(),
         )
+    if max_buffer_items == 0:
+        return UpdaterHistoryInput(
+            level_completed=False,
+            agent_action_history=(),
+            agent_strategy_history=(),
+        )
+    return UpdaterHistoryInput(
+        level_completed=False,
+        agent_action_history=action_history[-max_buffer_items:],
+        agent_strategy_history=strategy_history[-max_buffer_items:],
+    )
 
 
-def summarize_agent_context_history(
-    session: GameLoopSession,
+def _latest_action_completed_level_increase(
+    action_history: tuple[ActionHistoryItem, ...],
     *,
-    state_memory: StateMemory | None,
-    agent_context_historizer: AgentContextHistorizerModel | None,
-    debug: DebugBus | None = None,
-) -> AgentContextHistorySummary:
-    """Run the agent-context historizer for the current frame turn."""
+    current_action_item_count: int,
+    previous_completed_level: int = 0,
+) -> bool:
+    if current_action_item_count <= 0:
+        return False
+    previous_history = action_history[:-current_action_item_count]
+    current_history = action_history[-current_action_item_count:]
+    previous_level = max(
+        previous_completed_level,
+        _latest_completed_level(previous_history) or 0,
+    )
+    current_level = _latest_completed_level(current_history)
+    return current_level is not None and current_level > previous_level
+
+
+def should_run_updaters(session: GameLoopSession) -> bool:
+    """Return whether this transition needs fresh updater context/actions."""
 
     current = require_current(session)
-    return build_agent_context_history_summary(
+    if current.control_mode is None or not current.control_mode.controllable:
+        return False
+    if session.pending_game_over_reset:
+        return True
+    if not session.queued_updater_actions:
+        return True
+    return not action_allowed(
+        session.queued_updater_actions[0],
+        control_mode=current.control_mode,
+    )
+
+
+def clear_queued_actions_after_net_noop_transition(session: GameLoopSession) -> None:
+    """Drop queued actions when the latest real action made no net frame change."""
+
+    update_input = require_update_input(session)
+    entry = update_input.action_history_entry
+    if entry is None:
+        return
+    if not entry.controllable or entry.action.is_none():
+        return
+    if entry.changed_pixel_count != 0:
+        return
+    session.queued_updater_actions = ()
+
+
+def attach_game_over_reset_decision(session: GameLoopSession) -> None:
+    """Attach the synthetic decision used to persist a modeled GAME_OVER turn."""
+
+    current = require_current(session)
+    final_action = ActionSpec.none()
+    session.decision = DecisionResult(
+        final_action=final_action,
+        trace=AgentTrace(
+            step=current.observation.step,
+            first_observation_ref=current.first_observation_ref,
+            current_observation_ref=current.observation_ref,
+            final_action=final_action,
+            reasoning_summary="game-over transition modeled before reset",
+            metadata={
+                "decision_source": "orchestration_game_over_reset",
+                "agent_x_called": False,
+            },
+        ),
+    )
+    session.decision_duration_seconds = 0.0
+    session.trace_cost_seconds = 0.0
+    session.last_decision = session.decision
+    session.frame_turn_count = current.turn_id
+
+
+def attach_terminal_stop_decision(session: GameLoopSession) -> None:
+    """Attach the synthetic decision used to persist a modeled terminal turn."""
+
+    current = require_current(session)
+    final_action = ActionSpec.none()
+    session.decision = DecisionResult(
+        final_action=final_action,
+        trace=AgentTrace(
+            step=current.observation.step,
+            first_observation_ref=current.first_observation_ref,
+            current_observation_ref=current.observation_ref,
+            final_action=final_action,
+            reasoning_summary="terminal transition modeled before stopping",
+            metadata={
+                "decision_source": "orchestration_terminal_stop",
+                "agent_x_called": False,
+            },
+        ),
+    )
+    session.decision_duration_seconds = 0.0
+    session.trace_cost_seconds = 0.0
+    session.last_decision = session.decision
+    session.frame_turn_count = current.turn_id
+
+
+def record_action_history(session: GameLoopSession) -> None:
+    """Append the current transition's action-history entries to the session."""
+
+    update_input = require_update_input(session)
+    if update_input.action_history_entries:
+        session.action_history.extend(update_input.action_history_entries)
+    elif update_input.action_history_entry is not None:
+        session.action_history.append(update_input.action_history_entry)
+
+
+def _completed_levels_after_turn(session: GameLoopSession) -> int | None:
+    """Return cumulative completed levels after the current transition."""
+
+    metrics = session.turn_metrics
+    if metrics is not None and metrics.cumulative_score is not None:
+        return int(metrics.cumulative_score)
+    return int(session.completed_levels)
+
+
+def _observation_completed_level(
+    session: GameLoopSession,
+    observation: Observation,
+) -> bool:
+    completed_levels = observation_levels_completed(observation)
+    return completed_levels is not None and completed_levels > session.completed_levels
+
+
+def _level_completion_change_summary_evidence(
+    observations: tuple[Observation, ...],
+) -> tuple[Observation, ...]:
+    return tuple(
+        _mark_level_completion_change_summary_evidence(observation)
+        for observation in observations[:-1]
+    )
+
+
+def _mark_level_completion_change_summary_evidence(
+    observation: Observation,
+) -> Observation:
+    return Observation(
+        id=observation.id,
+        step=observation.step,
+        frame=observation.frame,
+        frames=observation.frames,
+        raw_frame_data=observation.raw_frame_data,
+        metadata={
+            **observation.metadata,
+            LEVEL_COMPLETION_CHANGE_EVIDENCE_KEY: True,
+        },
+    )
+
+
+def bootstrap_agent_updater_decision(
+    session: GameLoopSession,
+    *,
+    contexts: ContextDocuments,
+    compacter: AgentCompacterModel | None,
+    updater_tasks: UpdaterTaskRegistry,
+    state_memory: StateMemory | None = None,
+    debug: DebugBus,
+) -> None:
+    """Produce the first updater action before any transition exists."""
+
+    current = require_current(session)
+    frame_context = current.to_frame_context()
+    if not frame_context.control_mode.controllable:
+        return
+    if session.queued_updater_actions:
+        return
+    if _has_prior_controllable_action(session):
+        return
+
+    environment_config = session.environment_config
+    summary = build_compacter_context(
         state_memory=state_memory,
-        frame_context=current.to_frame_context(),
-        historizer=agent_context_historizer,
-        context_window=session.environment_config.agent_context_history_window,
+        frame_context=frame_context,
+        compacter=compacter,
+        current_observation=current.observation,
+        action_history=(),
+        strategy_history=tuple(session.strategy_history_buffer),
+        allowed_actions=frame_context.control_mode.allowed_actions,
         turn_id=current.turn_id,
         debug=debug,
     )
+    debug.capture_model_inputs(frame_context, current.turn_id, compacter)
+    _store_compacter_context(session, summary)
+
+    result = apply_agent_context_update(
+        contexts=contexts,
+        updater_tasks=updater_tasks,
+        debug=debug,
+        frame_context=frame_context,
+        current_observation=current.observation,
+        action_history=(),
+        allowed_action_source=frame_context.control_mode.allowed_actions,
+        compacter_context=session.compacter_context_summary,
+        turn_id=current.turn_id,
+        previous_game_context_history=(),
+        updater_actions_window=environment_config.updater_actions_window,
+        previous_level_summary=previous_level_summary_text(
+            state_memory=state_memory,
+            run_id=session.config.run_id,
+            game_id=session.game_id,
+        ),
+    )
+    _store_agent_context_strategy_snapshot(session, contexts)
+    session.queued_updater_actions = result.next_actions
+
+
+def _has_prior_controllable_action(session: GameLoopSession) -> bool:
+    for item in reversed(session.action_history):
+        if isinstance(item, ActionHistoryResetMarker):
+            return False
+        if isinstance(item, ActionHistoryEntry) and item.controllable:
+            return True
+    return False
 
 
 def persist(
@@ -551,18 +1114,9 @@ def advance(session: GameLoopSession) -> None:
     if current.control_mode is None:
         raise RuntimeError("current frame snapshot is missing control mode")
 
-    update_input = require_update_input(session)
-    if update_input.action_history_entry is None:
-        raise RuntimeError("frame turn is missing a change-summarized history entry")
-    session.action_history.append(update_input.action_history_entry)
-    if update_input.action_history_score_advance_marker is not None:
-        session.action_history.append(update_input.action_history_score_advance_marker)
-        session.last_score_advance_turn_id = current.turn_id
-    if update_input.turn_metrics.cumulative_score is not None:
-        session.last_observed_cumulative_score = float(
-            update_input.turn_metrics.cumulative_score
-        )
+    record_action_history(session)
     session.previous_observation_ref = current.observation_ref
+    session.previous_observation = current.observation
 
     if current.control_mode.controllable:
         if session.next_environment_observation is None:
@@ -590,51 +1144,209 @@ def clear_turn_outputs(session: GameLoopSession) -> None:
     session.turn_metrics = None
     session.update_input = None
     session.next_environment_observation = None
+    session.compacter_context = None
+    session.compacter_context_summary = None
+    session.agent_context_strategy_snapshot = None
+    session.turn_metadata = {}
     session.next_frame_buffer = ()
-    session.transition_frame_observations = ()
 
 
-def build_score_advance_marker(
+def require_previous_observation(session: GameLoopSession) -> Observation:
+    if session.previous_observation is None:
+        raise RuntimeError("game-loop session is missing the previous observation")
+    return session.previous_observation
+
+
+def require_previous_decision(session: GameLoopSession) -> DecisionResult:
+    if session.last_decision is None:
+        raise RuntimeError("game-loop session is missing the previous decision")
+    return session.last_decision
+
+
+def _change_previous_observation(session: GameLoopSession) -> Observation:
+    evidence_observation = _change_summary_evidence_observation(
+        session,
+        index=0,
+    )
+    if evidence_observation is not None:
+        return evidence_observation
+    if has_observed_transition(session):
+        return require_previous_observation(session)
+    return require_current(session).observation
+
+
+def _change_current_observation(session: GameLoopSession) -> Observation:
+    evidence_observation = _change_summary_evidence_observation(
+        session,
+        index=-1,
+    )
+    if evidence_observation is not None:
+        return evidence_observation
+    if has_observed_transition(session):
+        return require_current(session).observation
+    return require_next(session).observation
+
+
+def _compacter_current_observation(session: GameLoopSession) -> Observation:
+    evidence_observation = _change_summary_evidence_observation(
+        session,
+        index=-1,
+    )
+    if evidence_observation is not None:
+        return evidence_observation
+    return require_update_input(session).actual_next_observation
+
+
+def _change_summary_evidence_observation(
+    session: GameLoopSession,
     *,
-    previous_score: float | None,
-    new_score: float | None,
-) -> ActionHistoryScoreAdvanceMarker | None:
-    """Return a score marker for the current-run score state."""
+    index: int,
+) -> Observation | None:
+    update_input = session.update_input
+    if update_input is None:
+        return None
+    if not _uses_change_summary_frame_observations_override(update_input):
+        return None
+    if not update_input.frame_observations:
+        return None
+    return update_input.frame_observations[index]
 
-    if new_score is None:
-        return None
-    current = float(new_score)
-    if previous_score is None:
-        if current <= 0.0:
-            return None
-        return ActionHistoryScoreAdvanceMarker(
-            previous_score=None,
-            new_score=current,
-            delta=None,
-        )
-    previous = float(previous_score)
-    if current <= previous:
-        return None
-    return ActionHistoryScoreAdvanceMarker(
-        previous_score=previous,
-        new_score=current,
-        delta=current - previous,
+
+def _change_decision(session: GameLoopSession) -> DecisionResult:
+    if has_observed_transition(session):
+        return require_previous_decision(session)
+    return require_decision(session)
+
+
+def _change_frame_observations(
+    session: GameLoopSession,
+) -> tuple[Observation, ...] | None:
+    frame_observations = require_update_input(session).frame_observations
+    if _uses_change_summary_frame_observations_override(require_update_input(session)):
+        return frame_observations
+    if len(frame_observations) > 2:
+        return frame_observations
+    return None
+
+
+def _uses_change_summary_frame_observations_override(
+    update_input: UpdaterFrameTransitionInput,
+) -> bool:
+    return bool(update_input.metadata.get("change_summary_frame_observations_override"))
+
+
+def _uses_level_completion_change_summary_evidence(
+    observations: tuple[Observation, ...],
+) -> bool:
+    return any(
+        bool(observation.metadata.get(LEVEL_COMPLETION_CHANGE_EVIDENCE_KEY))
+        for observation in observations
     )
 
 
-def score_last_advanced_turns_ago(
+def _previous_change_elements(
+    session: GameLoopSession,
+) -> tuple[ChangeSummaryElement, ...]:
+    for item in reversed(session.action_history):
+        if isinstance(item, ActionHistoryResetMarker):
+            return ()
+        if isinstance(item, ActionHistoryEntry) and item.change_elements:
+            return item.change_elements
+    return ()
+
+
+def _animation_frame_count(observations: tuple[Observation, ...]) -> int:
+    if len(observations) <= 2:
+        return 0
+    return len(observations) - 1
+
+
+def _store_agent_context_strategy_snapshot(
+    session: GameLoopSession,
+    contexts: ContextDocuments,
+) -> None:
+    snapshot = agent_context_strategy_snapshot(contexts)
+    session.agent_context_strategy_snapshot = snapshot
+    session.strategy_history_buffer.append(_dump_strategy_history_snapshot(snapshot))
+
+
+def _dump_strategy_history_snapshot(snapshot: dict[str, object]) -> str:
+    return json.dumps(snapshot, indent=2, ensure_ascii=False)
+
+
+def _store_compacter_context(
+    session: GameLoopSession,
+    summary: AgentCompacterSummary,
+) -> None:
+    session.compacter_context_summary = summary
+    world_description = getattr(summary, "world_description")
+    action_effects = getattr(summary, "action_effects")
+    special_events = getattr(summary, "special_events", "")
+    session.compacter_context = {
+        "world_description": world_description,
+        "special_events": special_events,
+        "action_effects": dict(action_effects),
+        "previous_actions_summary": summary.previous_actions_summary,
+        "previous_strategy_summary": summary.previous_strategy_summary,
+    }
+
+
+def _store_solved_level_compacter_summary(
     session: GameLoopSession,
     *,
-    current_turn_id: int,
-    update_input: UpdaterFrameTransitionInput,
-) -> int | None:
-    """Return the frame-turn distance since the last score marker."""
+    state_memory: StateMemory | None,
+    frame_context: FrameTurnContext,
+    action_history: tuple[ActionHistoryItem, ...],
+    summary: AgentCompacterSummary,
+    next_action_history_start_index: int,
+) -> None:
+    if state_memory is None:
+        return
+    completed_level = _latest_completed_level(action_history)
+    if completed_level is None:
+        return
+    latest_summary = state_memory.read_latest_compacter_level_summary(
+        run_id=session.config.run_id,
+        game_id=session.game_id,
+    )
+    previous_completed_level = (
+        latest_summary.completed_level if latest_summary is not None else 0
+    )
+    if completed_level <= previous_completed_level:
+        return
+    if frame_context.current_source_state_id is None:
+        return
+    for level in range(previous_completed_level + 1, completed_level + 1):
+        state_memory.write_compacter_level_summary(
+            run_id=session.config.run_id,
+            game_id=session.game_id,
+            completed_level=level,
+            source_state_ids=(frame_context.current_source_state_id,),
+            previous_actions_summary=summary.previous_actions_summary,
+            previous_strategy_summary=summary.previous_strategy_summary,
+            metadata=summary.metadata,
+        )
+    session.compacter_action_history_start_index = next_action_history_start_index
 
-    if update_input.action_history_score_advance_marker is not None:
-        return 0
-    if session.last_score_advance_turn_id is None:
-        return None
-    return max(0, current_turn_id - session.last_score_advance_turn_id)
+
+def _current_action_history_item_count(
+    update_input: UpdaterFrameTransitionInput,
+) -> int:
+    if update_input.action_history_entries:
+        return len(update_input.action_history_entries)
+    return 1 if update_input.action_history_entry is not None else 0
+
+
+def _latest_completed_level(
+    action_history: tuple[ActionHistoryItem, ...],
+) -> int | None:
+    for item in reversed(action_history):
+        if (
+            isinstance(item, ActionHistoryEntry)
+            and item.completed_levels is not None
+        ):
+            return int(item.completed_levels)
+    return None
 
 
 def require_current(session: GameLoopSession) -> FrameTurnSnapshot:
@@ -659,50 +1371,3 @@ def require_update_input(session: GameLoopSession) -> UpdaterFrameTransitionInpu
     if session.update_input is None:
         raise RuntimeError("game-loop session is missing updater input")
     return session.update_input
-
-
-def transition_frame_observations(
-    session: GameLoopSession,
-) -> tuple[Observation, ...]:
-    """Return oldest-to-newest frame evidence for the current transition."""
-
-    if session.transition_frame_observations:
-        return session.transition_frame_observations
-    current = require_current(session)
-    next_snapshot = require_next(session)
-    return (current.observation, next_snapshot.observation)
-
-
-def snapshot_observation(observation: Observation) -> Observation:
-    """Return an observation copy insulated from environment frame mutation."""
-
-    if observation.frames:
-        frames = tuple(_copy_frame(frame) for frame in observation.frames)
-        frame = (
-            _copy_frame(observation.frame)
-            if observation.frame is not None
-            else frames[-1]
-        )
-    else:
-        frame = _copy_frame(observation.frame)
-        frames = (frame,) if frame is not None else ()
-    return Observation(
-        id=observation.id,
-        step=observation.step,
-        frame=frame,
-        frames=frames,
-        raw_frame_data=observation.raw_frame_data,
-        metadata=dict(observation.metadata),
-    )
-
-
-def _copy_frame(frame: Any) -> Any:
-    if frame is None:
-        return None
-    copy_method = getattr(frame, "copy", None)
-    if callable(copy_method):
-        try:
-            return copy_method()
-        except TypeError:
-            pass
-    return copy.deepcopy(frame)

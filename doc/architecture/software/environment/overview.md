@@ -20,4 +20,5 @@ The environment module exposes:
 - raw ARC metadata when useful
 
 The ARC-AGI framework remains the source of truth for real transitions. The
-software architecture should not hard-code game-specific action meanings.
+software architecture should not hard-code game-specific action meanings or
+runtime action policy at this boundary.

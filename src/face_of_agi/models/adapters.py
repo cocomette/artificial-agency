@@ -5,26 +5,26 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from face_of_agi.models.change.contracts import ChangeSummaryModel
-from face_of_agi.models.historizer.contracts import AgentContextHistorizerModel
 from face_of_agi.models.orchestrator_agent.contracts import OrchestratorAgentModel
 from face_of_agi.models.updater.contracts import UpdaterTaskRegistry
+from face_of_agi.models.compacter.contracts import AgentCompacterModel
 
 
 @dataclass(slots=True)
 class ModelRegistry:
     """Small registry for injected model role implementations."""
 
-    agent_context_historizer_model: AgentContextHistorizerModel | None = None
+    compacter: AgentCompacterModel | None = None
     orchestrator_agent: OrchestratorAgentModel | None = None
     change_summary_model: ChangeSummaryModel | None = None
     updater_tasks: UpdaterTaskRegistry | None = None
 
-    def require_agent_context_historizer_model(self) -> AgentContextHistorizerModel:
-        """Return the agent context historizer, failing early if not wired."""
+    def require_compacter(self) -> AgentCompacterModel:
+        """Return the compacter role, failing early if not wired."""
 
-        if self.agent_context_historizer_model is None:
-            raise RuntimeError("agent context historizer model is not registered")
-        return self.agent_context_historizer_model
+        if self.compacter is None:
+            raise RuntimeError("compacter model is not registered")
+        return self.compacter
 
     def require_orchestrator_agent(self) -> OrchestratorAgentModel:
         """Return the X agent role, failing early if it was not wired."""
@@ -50,7 +50,7 @@ class ModelRegistry:
 
 __all__ = [
     "ChangeSummaryModel",
-    "AgentContextHistorizerModel",
+    "AgentCompacterModel",
     "ModelRegistry",
     "OrchestratorAgentModel",
     "UpdaterTaskRegistry",

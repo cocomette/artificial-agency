@@ -17,7 +17,32 @@ MemoryDomain = Literal["state", "experimental"]
 ToolName = str
 ActionId: TypeAlias = GameAction | str
 FrameControlReason = Literal["animation_unroll", "real_environment_turn"]
+VisualCoordinateSpace = Literal["pixel", "normalized_1000"]
+VisualBBoxOrder = Literal["xyxy", "yxyx"]
+VisualAxisFrame = Literal["top_left_x_right_y_down"]
+CANONICAL_VISUAL_BBOX_ORDER: VisualBBoxOrder = "xyxy"
+CANONICAL_VISUAL_AXIS_FRAME: VisualAxisFrame = "top_left_x_right_y_down"
+
 NONE_ACTION_ID = "NONE"
+_GAME_ACTION_REPR_PREFIX = "<GameAction."
+_GAME_ACTION_REPR_SUFFIX = ">"
+
+
+def canonical_action_name(action_id: ActionId) -> str:
+    """Return the canonical ACTION name for ARC enum values and stored payloads."""
+
+    if isinstance(action_id, GameAction):
+        return action_id.name
+
+    text = str(action_id)
+    if text.startswith(_GAME_ACTION_REPR_PREFIX) and text.endswith(
+        _GAME_ACTION_REPR_SUFFIX
+    ):
+        raw_name = text[len(_GAME_ACTION_REPR_PREFIX) : -len(_GAME_ACTION_REPR_SUFFIX)]
+        name, separator, _value = raw_name.partition(":")
+        if separator and name.startswith("ACTION") and name[6:].isdigit():
+            return name
+    return text
 
 
 @dataclass(slots=True)
@@ -31,6 +56,12 @@ class ActionSpec:
     action_id: ActionId
     data: dict[str, Any] | None = None
     target: str | None = None
+    target_value: int | None = None
+    target_bbox: tuple[int, int, int, int] | None = field(
+        default=None,
+        metadata={"memory": False},
+        repr=False,
+    )
 
     @classmethod
     def none(cls) -> "ActionSpec":
@@ -42,9 +73,7 @@ class ActionSpec:
     def name(self) -> str:
         """Return a stable display name for ARC and internal actions."""
 
-        if isinstance(self.action_id, GameAction):
-            return self.action_id.name
-        return str(self.action_id)
+        return canonical_action_name(self.action_id)
 
     def is_none(self) -> bool:
         """Return whether this is the internal orchestration-only NONE action."""
@@ -152,9 +181,8 @@ class UpdaterFrameTransitionInput:
     submitted_action: ActionSpec | None = None
     synthetic_none_action: ActionSpec | None = None
     action_history_entry: "ActionHistoryEntry | None" = None
-    action_history_score_advance_marker: (
-        ActionHistoryScoreAdvanceMarker | None
-    ) = None
+    action_history_entries: tuple["ActionHistoryEntry", ...] = ()
+    frame_observations: tuple[Observation, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -183,17 +211,28 @@ class ObservationRef:
 
 
 @dataclass(slots=True)
+class ChangeSummaryElement:
+    """One visual element tracked by the change-summary role."""
+
+    element_name: str
+    element_description: str
+    element_mutation: str = ""
+
+
+@dataclass(slots=True)
 class ActionHistoryEntry:
     """Persisted raw frame-turn action and compact outcome signal."""
 
     action: ActionSpec
     controllable: bool
-    changed_pixel_count: int
+    changed_pixel_count: float
     change_summary: str
-    changed_cell_percent: float | None = None
+    change_elements: tuple[ChangeSummaryElement, ...] = ()
     completed_levels: int | None = None
     action_count: int | None = None
     skipped_intermediate_animation_frame_count: int = 0
+    animation_frame_count: int | None = None
+    avg_changed_pixel_count: float | None = None
 
 
 @dataclass(slots=True)
@@ -204,36 +243,7 @@ class ActionHistoryResetMarker:
     restart_count: int
 
 
-@dataclass(slots=True)
-class ActionHistoryScoreAdvanceMarker:
-    """Prompt-facing marker for a score/progress advance between action rows."""
-
-    previous_score: float | None
-    new_score: float
-    delta: float | None
-
-
-ActionHistoryItem: TypeAlias = (
-    ActionHistoryEntry
-    | ActionHistoryResetMarker
-    | ActionHistoryScoreAdvanceMarker
-)
-
-
-@dataclass(slots=True)
-class ActionOutcomeEvidence:
-    """Deterministic low-information action evidence for model prompts."""
-
-    suppression_threshold: int = 0
-    # Prompt-facing action-choice labels, not necessarily whole action classes.
-    suppressed_actions: tuple[str, ...] = ()
-    suppression_reason: str = ""
-    suppression_disabled_reason: str = ""
-    latest_repeated_action: str = ""
-    latest_repeated_action_count: int = 0
-    latest_same_action_zero_changed_pixel_turn_count: int = 0
-    stagnation_warning_threshold: int = 0
-    stagnation_warning: bool = False
+ActionHistoryItem: TypeAlias = ActionHistoryEntry | ActionHistoryResetMarker
 
 
 @dataclass(slots=True)
@@ -346,15 +356,18 @@ class MStateRecord:
 
 
 @dataclass(slots=True)
-class RunMetadataRecord:
-    """One durable run-level metadata row stored with memory."""
+class CompacterLevelSummaryRecord:
+    """Persisted compacter summary for one completed level."""
 
     id: int
-    game_id: str
     run_id: str
-    kind: str
-    metadata: dict[str, Any]
-    created_at: str
+    game_id: str
+    completed_level: int
+    source_state_ids: tuple[int, ...]
+    previous_actions_summary: str
+    previous_strategy_summary: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+    created_at: str = ""
 
 
 @dataclass(slots=True)
@@ -395,7 +408,6 @@ class GameRunResult:
     step_count: int = 0
     completed_levels: int = 0
     last_state: GameState | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

@@ -1,0 +1,99 @@
+modal:
+  gpu: RTX-PRO-6000
+
+operation_mode: offline
+game_catalog_path: src/face_of_agi/environment/local_games.json
+environments_dir: environment_files
+recordings_dir: /vol/runs/recordings
+seed: 0
+save_recording: false
+use_learned_contexts: false
+experimental_memory_turn_buffer: 1
+debug_keep_all_m_states: true
+enable_visualization: false
+render_mode: null
+debug_trace: false
+debug_color: never
+live_turn_monitor: true
+max_parallel_games: 25
+game_selection: all_available
+
+max_actions_per_level: 10000
+
+compacter_action_history_window: 100
+updater_context_history_window: 1
+
+updater_actions_window: 1
+
+models:
+  shared_vlm:
+    backend: vllm
+    model: Qwen/Qwen3.6-35B-A3B-FP8
+    input_image_size: 1024x1024
+    input_image_resample: nearest
+    timeout: 1200
+    max_retries: 0
+    max_tool_calls: 0
+    repair_attempts: 3
+    temperature: 0.1
+    server:
+      host: 127.0.0.1
+      port: 8000
+      max_model_len: 65536
+      reasoning_parser: qwen3
+      extra_args:
+      - --gdn-prefill-backend
+      - triton
+      - --gpu-memory-utilization
+      - '0.90'
+      - --max-num-seqs
+      - '64'
+      - --max-num-batched-tokens
+      - '65536'
+      - --disable-log-stats
+      - --disable-uvicorn-access-log
+      - --default-chat-template-kwargs
+      - '{"enable_thinking": false}'
+      - --reasoning-config
+      - '{}'
+  agent:
+    backend: vllm
+    include_output_schema_in_instructions: true
+    options:
+      temperature: 0.2
+      chat_template_kwargs:
+        enable_thinking: false
+  change:
+    backend: vllm
+    max_completion_tokens: 4096
+    input_image_crop_arc_grid_edges: 3
+    animation_frame_budget_coefficient: 8
+    max_nb_components: 60
+    max_frames_per_call: 10
+    include_output_schema_in_instructions: true
+    options:
+      thinking_token_budget: 1024
+      chat_template_kwargs:
+        enable_thinking: true
+  compacter:
+    backend: vllm
+    max_completion_tokens: 5120
+    input_image_crop_arc_grid_edges: 3
+    max_nb_components: 60
+    include_output_schema_in_instructions: true
+    options:
+      thinking_token_budget: 1024
+      chat_template_kwargs:
+        enable_thinking: true
+  updater:
+    agent:
+      backend: vllm
+      max_completion_tokens: 4096
+      input_image_crop_arc_grid_edges: 3
+      max_nb_components: 60
+      include_output_schema_in_instructions: true
+      options:
+        temperature: 0.2
+        thinking_token_budget: 2048
+        chat_template_kwargs:
+          enable_thinking: true

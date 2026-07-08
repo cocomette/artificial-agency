@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from face_of_agi.contracts import (
+    ActionHistoryItem,
     ActionSpec,
     ContextDocuments,
     FrameTurnContext,
@@ -34,19 +35,19 @@ def persist_turn(
         turn_id=current.turn_id,
         step=current.observation.step,
     ):
-        try:
-            persist_turn_shell(
-                frame_context=current.to_frame_context(),
-                turn_id=current.turn_id,
-                decision=decision,
-                update_input=update_input,
-                state_record_ids=session.state_record_ids,
-                state_memory=state_memory,
-                contexts=contexts,
-                debug=debug,
-            )
-        except Exception:
-            pass
+        persist_turn_shell(
+            frame_context=current.to_frame_context(),
+            turn_id=current.turn_id,
+            decision=decision,
+            update_input=update_input,
+            state_record_ids=session.state_record_ids,
+            state_memory=state_memory,
+            contexts=contexts,
+            debug=debug,
+            agent_context_history=session.agent_context_strategy_snapshot,
+            compacter_context=session.compacter_context,
+            extra_metadata=session.turn_metadata,
+        )
 
 
 def persist_turn_shell(
@@ -59,6 +60,9 @@ def persist_turn_shell(
     state_memory: StateMemory | None,
     contexts: ContextDocuments,
     debug: DebugBus,
+    agent_context_history: dict[str, Any] | None = None,
+    compacter_context: dict[str, Any] | None = None,
+    extra_metadata: dict[str, Any] | None = None,
 ) -> None:
     """Complete the prewritten M row for one frame turn."""
 
@@ -70,14 +74,35 @@ def persist_turn_shell(
         turn_id=turn_id,
         control_mode=frame_context.control_mode,
         previous_observation_ref=frame_context.previous_observation_ref,
-        recent_action_history=frame_context.recent_action_history,
+        recent_action_history=_completed_recent_action_history(
+            frame_context=frame_context,
+            update_input=update_input,
+        ),
         chosen_action=decision.final_action,
         contexts=contexts,
         agent_trace=decision.trace,
         turn_metrics=update_input.turn_metrics,
+        agent_context_history=agent_context_history,
+        compacter_context=compacter_context,
+        extra_metadata=extra_metadata,
     )
     state_record_ids.append(state.id)
     debug.emit(MStatePersisted(record_id=state.id, turn_id=turn_id))
+
+
+def _completed_recent_action_history(
+    *,
+    frame_context: FrameTurnContext,
+    update_input: UpdaterFrameTransitionInput,
+) -> tuple[ActionHistoryItem, ...]:
+    if update_input.action_history_entries:
+        return (
+            *frame_context.recent_action_history,
+            *update_input.action_history_entries,
+        )
+    if update_input.action_history_entry is not None:
+        return (*frame_context.recent_action_history, update_input.action_history_entry)
+    return frame_context.recent_action_history
 
 
 def write_frame_trace(

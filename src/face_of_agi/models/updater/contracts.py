@@ -2,98 +2,35 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
 from face_of_agi.contracts import (
-    ActionOutcomeEvidence,
+    ActionHistoryItem,
     ActionSpec,
     Observation,
     RoleContext,
 )
-from face_of_agi.models.historizer import AgentContextHistorySummary
 
 UpdaterRole = Literal["agent"]
-ContextSegment = Literal["general", "game"]
-UpdaterTask = Literal["agent_game", "general"]
+ContextSegment = Literal["game"]
+UpdaterTask = Literal["agent"]
 AGENT_GAME_CONTEXT_KEYS = (
-    "goals",
-    "game_mechanics",
-    "policy",
-    "history",
-    "extras",
+    "current_strategy",
 )
-GENERAL_CONTEXT_MAX_CHARS = 20000
-AGENT_GAME_CONTEXT_MAX_CHARS = 12000
-AGENT_GAME_CONTEXT_FIELD_MAX_CHARS = 6000
+AGENT_GAME_CONTEXT_MAX_CHARS = 6000
 
 
-def updated_context_json_schema(
-    *,
-    general_context_max_chars: int | None = GENERAL_CONTEXT_MAX_CHARS,
-) -> dict[str, Any]:
+def updated_context_json_schema() -> dict[str, Any]:
     """Return the provider-neutral updater output JSON schema."""
 
-    updated_context_schema: dict[str, Any] = {
-        "type": "string",
-        "description": "The complete revised context text.",
-    }
-    if general_context_max_chars is not None:
-        updated_context_schema["maxLength"] = int(general_context_max_chars)
-
-    return {
-        "type": "object",
-        "properties": {
-            "updated_context": updated_context_schema,
-        },
-        "required": ["updated_context"],
-        "additionalProperties": False,
-    }
-
-
-def agent_game_updated_context_json_schema(
-    *,
-    agent_game_context_max_chars: int | None = AGENT_GAME_CONTEXT_MAX_CHARS,
-    agent_game_context_field_max_chars: int | None = (
-        AGENT_GAME_CONTEXT_FIELD_MAX_CHARS
-    ),
-) -> dict[str, Any]:
-    """Return the agent game updater output JSON schema."""
-
-    descriptions = {
-        "goals": "Current objective, progress target, and goal hypothesis.",
-        "game_mechanics": "Useful world/action dynamics and uncertainty.",
-        "policy": (
-            "Action-selection guidance for the next decision; under "
-            "stagnation, an explicit action-forcing directive."
-        ),
-        "history": "Learnings from past outcomes and progress evidence.",
-        "extras": "Other useful agent guidance.",
-    }
     return {
         "type": "object",
         "properties": {
             "updated_context": {
-                "type": "object",
-                "description": (
-                    "Complete latest agent game context. The serialized "
-                    f"context must be at most {agent_game_context_max_chars} "
-                    "characters."
-                ),
-                "properties": {
-                    key: {
-                        "type": "string",
-                        "description": descriptions[key],
-                        **(
-                            {"maxLength": int(agent_game_context_field_max_chars)}
-                            if agent_game_context_field_max_chars is not None
-                            else {}
-                        ),
-                    }
-                    for key in AGENT_GAME_CONTEXT_KEYS
-                },
-                "required": list(AGENT_GAME_CONTEXT_KEYS),
-                "additionalProperties": False,
+                "type": "string",
+                "description": "The complete revised context text.",
             },
         },
         "required": ["updated_context"],
@@ -101,25 +38,91 @@ def agent_game_updated_context_json_schema(
     }
 
 
+def _action_output_schema(allowed_actions: Sequence[ActionSpec]) -> dict[str, Any]:
+    branches: list[dict[str, Any]] = []
+    for action in allowed_actions:
+        properties: dict[str, Any] = {"action_id": {"const": action.name}}
+        required = ["action_id"]
+        if action.name == "ACTION6":
+            properties["target"] = {
+                "type": "string",
+                "description": (
+                    "Concise visual description of the object or area targeted by "
+                    "ACTION6."
+                ),
+            }
+            properties["bbox"] = {
+                "type": "array",
+                "description": (
+                    "Target bounding box in crop-relative normalized coordinates "
+                    "[x0, y0, x1, y1] from 0 to 1000."
+                ),
+                "items": {"type": "number", "minimum": 0, "maximum": 1000},
+                "minItems": 4,
+                "maxItems": 4,
+            }
+            properties["target_rgb_color"] = {
+                "type": "array",
+                "description": "Target RGB color as [r, g, b] integers.",
+                "items": {"type": "integer", "minimum": 0, "maximum": 255},
+                "minItems": 3,
+                "maxItems": 3,
+            }
+            required.extend(["target", "bbox", "target_rgb_color"])
+        branches.append(
+            {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+                "additionalProperties": False,
+            }
+        )
+    if not branches:
+        return {"type": "object", "properties": {}, "additionalProperties": False}
+    if len(branches) == 1:
+        return branches[0]
+    return {"anyOf": branches}
+
+
+def agent_game_updated_context_json_schema(
+    *,
+    allowed_actions: Sequence[ActionSpec],
+    actions_window: int = 1,
+) -> dict[str, Any]:
+    """Return the agent game updater output JSON schema."""
+
+    if actions_window < 1:
+        raise ValueError("actions_window must be at least 1")
+    return {
+        "type": "object",
+        "properties": {
+            "current_strategy": {"type": "string"},
+            "next_actions": {
+                "type": "array",
+                "items": _action_output_schema(allowed_actions),
+                "minItems": actions_window,
+                "maxItems": actions_window,
+            },
+        },
+        "required": [*AGENT_GAME_CONTEXT_KEYS, "next_actions"],
+        "additionalProperties": False,
+    }
+
+
 def updater_output_json_schema(
     task: UpdaterTask,
     *,
-    general_context_max_chars: int | None = GENERAL_CONTEXT_MAX_CHARS,
-    agent_game_context_max_chars: int | None = AGENT_GAME_CONTEXT_MAX_CHARS,
-    agent_game_context_field_max_chars: int | None = (
-        AGENT_GAME_CONTEXT_FIELD_MAX_CHARS
-    ),
+    allowed_actions: Sequence[ActionSpec] = (),
+    actions_window: int = 1,
 ) -> dict[str, Any]:
     """Return the provider-neutral output schema for one updater task."""
 
-    if task == "agent_game":
+    if task == "agent":
         return agent_game_updated_context_json_schema(
-            agent_game_context_max_chars=agent_game_context_max_chars,
-            agent_game_context_field_max_chars=agent_game_context_field_max_chars,
+            allowed_actions=allowed_actions,
+            actions_window=actions_window,
         )
-    return updated_context_json_schema(
-        general_context_max_chars=general_context_max_chars,
-    )
+    return updated_context_json_schema()
 
 
 @dataclass(slots=True)
@@ -134,7 +137,7 @@ class UpdaterContextTarget:
 
 @dataclass(slots=True)
 class PromptImage:
-    """Provider-neutral image attached to one prompt update request."""
+    """Provider-neutral image attached to a prompt updater request."""
 
     label: str
     image: Any
@@ -171,88 +174,38 @@ class PromptUpdateProviderResponse:
 
 
 @dataclass(slots=True)
-class AgentProgressFeedback:
-    """Progress feedback visible to the agent updater."""
-
-    time_cost: float | None = None
-    cumulative_score: float | None = None
-    game_last_started_turns_ago: int | None = None
-    score_last_advanced_turns_ago: int | None = None
-    game_start_reason: str | None = None
-    game_restart_count: int = 0
-
-
-@dataclass(slots=True)
-class AgentContextRevisionFeedback:
-    """Deterministic staleness signal for the agent updater."""
-
-    compared_turns: int = 0
-    goals_unchanged_turns: int = 0
-    game_mechanics_unchanged_turns: int = 0
-    policy_unchanged_turns: int = 0
-    history_unchanged_turns: int = 0
-    extras_unchanged_turns: int = 0
-
-
-@dataclass(slots=True)
 class AgentGameContextUpdateInput:
     """Input for updating the agent game-specific context document."""
 
-    previous_context: RoleContext
     current_observation: Observation
     allowed_actions: tuple[ActionSpec, ...]
     glossary_actions: tuple[ActionSpec, ...]
-    action_history_window: int
-    context_history: AgentContextHistorySummary = field(
-        default_factory=AgentContextHistorySummary.not_available
-    )
+    previous_context: RoleContext = field(default_factory=RoleContext)
+    world_model_context: str = ""
+    previous_actions_summary: str = ""
+    previous_strategy_summary: str = ""
     action_history: tuple[ActionHistoryItem, ...] = ()
-    turn_metrics: AgentProgressFeedback = field(
-        default_factory=AgentProgressFeedback
-    )
-    context_revision_feedback: AgentContextRevisionFeedback = field(
-        default_factory=AgentContextRevisionFeedback
-    )
-    action_outcome_evidence: ActionOutcomeEvidence = field(
-        default_factory=ActionOutcomeEvidence
-    )
+    previous_game_context_history: tuple[str, ...] = ()
+    reset_notice: str = ""
+    actions_window: int = 1
 
 
 @dataclass(slots=True)
-class GeneralKnowledgeUpdateInput:
-    """Run-level input for updating one role's game-agnostic context."""
+class AgentGameContextUpdateResult:
+    """Selected agent updater result plus the action to queue."""
 
-    role: UpdaterRole
-    previous_context: RoleContext = field(default_factory=RoleContext)
-    run_id: str = ""
-    game_id: str = ""
-    stop_reason: str | None = None
-    step_count: int = 0
-    completed_levels: int = 0
-    final_state: str | None = None
-    state_record_ids: tuple[int, ...] = ()
-    metadata: dict[str, Any] = field(default_factory=dict)
+    context: str
+    next_actions: tuple[ActionSpec, ...]
 
 
-class AgentGameContextUpdaterModel(Protocol):
-    """Updater task for agent game context `L^X`."""
+class AgentContextUpdaterModel(Protocol):
+    """Updater task for agent strategy context and next actions."""
 
-    def update_agent_game_context(
+    def update_agent_context(
         self,
         update_input: AgentGameContextUpdateInput,
-    ) -> RoleContext:
-        """Return the next agent game context document."""
-        ...
-
-
-class GeneralKnowledgeUpdaterModel(Protocol):
-    """Shared updater task for role-specific general knowledge `K`."""
-
-    def update_general_knowledge(
-        self,
-        update_input: GeneralKnowledgeUpdateInput,
-    ) -> RoleContext:
-        """Return the next role context after an end-of-run general update."""
+    ) -> AgentGameContextUpdateResult:
+        """Return the next strategy state and selected actions."""
         ...
 
 
@@ -260,19 +213,11 @@ class GeneralKnowledgeUpdaterModel(Protocol):
 class UpdaterTaskRegistry:
     """Configured updater task instances for runtime orchestration."""
 
-    agent_game_updater: AgentGameContextUpdaterModel | None = None
-    general_updater: GeneralKnowledgeUpdaterModel | None = None
+    agent_updater: AgentContextUpdaterModel | None = None
 
-    def require_agent_game_updater(self) -> AgentGameContextUpdaterModel:
-        """Return the agent game updater, failing if not wired."""
+    def require_agent_updater(self) -> AgentContextUpdaterModel:
+        """Return the agent updater, failing if not wired."""
 
-        if self.agent_game_updater is None:
-            raise RuntimeError("agent game updater is not registered")
-        return self.agent_game_updater
-
-    def require_general_updater(self) -> GeneralKnowledgeUpdaterModel:
-        """Return the shared general updater, failing if not wired."""
-
-        if self.general_updater is None:
-            raise RuntimeError("general updater is not registered")
-        return self.general_updater
+        if self.agent_updater is None:
+            raise RuntimeError("agent updater is not registered")
+        return self.agent_updater

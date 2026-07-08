@@ -1,5 +1,3 @@
-# First run `--list-games`, which writes the indexed game catalog file.
-# This config intentionally uses real providers for every active model role.
 game_index: 0
 max_actions_per_level: 10
 operation_mode: offline
@@ -12,33 +10,38 @@ seed: 0
 save_recording: false
 experimental_memory_turn_buffer: 2
 agent_action_history_window: 8
-agent_updater_action_history_window: 8
-agent_context_history_window: 8
+action_history_window: 8
 debug_keep_all_m_states: false
 debug_trace: minimal
 debug_color: auto
 models:
-  observation_text:
-    crop_cells: 3
-    overflow_chars_per_frame: 12000
-    include_rows: true
-    include_component_runs: true
-  shared_vlm:
-    backend: vllm
-    model: Qwen/Qwen3.6-35B-A3B-FP8
-    input_image_size: 2048x2048
-    base_url: http://127.0.0.1:8000/v1
-    api_key: EMPTY
   agent:
-    backend: vllm
+    backend: openai
+    model: gpt-5-nano
+    input_image_size: 1024x1024
+    input_image_resample: nearest
     max_tool_calls: 0
     repair_attempts: 1
+    reasoning:
+      effort: low
+      summary: auto
   change:
-    backend: vllm
-  historizer:
-    backend: vllm
+    backend: openai
+    model: gpt-5-nano
+    input_image_size: 1024x1024
+    input_image_resample: nearest
+    reasoning:
+      effort: low
+  compacter:
+    backend: openai
+    model: gpt-5-nano
+    reasoning:
+      effort: low
   updater:
     agent:
-      backend: vllm
-    general:
-      backend: vllm
+      backend: openai
+      model: gpt-5-nano
+      reasoning:
+        effort: low
+compacter_action_history_window: 20
+updater_actions_window: 1

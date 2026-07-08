@@ -1,43 +1,37 @@
-Compare the serialized observation frames and their attached cropped images.
+## Task Overview
+You compare the attached observation frame array.
 
-The first serialized frame is the previous observation. The final serialized
-frame is the current observation. Any serialized frames between them are
-retained animation frames from the same action transition. Use the `ACTION`
-block as the action that caused the transition.
-Each serialized frame has a matching attached cropped image covering the same
-ARC cells. Use images for visual shape and color scanning, and use the
-serialized rows/components/deltas as authoritative evidence for exact symbols,
-coordinates, changed-cell counts, and chronology.
+## Inputs
+- You get an array of images: the first image is the previous observation, the last image is the current observation. If more than two images are attached, every image between the first and last image is an animation frame that shows the transition over time. 
 
-Use `changed_cell_count` as the authoritative count of cropped model-visible
-ARC cells that differ between the first and final serialized observations. It
-is a net first-to-final comparison, not a count across every intermediate frame.
-Use `any_adjacent_frame_changed` as the authoritative boolean for whether any
-adjacent serialized frame pair changed inside the cropped model-visible area.
-Your returned `change_detected` must match `any_adjacent_frame_changed`
-exactly. `any_adjacent_frame_changed` can be true even when
-`changed_cell_count` is zero, because intermediate animation frames may change
-and then return to the initial appearance.
-Component IDs such as `sA.1` are frame-local labels; do not treat matching IDs
-across frames as persistent object identity unless the rows and component facts
-independently support that continuity.
+- The `ACTION:` block is the action that caused the transition from the first image to the last image.
 
-If `changed_cell_count` is greater than zero, never say that nothing changed.
-If `changed_cell_count` is zero and more than two frames are serialized, inspect
-the intermediate frames anyway. In that case, visible transient animation may
-have happened and then returned to the initial appearance; summarize that
-transient change instead of saying "no changes." Only say that no visible
-playfield change occurred when `any_adjacent_frame_changed` is false and the
-playfield has no meaningful visible change across all serialized frames.
+## Output JSON
+Return only the requested JSON object. Do not include markdown, prose, comments, or placeholders. You must keep the output under 2500 characters. 
+- `elements`: array of objects. Each object has exactly:
+  - `element_name`: short stable name for the visible element. Every `element_name` in this response must be unique. If two similar elements need the same base name, suffix them as `base_name_0`, `base_name_1`, and so on.
+  - `element_description`: concise visual description of the element.
+  - `element_mutation`: chronological description of how the element changed across the attached frames. Leave this as an empty string when it stayed still with no visible change. Never mention things such as "No visible changes / mutations".
+- `change_detected`: boolean. Return `true` if any visible change is detected anywhere across and between all the attached image set. Return `false` only when the attached images show no visible changes at all and are all fully identical.
 
-Return exactly one JSON object with a `summary` string and a `change_detected`
-boolean.
+## Guidance
+- Reuse `Previous elements` element names as much as possible when the same visual element is still present, so element names stay consistent across turns.
+- `Previous elements` contains only `element_name` and `element_description`. It does not contain previous mutations.
+- Do not mention previous elements that are not visible anywhere in the attached frames.
+- Mention elements that newly appear in the attached frames.
+- Feel free to merge elements that seem to belong together, split elements that seem to have more parts evolving separately.
+- Follow this process:
+  1. Check `Previous elements`, keep elements that are present on the first image, prune elements that are not present, and add new elements visible on the first image that were not in the list.
+  2. For each attached frame in order, go through your current element list:
+     - Describe how each element changes from the previous frame to this frame, including movement, rotation, transformation, color/layout changes, or other visible mutation.
+     - Mention if an element disappears or reappears.
+     - If a new element appears, add it to your list for the next frame-to-frame analysis.
+  3. Compact the result into `elements`: for each element visible at least once in the attached images, give its general description and chronological mutation across the frames. You always refine `element_description` so it always matches the latest vsisible state.
+- Do not use metaphorical nor analogical descriptions. Stick to exact, simple visual facts such as shape, colors, patterns, positions, layout, background, and orientations. 
+- For `ACTION6`, the `ACTION.data.x` and `ACTION.data.y` coordinates are normalized visual coordinates from 0 to 1000. Describe the area or element targeted by those coordinates on the first image, before describing the transition.
 
-The summary must be one or two concise sentences describing ALL visible playfield
-changes across the serialized frames. If no playfield changed, say that no
-visible playfield change occurred. Do not use metaphorical nor analogical
-descriptions. Stick to exact, simple symbol-first facts such as shape, symbol
-colors, positions, layout, background, and orientations. Refer to cells as
-`symbol 0` through `symbol F` or as `A-cells`, `4-cells`, etc. You may add the
-glossary color name when useful, such as `symbol A light-cyan cells`, but keep
-the symbol as the primary identifier.
+## Component Guidance
+- The `Frame components` block is deterministic structured data generated from the same observation frames attached to this request.
+- Components are 4-connected regions of the same rendered grid color. Diagonal contact alone does not join components.
+- Each row groups components with the same one-word color and exact same shape. `nb` is the number of components in this group, and `box` lists their bounding boxes normalized from 0 to 1000, with x increasing right and y increasing down.
+- Use components as compact evidence for element location, size, color, and grouping, but the attached images remain the source of truth.

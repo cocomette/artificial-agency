@@ -11,6 +11,7 @@ import subprocess
 import threading
 import time
 
+from debug.dashboard.modal_snapshot import volume_relative_path
 from debug.playback import PlaybackRequest
 
 DEV_COMMAND_PREFIX = (
@@ -29,6 +30,15 @@ CLEAN_DB_COMMAND_PREFIX = (
     "python",
     "-m",
     "face_of_agi.runtime.shell",
+)
+MODAL_RUN_COMMAND_PREFIX = (
+    "uv",
+    "run",
+    "--with",
+    "modal",
+    "modal",
+    "run",
+    "src/face_of_agi/runtime/modal_app.py::main",
 )
 GAME_CATALOG_PATH = Path("src/face_of_agi/environment/local_games.json")
 RUNTIME_RUNNER_KEY = "runtime_runner"
@@ -71,6 +81,33 @@ def build_run_command(
     ]
     if keep_all_m_states or playback_request is not None:
         command.append("--debug-keep-all-m-states")
+    return _with_playback_args(command, playback_request)
+
+
+def build_modal_run_command(
+    config_path: str | Path,
+    *,
+    database_name: str = "memory.sqlite",
+    run_folder_name: str = "",
+    live_commit_seconds: int = 30,
+    timing: bool = False,
+    playback_request: PlaybackRequest | None = None,
+) -> list[str]:
+    """Build the Modal runtime command used by the dashboard runner."""
+
+    command = [
+        *MODAL_RUN_COMMAND_PREFIX,
+        "--config",
+        str(config_path),
+        "--database-name",
+        volume_relative_path(database_name),
+        "--live-commit-seconds",
+        str(live_commit_seconds),
+    ]
+    if run_folder_name:
+        command.extend(["--run-folder-name", run_folder_name])
+    if timing:
+        command.append("--timing")
     return _with_playback_args(command, playback_request)
 
 

@@ -45,7 +45,7 @@ def vllm_server_config_from_config_text(
     found: list[str] = []
     if shared_backend == "vllm":
         _append_model(found, shared.get("model"))
-    for role_name in ("agent", "change", "historizer"):
+    for role_name in ("agent", "change", "compacter"):
         role = models.get(role_name) or {}
         if _backend(role) == "vllm":
             _append_model(found, role.get("model") or shared.get("model"))

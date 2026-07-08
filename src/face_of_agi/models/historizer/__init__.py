@@ -1,41 +1,45 @@
-"""Agent context historizer model role."""
+"""Historizer model package."""
 
 from face_of_agi.models.historizer.adapter import (
-    AgentContextHistorizerAdapter,
+    HistorizerAdapter,
     HistorizerOutputError,
     load_historizer_instructions,
-    parse_agent_context_history_output,
+    parse_historizer_summary_output,
 )
 from face_of_agi.models.historizer.config import (
     HistorizerConfig,
+    OllamaHistorizerConfig,
+    OpenAIHistorizerConfig,
     VLLMHistorizerConfig,
+    openai_historizer_text_format,
+    with_openai_historizer_text_format,
 )
 from face_of_agi.models.historizer.contracts import (
-    AGENT_CONTEXT_HISTORY_KEYS,
-    DEFAULT_FIELD_EVOLUTION_MAX_CHARS,
-    AgentContextHistorizerModel,
-    AgentContextHistoryInput,
-    AgentContextHistorySummary,
+    HistorizerInput,
+    HistorizerModel,
+    HistorizerSummary,
     PromptHistorizerProvider,
     PromptHistorizerProviderResponse,
     PromptHistorizerRequest,
-    agent_context_history_json_schema,
+    historizer_summary_json_schema,
 )
 
 __all__ = [
-    "AGENT_CONTEXT_HISTORY_KEYS",
-    "DEFAULT_FIELD_EVOLUTION_MAX_CHARS",
-    "AgentContextHistorizerAdapter",
-    "AgentContextHistorizerModel",
-    "AgentContextHistoryInput",
-    "AgentContextHistorySummary",
+    "HistorizerAdapter",
     "HistorizerConfig",
+    "HistorizerInput",
+    "HistorizerModel",
     "HistorizerOutputError",
+    "HistorizerSummary",
+    "OllamaHistorizerConfig",
+    "OpenAIHistorizerConfig",
     "PromptHistorizerProvider",
     "PromptHistorizerProviderResponse",
     "PromptHistorizerRequest",
     "VLLMHistorizerConfig",
-    "agent_context_history_json_schema",
+    "historizer_summary_json_schema",
     "load_historizer_instructions",
-    "parse_agent_context_history_output",
+    "openai_historizer_text_format",
+    "parse_historizer_summary_output",
+    "with_openai_historizer_text_format",
 ]

@@ -1,11 +1,11 @@
-"""vLLM provider for the agent context historizer."""
+"""vLLM provider for the historizer."""
 
 from __future__ import annotations
 
 from typing import Any
 
 from face_of_agi.debug.capture import capture_vllm_model_input
-from face_of_agi.models.historizer.adapter import AgentContextHistorizerAdapter
+from face_of_agi.models.historizer.adapter import HistorizerAdapter
 from face_of_agi.models.historizer.config import VLLMHistorizerConfig
 from face_of_agi.models.historizer.contracts import (
     PromptHistorizerProviderResponse,
@@ -17,14 +17,10 @@ from face_of_agi.models.providers.vllm import (
     chat_response_metadata,
     json_schema_response_format,
 )
-from face_of_agi.models.structured_output import (
-    DEFAULT_INVALID_OUTPUT_PREVIEW_CHARS,
-    clipped_invalid_output_preview,
-)
 
 
-class VLLMHistorizerAdapter(AgentContextHistorizerAdapter):
-    """Agent context historizer backed by vLLM Chat Completions."""
+class VLLMHistorizerAdapter(HistorizerAdapter):
+    """Historizer backed by vLLM Chat Completions."""
 
     def __init__(
         self,
@@ -56,28 +52,15 @@ class VLLMHistorizerProvider:
         self.last_response_text: str | None = None
         self.last_response_metadata: dict[str, Any] | None = None
 
-    def summarize_context_history(
+    def summarize_history(
         self,
         request: PromptHistorizerRequest,
     ) -> PromptHistorizerProviderResponse:
         """Call vLLM and return raw historizer JSON text."""
 
-        response = self._client.chat(
-            model=self.config.model,
-            messages=self._messages(request),
-            response_format=json_schema_response_format(
-                name="agent_context_history",
-                schema=request.output_schema,
-            ),
-        )
-        self._capture_request(
-            phase="summarize_context_history",
-            request=request,
-            response=response,
-        )
-        return self._provider_response(request, response)
+        return self._structured_chat(request, phase="summarize_history")
 
-    def repair_context_history(
+    def repair_history(
         self,
         request: PromptHistorizerRequest,
         *,
@@ -96,28 +79,39 @@ class VLLMHistorizerProvider:
                 attempt=attempt,
             ),
             response_format=json_schema_response_format(
-                name="agent_context_history",
+                name=_schema_name(request),
                 schema=request.output_schema,
             ),
         )
         self._capture_request(
-            phase="repair_context_history",
+            phase="repair_history",
             request=request,
             response=response,
             attempt=attempt,
         )
         return self._provider_response(request, response)
 
+    def _structured_chat(
+        self,
+        request: PromptHistorizerRequest,
+        *,
+        phase: str,
+    ) -> PromptHistorizerProviderResponse:
+        response = self._client.chat(
+            model=self.config.model,
+            messages=self._messages(request),
+            response_format=json_schema_response_format(
+                name=_schema_name(request),
+                schema=request.output_schema,
+            ),
+        )
+        self._capture_request(phase=phase, request=request, response=response)
+        return self._provider_response(request, response)
+
     def _messages(self, request: PromptHistorizerRequest) -> list[dict[str, Any]]:
         return [
-            {
-                "role": "system",
-                "content": request.instructions,
-            },
-            {
-                "role": "user",
-                "content": request.text,
-            },
+            {"role": "system", "content": request.instructions},
+            {"role": "user", "content": request.text},
         ]
 
     def _repair_messages(
@@ -132,28 +126,14 @@ class VLLMHistorizerProvider:
             [
                 f"Repair attempt {attempt}: the previous historizer output was invalid.",
                 "Validation error:\n" + validation_error,
-                "Invalid output preview:\n"
-                + clipped_invalid_output_preview(
-                    invalid_text,
-                    max_chars=getattr(
-                        self.config,
-                        "repair_invalid_output_preview_chars",
-                        DEFAULT_INVALID_OUTPUT_PREVIEW_CHARS,
-                    ),
-                ),
+                "Invalid output:\n" + invalid_text,
                 "Original historizer input:\n" + request.text,
                 _repair_output_instruction(),
             ]
         )
         return [
-            {
-                "role": "system",
-                "content": request.instructions,
-            },
-            {
-                "role": "user",
-                "content": repair_text,
-            },
+            {"role": "system", "content": request.instructions},
+            {"role": "user", "content": repair_text},
         ]
 
     def _provider_response(
@@ -172,10 +152,7 @@ class VLLMHistorizerProvider:
         }
         return PromptHistorizerProviderResponse(
             text=text,
-            metadata={
-                **request.metadata,
-                **self.last_response_metadata,
-            },
+            metadata={**request.metadata, **self.last_response_metadata},
         )
 
     def _capture_request(
@@ -200,16 +177,23 @@ class VLLMHistorizerProvider:
             response=response,
             metadata={
                 "role": "historizer",
-                "task": "agent_context_history",
+                "task": request.metadata.get("task", "history_summary"),
             },
         )
 
 
 def _repair_output_instruction() -> str:
     return (
-        "Return only corrected JSON with exactly one top-level "
-        "`field_evolution` field. Its value must be an object containing "
-        "exactly these string fields: goals, game_mechanics, policy, history, "
-        "extras. Use enough detail to capture field evolution while staying "
-        "trend-focused."
+        "Return only corrected JSON with exactly two top-level string fields: "
+        "`action_history_summary` and `strategy_history_summary`."
     )
+
+
+def _schema_name(request: PromptHistorizerRequest) -> str:
+    return str(request.metadata.get("schema_name") or "historizer_summary")
+
+
+__all__ = [
+    "VLLMHistorizerAdapter",
+    "VLLMHistorizerProvider",
+]

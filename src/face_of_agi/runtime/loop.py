@@ -5,8 +5,6 @@ from __future__ import annotations
 import sys
 from typing import TextIO
 
-from arc_agi import OperationMode
-
 from face_of_agi.contracts import GameRunResult, RuntimeConfig
 from face_of_agi.debug.bus import DebugBus
 from face_of_agi.debug.sinks import (
@@ -61,9 +59,6 @@ class RuntimeLoop:
         debug = DebugBus(
             sink=self._debug_sink(environment_config),
             state_memory=self.orchestrator.state_memory,
-            persist_model_input_debug_records=_persist_model_input_debug_records(
-                environment_config,
-            ),
         )
         result = self.orchestrator.run_environment_shell(
             config=config,
@@ -72,10 +67,7 @@ class RuntimeLoop:
             debug=debug,
         )
         if not environment_config.debug_keep_all_m_states:
-            try:
-                self.orchestrator.cleanup_state_memory_keep_latest()
-            except Exception:
-                result.metadata["cleanup_fallback"] = True
+            self.orchestrator.cleanup_state_memory_keep_latest()
         return result
 
     def _debug_sink(self, environment_config: EnvironmentConfig) -> DebugSink:
@@ -89,11 +81,3 @@ class RuntimeLoop:
         if monitor is None:
             return trace
         return CompositeDebugSink((trace, monitor))
-
-
-def _persist_model_input_debug_records(
-    environment_config: EnvironmentConfig,
-) -> bool:
-    """Return whether provider request captures should be persisted."""
-
-    return environment_config.operation_mode != OperationMode.COMPETITION

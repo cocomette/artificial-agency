@@ -19,7 +19,7 @@ if str(SCRIPT_DIR) not in sys.path:
 from kaggle_env import read_json_with_kaggle_dataset_id, write_json_if_changed  # noqa: E402
 
 VLLM_VERSION = "0.19.1"
-WHEELHOUSE_DATASET_SLUG = "face-of-agi-wheelhouse"
+WHEELHOUSE_DATASET_SLUG = "face-of-agi-wheelhouse-new"
 KAGGLE_TORCH_STACK = {
     "cuda-toolkit",
     "torch",

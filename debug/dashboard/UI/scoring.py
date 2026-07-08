@@ -48,21 +48,9 @@ def render_scoring(database_folder: str) -> None:
     """Render per-game, per-level scoring against human baseline stats."""
 
     cursor_minutes = _render_time_cursor()
-    baseline_stats: dict[str, Any] = {}
-    if BASELINE_STATS_PATH.exists():
-        try:
-            baseline_stats = _load_baseline_stats(str(BASELINE_STATS_PATH))
-        except Exception as exc:
-            st.error(str(exc))
-            return
-    else:
-        st.warning(
-            "Human baseline stats are not included in this public source tree. "
-            "Generate them from a licensed local source with "
-            "`debug/scoring/build_human_baseline_stats.py` to enable scoring."
-        )
 
     try:
+        baseline_stats = _load_baseline_stats(str(BASELINE_STATS_PATH))
         memory_scores, warnings = _load_memory_scores(database_folder, cursor_minutes)
     except Exception as exc:
         st.error(str(exc))
@@ -215,10 +203,45 @@ def _solved_actions_by_level(rows: list[dict[str, Any]]) -> dict[str, int]:
         if score is None or score <= highest_seen:
             continue
 
+        submitted_actions = _submitted_action_count(row)
         for level in range(highest_seen + 1, score + 1):
-            solved.setdefault(str(level), int(row["turn_id"]))
+            solved.setdefault(str(level), submitted_actions)
         highest_seen = score
     return solved
+
+
+def _submitted_action_count(row: dict[str, Any]) -> int:
+    turn_metrics = row.get("turn_metrics")
+    if not isinstance(turn_metrics, dict):
+        raise ScoringInputError("memory row is missing turn metrics")
+
+    raw_time_cost = turn_metrics.get("time_cost")
+    base_count = _nonnegative_integral_number(
+        raw_time_cost,
+        field_name="turn metric time_cost",
+    )
+    metadata = row.get("metadata")
+    catchup = (
+        metadata.get("known_state_simulation_catchup")
+        if isinstance(metadata, dict)
+        else None
+    )
+    if not isinstance(catchup, dict):
+        return base_count
+
+    return base_count + _nonnegative_integral_number(
+        catchup.get("catchup_action_count", 0),
+        field_name="simulation catchup_action_count",
+    )
+
+
+def _nonnegative_integral_number(value: Any, *, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ScoringInputError(f"{field_name} is not numeric: {value!r}")
+    numeric = float(value)
+    if numeric < 0 or not numeric.is_integer():
+        raise ScoringInputError(f"{field_name} is not a non-negative integer: {value!r}")
+    return int(numeric)
 
 
 def _cumulative_score(turn_metrics: Any) -> int | None:
@@ -356,8 +379,11 @@ def _render_scoring(scoring: dict[str, Any]) -> None:
         st.markdown(
             """
             For each completed level, the agent action count is compared to the
-            human median action count from first-time testers. Unsolved levels
-            count as `0%`.
+            human median action count from first-time testers. The agent action
+            count is the cumulative number of actions submitted to the ARC
+            environment when the level is first observed as solved. Simulated
+            memory rows do not add actions; known-state catch-up submissions are
+            included from catch-up metadata. Unsolved levels count as `0%`.
 
             1. Per-level score: `min(human_actions / agent_actions, 1.0) ** 2`.
             2. Per-game score: weighted average of completed level scores,

@@ -1,4 +1,4 @@
-"""Shared Kaggle user configuration loaded from env vars or ``kaggle/.env``."""
+"""Shared Kaggle user configuration loaded from ``kaggle/.env``."""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ def with_kaggle_dataset_id(metadata: dict, slug: str) -> dict:
 
 
 def with_kaggle_kernel_id(metadata: dict) -> dict:
-    """Return kernel metadata with the owner part replaced from config."""
+    """Return kernel metadata with the owner part replaced from ``kaggle/.env``."""
 
     updated = dict(metadata)
     kernel_id = updated.get("id")
@@ -66,7 +66,7 @@ def with_kaggle_kernel_id(metadata: dict) -> dict:
 
 
 def with_kaggle_owner_slug(metadata: dict) -> dict:
-    """Return model metadata with ``ownerSlug`` set from config."""
+    """Return model metadata with ``ownerSlug`` set from ``kaggle/.env``."""
 
     updated = dict(metadata)
     updated["ownerSlug"] = kaggle_owner()

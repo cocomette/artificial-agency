@@ -12,8 +12,7 @@ from typing import Any
 MODEL_INPUT_SLOTS: tuple[tuple[str, str], ...] = (
     ("agent", "Agent X"),
     ("change", "Change Summary"),
-    ("historizer", "Context Historizer"),
-    ("world_model", "World Model"),
+    ("compacter", "Compacter"),
     ("updater_agent", "Agent Updater"),
     ("updater_general", "General Updater"),
 )

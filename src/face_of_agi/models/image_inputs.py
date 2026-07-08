@@ -1,114 +1,237 @@
-"""Shared model image normalization and vLLM content helpers."""
+"""Shared model image normalization and provider input helpers."""
 
 from __future__ import annotations
 
 import base64
 from io import BytesIO
+from math import sqrt
 from typing import Any, Sequence
+
+from PIL import Image
 
 from face_of_agi.contracts import Observation
 from face_of_agi.frames import (
     frame_to_pil_image,
-    parse_image_size,
-    resize_image_if_needed,
-)
-from face_of_agi.models.observation_text import (
-    ARC_GRID_SIZE,
-    ObservationTextConfig,
+    image_to_base64_png,
+    observation_to_pil_image,
 )
 
 
-def observation_to_cropped_image(
-    observation: Observation,
+def parse_image_size(size: str | tuple[int, int] | None) -> tuple[int, int] | None:
+    """Return an optional image size tuple from common config forms."""
+
+    if size is None:
+        return None
+    if isinstance(size, tuple) and len(size) == 2:
+        width, height = size
+    elif isinstance(size, str) and "x" in size:
+        width_text, height_text = size.lower().split("x", 1)
+        width, height = int(width_text), int(height_text)
+    else:
+        raise ValueError(
+            "input_image_size must be None, a (width, height) tuple, "
+            "or a string like '1024x1024'"
+        )
+    if width <= 0 or height <= 0:
+        raise ValueError(f"input_image_size must be positive, got {size!r}")
+    return (width, height)
+
+
+def resize_image(
+    image: Any,
     *,
-    observation_text_config: ObservationTextConfig | dict[str, Any] | None,
-    frame_scale: int = 4,
-    size: str | tuple[int, int] | None = None,
+    size: str | tuple[int, int] | None,
     resample: str = "nearest",
 ) -> Any:
-    """Return the image crop that matches serialized ObservationText rows."""
+    """Resize a PIL-compatible image when a provider config requests it."""
 
-    frame = observation.frame
-    if frame is None and observation.frames:
-        frame = observation.frames[-1]
-    if frame is None:
-        raise ValueError(f"observation '{observation.id}' does not contain a frame")
-    return frame_to_cropped_image(
-        frame,
-        step=observation.step,
-        observation_text_config=observation_text_config,
-        frame_scale=frame_scale,
+    target_size = parse_image_size(size)
+    image = image.convert("RGB")
+    if target_size is None or image.size == target_size:
+        return image
+    return image.resize(target_size, image_resampling_filter(resample))
+
+
+def frame_bundle_image_size(
+    size: str | tuple[int, int] | None,
+    *,
+    frame_count: int,
+    budget_frame_count: int = 2,
+) -> tuple[int, int] | None:
+    """Return per-frame size that fits a bundle in a fixed frame-area budget."""
+
+    target_size = parse_image_size(size)
+    if target_size is None or frame_count <= budget_frame_count:
+        return target_size
+    width, height = target_size
+    scale = sqrt(budget_frame_count / frame_count)
+    return (
+        max(1, int(width * scale)),
+        max(1, int(height * scale)),
+    )
+
+
+def image_resampling_filter(resample: str) -> Any:
+    """Return the PIL resampling filter for a configured resize mode."""
+
+    from PIL import Image
+
+    filters = {
+        "nearest": Image.Resampling.NEAREST,
+        "bilinear": Image.Resampling.BILINEAR,
+        "bicubic": Image.Resampling.BICUBIC,
+        "lanczos": Image.Resampling.LANCZOS,
+    }
+    if resample not in filters:
+        raise ValueError(f"unsupported input_image_resample: {resample}")
+    return filters[resample]
+
+
+def pil_format_for_mime(mime_type: str) -> str:
+    """Return the PIL save format matching an image MIME type."""
+
+    formats = {
+        "image/jpeg": "JPEG",
+        "image/png": "PNG",
+        "image/webp": "WEBP",
+    }
+    if mime_type not in formats:
+        raise ValueError(f"unsupported image_mime_type: {mime_type}")
+    return formats[mime_type]
+
+
+def image_to_provider_data_url(
+    image: Any,
+    *,
+    size: str | tuple[int, int] | None,
+    resample: str = "nearest",
+    mime_type: str = "image/png",
+) -> str:
+    """Encode a PIL-compatible image as a provider data URL."""
+
+    encoded = image_to_provider_base64(
+        image,
         size=size,
         resample=resample,
-        label=observation.id,
+        mime_type=mime_type,
     )
+    return f"data:{mime_type};base64,{encoded}"
 
 
-def observations_to_cropped_images(
-    observations: Sequence[Observation],
+def image_to_provider_base64(
+    image: Any,
     *,
-    observation_text_config: ObservationTextConfig | dict[str, Any] | None,
-    frame_scale: int = 4,
-    size: str | tuple[int, int] | None = None,
+    size: str | tuple[int, int] | None,
     resample: str = "nearest",
-) -> tuple[Any, ...]:
-    """Return one model-visible cropped image for each observation."""
+    mime_type: str = "image/png",
+) -> str:
+    """Encode a PIL-compatible image for provider payloads."""
 
-    return tuple(
-        observation_to_cropped_image(
-            observation,
-            observation_text_config=observation_text_config,
-            frame_scale=frame_scale,
-            size=size,
-            resample=resample,
-        )
-        for observation in observations
-    )
+    image = resize_image(image, size=size, resample=resample)
+
+    buffer = BytesIO()
+    image.save(buffer, format=pil_format_for_mime(mime_type))
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
-def frame_to_cropped_image(
+def frame_to_provider_data_url(
     frame: Any,
     *,
-    step: int = 0,
-    observation_text_config: ObservationTextConfig | dict[str, Any] | None,
-    frame_scale: int = 4,
-    size: str | tuple[int, int] | None = None,
+    size: str | tuple[int, int] | None,
     resample: str = "nearest",
-    label: str = "frame",
-) -> Any:
-    """Render a frame and crop to the configured ObservationText bounds."""
+    mime_type: str = "image/png",
+) -> str:
+    """Normalize a framework frame and encode it as a provider data URL."""
 
-    if frame_scale <= 0:
-        raise ValueError("frame_scale must be positive")
-    image = frame_to_pil_image(
-        frame,
-        step=step,
-        grid_scale=frame_scale,
-        label=label,
+    image = frame_to_pil_image(frame)
+    return image_to_provider_data_url(
+        image,
+        size=size,
+        resample=resample,
+        mime_type=mime_type,
     )
-    cropped = image.crop(_crop_box_for_image(image.size, observation_text_config))
-    return resize_image_if_needed(cropped, size=size, resample=resample)
 
 
-def vllm_text_image_content(
-    text: str,
+def observation_to_provider_data_url(
+    observation: Observation,
+    *,
+    size: str | tuple[int, int] | None,
+    resample: str = "nearest",
+    mime_type: str = "image/png",
+) -> str:
+    """Normalize an observation frame and encode it as a provider data URL."""
+
+    image = observation_to_pil_image(observation)
+    return image_to_provider_data_url(
+        image,
+        size=size,
+        resample=resample,
+        mime_type=mime_type,
+    )
+
+
+def image_to_ollama_base64_png(
+    image: Any,
+    *,
+    size: str | tuple[int, int] | None,
+    resample: str = "nearest",
+) -> str:
+    """Encode a PIL-compatible image for Ollama chat vision messages."""
+
+    return image_to_base64_png(
+        image,
+        size=parse_image_size(size),
+        resample=resample,
+    )
+
+
+def frame_to_ollama_base64_png(
+    frame: Any,
+    *,
+    size: str | tuple[int, int] | None,
+    resample: str = "nearest",
+) -> str:
+    """Normalize a framework frame and encode it for Ollama chat."""
+
+    image = frame_to_pil_image(frame)
+    return image_to_ollama_base64_png(
+        image,
+        size=size,
+        resample=resample,
+    )
+
+
+def openai_image_content(
     images: Sequence[Any],
     *,
-    detail: str | None = "auto",
+    detail: str,
+    size: str | tuple[int, int] | None = None,
+    resample: str = "nearest",
     mime_type: str = "image/png",
 ) -> list[dict[str, Any]]:
-    """Return OpenAI Chat-compatible text plus image content parts."""
+    """Return OpenAI Responses image content items."""
 
     return [
-        {"type": "text", "text": text},
-        *vllm_image_content(images, detail=detail, mime_type=mime_type),
+        {
+            "type": "input_image",
+            "image_url": image_to_provider_data_url(
+                image,
+                size=size,
+                resample=resample,
+                mime_type=mime_type,
+            ),
+            "detail": detail,
+        }
+        for image in images
     ]
 
 
 def vllm_image_content(
     images: Sequence[Any],
     *,
-    detail: str | None = "auto",
+    detail: str | None = None,
+    size: str | tuple[int, int] | None = None,
+    resample: str = "nearest",
     mime_type: str = "image/png",
 ) -> list[dict[str, Any]]:
     """Return OpenAI Chat-compatible image content items for vLLM."""
@@ -116,93 +239,33 @@ def vllm_image_content(
     content: list[dict[str, Any]] = []
     for image in images:
         image_url: dict[str, Any] = {
-            "url": image_to_data_url(image, mime_type=mime_type),
+            "url": image_to_provider_data_url(
+                image,
+                size=size,
+                resample=resample,
+                mime_type=mime_type,
+            )
         }
         if detail:
             image_url["detail"] = detail
-        content.append({"type": "image_url", "image_url": image_url})
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": image_url,
+            }
+        )
     return content
 
 
-def image_to_data_url(image: Any, *, mime_type: str = "image/png") -> str:
-    """Encode a PIL-compatible image as a provider data URL."""
-
-    image = image.convert("RGB")
-    if mime_type == "image/png":
-        buffer = BytesIO()
-        image.save(buffer, format="PNG")
-    elif mime_type == "image/jpeg":
-        buffer = BytesIO()
-        image.save(buffer, format="JPEG")
-    elif mime_type == "image/webp":
-        buffer = BytesIO()
-        image.save(buffer, format="WEBP")
-    else:
-        raise ValueError(f"unsupported image_mime_type: {mime_type}")
-    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
-    return f"data:{mime_type};base64,{encoded}"
-
-
-def image_crop_bounds(
-    observation_text_config: ObservationTextConfig | dict[str, Any] | None,
-) -> tuple[int, int, int, int]:
-    """Return inclusive ARC-grid crop bounds matching ObservationText."""
-
-    config = _observation_text_config(observation_text_config)
-    crop_cells = config.crop_cells
-    if crop_cells < 0:
-        raise ValueError("observation_text.crop_cells must be non-negative")
-    x0 = crop_cells
-    y0 = crop_cells
-    x1 = ARC_GRID_SIZE - crop_cells - 1
-    y1 = ARC_GRID_SIZE - crop_cells - 1
-    if x0 > x1 or y0 > y1:
-        raise ValueError("observation_text.crop_cells leaves an empty image crop")
-    return (x0, y0, x1, y1)
-
-
-def image_crop_size(
-    observation_text_config: ObservationTextConfig | dict[str, Any] | None,
+def ollama_image_payloads(
+    images: Sequence[Any],
     *,
-    frame_scale: int = 4,
-    input_image_size: str | tuple[int, int] | None = None,
-) -> tuple[int, int]:
-    """Return final image size for the configured ObservationText crop."""
+    size: str | tuple[int, int] | None = None,
+    resample: str = "nearest",
+) -> list[str]:
+    """Return Ollama chat image payloads."""
 
-    parsed_size = parse_image_size(input_image_size, field_name="input_image_size")
-    if parsed_size is not None:
-        return parsed_size
-    if frame_scale <= 0:
-        raise ValueError("frame_scale must be positive")
-    x0, y0, x1, y1 = image_crop_bounds(observation_text_config)
-    return ((x1 - x0 + 1) * frame_scale, (y1 - y0 + 1) * frame_scale)
-
-
-def _crop_box_for_image(
-    image_size: tuple[int, int],
-    observation_text_config: ObservationTextConfig | dict[str, Any] | None,
-) -> tuple[int, int, int, int]:
-    x0, y0, x1, y1 = image_crop_bounds(observation_text_config)
-    width, height = image_size
-    left = round(x0 * width / ARC_GRID_SIZE)
-    top = round(y0 * height / ARC_GRID_SIZE)
-    right = round((x1 + 1) * width / ARC_GRID_SIZE)
-    bottom = round((y1 + 1) * height / ARC_GRID_SIZE)
-    if left >= right or top >= bottom:
-        raise ValueError(
-            "observation_text.crop_cells resolves to an empty image crop "
-            f"for image size {image_size}: {(left, top, right, bottom)!r}"
-        )
-    return (left, top, right, bottom)
-
-
-def _observation_text_config(
-    value: ObservationTextConfig | dict[str, Any] | None,
-) -> ObservationTextConfig:
-    if value is None:
-        return ObservationTextConfig()
-    if isinstance(value, ObservationTextConfig):
-        return value
-    if isinstance(value, dict):
-        return ObservationTextConfig(**value)
-    raise TypeError("observation_text_config must be an ObservationTextConfig")
+    return [
+        image_to_ollama_base64_png(image, size=size, resample=resample)
+        for image in images
+    ]

@@ -27,7 +27,6 @@ from face_of_agi.runtime.loop import RuntimeLoop
 from face_of_agi.runtime.parallel import (
     ParallelGameRunSpec,
     ParallelRuntimeLoop,
-    retry_parallel_game_spec,
 )
 from face_of_agi.runtime.shell import (
     _build_model_registry,
@@ -59,7 +58,7 @@ def main(argv: list[str] | None = None) -> None:
     _print_parallel_result(result)
     if result.failures:
         print(
-            "kaggle completed with failed games after retries; "
+            "kaggle completed with failed games; "
             "leaving notebook exit status at 0"
         )
 
@@ -120,9 +119,6 @@ def run_config(
             batch_run_id=batch_run_id,
             specs=specs,
             max_parallel_games=environment_config.max_parallel_games,
-            max_game_retries=environment_config.max_game_retries,
-            retry_spec_factory=_build_kaggle_retry_spec,
-            deadline_monotonic=deadline_monotonic,
         )
     finally:
         scorecard = arc.close_scorecard(card_id)
@@ -263,19 +259,6 @@ def _build_kaggle_spec(
     )
 
 
-def _build_kaggle_retry_spec(
-    spec: ParallelGameRunSpec,
-    attempt_index: int,
-) -> ParallelGameRunSpec:
-    """Create an isolated retry spec that reuses the Competition Mode wrapper."""
-
-    retry_spec = retry_parallel_game_spec(spec, attempt_index)
-    return replace(
-        retry_spec,
-        arc_environment=spec.arc_environment,
-    )
-
-
 def _run_kaggle_game(
     spec: ParallelGameRunSpec,
     trace_output: TextIO,
@@ -293,9 +276,8 @@ def _run_kaggle_game(
     model_registry = _build_model_registry(
         agent_config=environment_config.models.agent,
         change_config=environment_config.models.change,
-        historizer_config=environment_config.models.historizer,
+        compacter_config=environment_config.models.compacter,
         shared_vlm_config=environment_config.models.shared_vlm,
-        observation_text_config=environment_config.models.observation_text,
         updater_config=environment_config.models.updater,
     )
     runtime = RuntimeLoop(

@@ -7,6 +7,11 @@ from pathlib import Path
 import streamlit as st
 
 from debug.dashboard import config_manager
+from debug.dashboard.modal_snapshot import (
+    ModalPullError,
+    ModalSnapshotConfig,
+    volume_relative_path,
+)
 from debug.dashboard.UI.config_editor import render_config_editor
 from debug.dashboard.runner import (
     CommandResult,
@@ -14,6 +19,7 @@ from debug.dashboard.runner import (
     RUNTIME_RUNNER_KEY,
     RUNNER_PLAYBACK_REQUEST_KEY,
     RuntimeRunner,
+    build_modal_run_command,
     build_run_command,
     format_command,
     pull_game_list,
@@ -25,9 +31,15 @@ RUNNER_CONFIG_KEY = "runner_config"
 RUNNER_SELECTED_CONFIG_KEY = "runner_selected_config"
 PENDING_CONFIG_KEY = "runner_pending_config"
 GAME_LIST_RESULT_KEY = "runner_game_list_result"
+MODAL_LIVE_COMMIT_SECONDS_KEY = "runner_modal_live_commit_seconds"
+MODAL_TIMING_KEY = "runner_modal_timing"
 
 
-def render_runner(database_path: str) -> None:
+def render_runner(
+    database_path: str,
+    *,
+    modal_snapshot: ModalSnapshotConfig | None = None,
+) -> None:
     """Render runtime process controls and live output."""
 
     _render_runner_header()
@@ -57,18 +69,40 @@ def render_runner(database_path: str) -> None:
         keep_all_m_states=keep_all_m_states,
         playback_request=playback_request,
     )
+    modal_command = None
+    if modal_snapshot is not None:
+        try:
+            modal_command = _render_modal_run_options(
+                selected_config_path,
+                modal_snapshot,
+                playback_request=playback_request,
+            )
+        except ModalPullError as exc:
+            st.error(str(exc))
 
     runner = _get_runner()
     if runner is not None:
         runner.poll()
 
     running = runner is not None and runner.is_running()
-    st.code(format_command(command), language="bash")
-    run_col, stop_col, clear_col = st.columns(3)
-    if run_col.button("RUN config", disabled=running):
-        runner = RuntimeRunner.start(command)
-        st.session_state[RUNNER_KEY] = runner
-        st.rerun()
+    if modal_command is None:
+        st.code(format_command(command), language="bash")
+        run_col, stop_col, clear_col = st.columns(3)
+        if run_col.button("RUN config", disabled=running):
+            runner = RuntimeRunner.start(command)
+            st.session_state[RUNNER_KEY] = runner
+            st.rerun()
+    else:
+        command_to_start = _render_commands(
+            command,
+            modal_command,
+            running=running,
+        )
+        if command_to_start is not None:
+            runner = RuntimeRunner.start(command_to_start)
+            st.session_state[RUNNER_KEY] = runner
+            st.rerun()
+        stop_col, clear_col = st.columns(2)
 
     if stop_col.button("Stop", disabled=not running):
         assert runner is not None
@@ -130,6 +164,46 @@ def _resolve_config_selection(
     return config_names[0]
 
 
+def _render_modal_run_options(
+    selected_config_path: Path,
+    modal_snapshot: ModalSnapshotConfig,
+    *,
+    playback_request: PlaybackRequest | None,
+) -> list[str]:
+    with st.expander("Modal run options", expanded=False):
+        remote_database = volume_relative_path(modal_snapshot.database_name)
+        st.text_input(
+            "Remote database name",
+            value=remote_database,
+            disabled=True,
+        )
+        if modal_snapshot.run_folder:
+            st.text_input(
+                "Remote run folder",
+                value=modal_snapshot.run_folder,
+                disabled=True,
+            )
+        live_commit_seconds = int(
+            st.number_input(
+                "Live commit seconds",
+                min_value=0,
+                max_value=3600,
+                step=5,
+                value=30,
+                key=MODAL_LIVE_COMMIT_SECONDS_KEY,
+            )
+        )
+        timing = bool(st.checkbox("Write timing JSONL", key=MODAL_TIMING_KEY))
+    return build_modal_run_command(
+        selected_config_path,
+        database_name=remote_database,
+        run_folder_name=modal_snapshot.run_folder,
+        live_commit_seconds=live_commit_seconds,
+        timing=timing,
+        playback_request=playback_request,
+    )
+
+
 def _render_playback_request() -> PlaybackRequest | None:
     request = st.session_state.get(RUNNER_PLAYBACK_REQUEST_KEY)
     if not isinstance(request, PlaybackRequest):
@@ -145,6 +219,24 @@ def _render_playback_request() -> PlaybackRequest | None:
         st.session_state.pop(RUNNER_PLAYBACK_REQUEST_KEY, None)
         st.rerun()
     return request
+
+
+def _render_commands(
+    local_command: list[str],
+    modal_command: list[str],
+    *,
+    running: bool,
+) -> list[str] | None:
+    modal_tab, local_tab = st.tabs(["Modal command", "Local command"])
+    with modal_tab:
+        st.code(format_command(modal_command), language="bash")
+        if st.button("RUN config", key="runner_run_modal", disabled=running):
+            return modal_command
+    with local_tab:
+        st.code(format_command(local_command), language="bash")
+        if st.button("RUN config", key="runner_run_local", disabled=running):
+            return local_command
+    return None
 
 
 def _render_runner_header() -> None:

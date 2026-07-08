@@ -183,15 +183,16 @@ class ArcEnvironmentAdapter:
     ) -> Observation:
         """Apply one real ARC action and return the resulting frames."""
 
+        arc_action = _arc_game_action(action)
         raw_observation = self._require_environment().step(
-            action.action_id,
+            arc_action,
             data=action.data,
             reasoning=reasoning,
         )
         if raw_observation is None:
             raise RuntimeError(
                 f"step failed for ARC game '{self._require_game_id()}' with action"
-                f" '{action.action_id.name}'"
+                f" '{action.name}'"
             )
 
         self._step_index += 1
@@ -370,15 +371,16 @@ class ArcEnvironmentWrapperAdapter:
     ) -> Observation:
         """Apply one real ARC action and return the resulting frames."""
 
+        arc_action = _arc_game_action(action)
         raw_observation = self._environment.step(
-            action.action_id,
+            arc_action,
             data=action.data,
             reasoning=reasoning,
         )
         if raw_observation is None:
             raise RuntimeError(
                 f"step failed for ARC game '{self._game_id}' with action"
-                f" '{action.action_id.name}'"
+                f" '{action.name}'"
             )
 
         self._step_index += 1
@@ -464,6 +466,19 @@ def _single_game_id_match(requested_game_id: str, matches: Sequence[str]) -> str
 
 def _short_game_id(game_id: str) -> str:
     return game_id.split("-", 1)[0]
+
+
+def _arc_game_action(action: ActionSpec) -> GameAction:
+    """Return the ARC transport enum for an internal action spec."""
+
+    if isinstance(action.action_id, GameAction):
+        return action.action_id
+    try:
+        return GameAction[action.name]
+    except KeyError as exc:
+        raise RuntimeError(
+            f"cannot submit non-ARC action '{action.name}' to ARC environment"
+        ) from exc
 
 
 class KaggleArcadeAdapter:

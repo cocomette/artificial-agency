@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import argparse
 from io import BytesIO
 import json
 from pathlib import Path
@@ -31,21 +30,26 @@ ACCELERATOR = "rtx6000"
 _ACCELERATORS = {
     "rtx6000": {"name": "NvidiaRtxPro6000", "gpu": True},
 }
-DEBUG_KERNEL_TITLE_PREFIX = "Debug"
-DEBUG_KERNEL_TITLE_MAX_LENGTH = 48
+DEBUG_KERNEL_TITLE_PREFIX = "FOA"
 DEBUG_KERNEL_COMMIT_LENGTH = 8
 
-DEFAULT_CONFIG_RELATIVE_PATH = (
+CONFIG_RELATIVE_PATH = (
     "src/face_of_agi/runtime/configs/vllm/"
     "vllm_rtx6000_qwen36_35b_fp8_debug.yaml"
 )
 PROJECT_DIR = "/kaggle/working/face-of-agi"
 DATABASE_PATH = "/kaggle/working/runs/memory.sqlite"
-WHEELHOUSE_DATASET_SLUG = "face-of-agi-wheelhouse"
+WHEELHOUSE_DATASET_SLUG = "face-of-agi-wheelhouse-new"
 PUBLIC_GAMES_DATASET_SLUG = "face-of-agi-public-games"
 COMPETITION_SLUG = "arc-prize-2026-arc-agi-3"
-DEFAULT_MODEL_DATASET_SLUG = "face-of-agi-qwen36-35b-fp8-weights"
+MODEL_DATASET_SLUG = "face-of-agi-qwen36-35b-fp8-weights"
 CONFIG_PUBLIC_GAMES_PATH = f"/kaggle/input/{PUBLIC_GAMES_DATASET_SLUG}"
+CONFIG_MODEL_PATH = f"/kaggle/input/{MODEL_DATASET_SLUG}"
+DATASET_SOURCE_SLUGS = (
+    WHEELHOUSE_DATASET_SLUG,
+    PUBLIC_GAMES_DATASET_SLUG,
+    MODEL_DATASET_SLUG,
+)
 VLLM_VERSION = "0.19.1"
 RUNTIME_PACKAGES = (
     "arc-agi",
@@ -104,12 +108,7 @@ def markdown_cell(source: str) -> dict:
     return {"cell_type": "markdown", "metadata": {}, "source": source}
 
 
-def build(
-    source_archive_b64: str | None = None,
-    *,
-    config_relative_path: str = DEFAULT_CONFIG_RELATIVE_PATH,
-    model_dataset_slug: str = DEFAULT_MODEL_DATASET_SLUG,
-) -> dict:
+def build(source_archive_b64: str | None = None) -> dict:
     """Return the debug notebook document."""
 
     if ACCELERATOR not in _ACCELERATORS:
@@ -147,10 +146,7 @@ def build(
             ),
             _install_cell(),
             _write_source_cell(archive_b64),
-            _run_debug_cell(
-                config_relative_path=config_relative_path,
-                model_dataset_slug=model_dataset_slug,
-            ),
+            _run_debug_cell(),
         ],
     }
 
@@ -263,12 +259,7 @@ def _write_source_cell(archive_b64: str) -> dict:
     )
 
 
-def _run_debug_cell(
-    *,
-    config_relative_path: str,
-    model_dataset_slug: str,
-) -> dict:
-    config_model_path = f"/kaggle/input/{model_dataset_slug}"
+def _run_debug_cell() -> dict:
     return code_cell(
         dedent(
             f"""\
@@ -283,12 +274,12 @@ def _run_debug_cell(
             from pathlib import Path
 
             project_dir = Path({PROJECT_DIR!r})
-            config_path = project_dir / {config_relative_path!r}
+            config_path = project_dir / {CONFIG_RELATIVE_PATH!r}
             database_path = Path({DATABASE_PATH!r})
             database_path.parent.mkdir(parents=True, exist_ok=True)
             __KAGGLE_INPUT_HELPERS__
             public_games_input = kaggle_dataset_input({PUBLIC_GAMES_DATASET_SLUG!r})
-            model_input = kaggle_dataset_input({model_dataset_slug!r})
+            model_input = kaggle_dataset_input({MODEL_DATASET_SLUG!r})
             public_game_catalog_path = public_games_input / "local_games.json"
             public_environments_dir = public_games_input / "environment_files"
             if not public_environments_dir.exists():
@@ -325,7 +316,7 @@ def _run_debug_cell(
                     str(public_environments_dir),
                 )
                 .replace({CONFIG_PUBLIC_GAMES_PATH!r}, str(public_games_input))
-                .replace({config_model_path!r}, str(model_input))
+                .replace({CONFIG_MODEL_PATH!r}, str(model_input))
             )
             runtime_config_path = Path("/kaggle/working/runtime_config.yaml")
             runtime_config_path.write_text(config_text, encoding="utf-8")
@@ -334,8 +325,6 @@ def _run_debug_cell(
                 "RECORDINGS_DIR": "/kaggle/working/recordings",
                 "MPLBACKEND": "agg",
                 "VLLM_API_KEY": "EMPTY",
-                "VLLM_DISABLE_LOG_LOGO": "1",
-                "VLLM_LOGGING_LEVEL": "ERROR",
             }})
             source_dir = str(project_dir / "src")
             existing_pythonpath = os.environ.get("PYTHONPATH")
@@ -536,101 +525,31 @@ def _git_output(*args: str) -> str:
     return result.stdout.strip()
 
 
-def _current_debug_kernel_identity(
-    owner: str,
-    *,
-    kernel_title_suffix: str = "",
-) -> tuple[str, str]:
-    branch_name = _current_branch_name()
+def _current_debug_kernel_identity(owner: str) -> tuple[str, str]:
+    branch_name = _git_output("branch", "--show-current")
+    if not branch_name:
+        raise SystemExit("debug notebook kernel id requires a named git branch")
     commit_id = _git_output(
         "rev-parse",
         f"--short={DEBUG_KERNEL_COMMIT_LENGTH}",
         "HEAD",
     )
-    return _debug_kernel_identity(
-        owner,
-        branch_name,
-        commit_id,
-        kernel_title_suffix=kernel_title_suffix,
-    )
+    return _debug_kernel_identity(owner, branch_name, commit_id)
 
 
 def _debug_kernel_identity(
     owner: str,
     branch_name: str,
     commit_id: str,
-    *,
-    kernel_title_suffix: str = "",
 ) -> tuple[str, str]:
     owner = owner.strip()
     if not owner:
         raise SystemExit("debug notebook kernel metadata id is missing an owner")
     branch_slug = _metadata_slug(branch_name)
     commit_slug = _metadata_slug(commit_id)
-    suffix_slug = (
-        _metadata_slug(kernel_title_suffix) if kernel_title_suffix.strip() else ""
-    )
-    branch_slug = _debug_kernel_branch_slug(
-        branch_slug,
-        commit_slug,
-        kernel_title_suffix=suffix_slug,
-    )
-    title_parts = [DEBUG_KERNEL_TITLE_PREFIX]
-    if suffix_slug:
-        title_parts.append(suffix_slug)
-    title_parts.extend((branch_slug, commit_slug))
-    title = " ".join(title_parts)
+    title = f"{DEBUG_KERNEL_TITLE_PREFIX} {branch_slug} {commit_slug}"
     kernel_slug = _metadata_slug(title)
     return f"{owner}/{kernel_slug}", title
-
-
-def _current_branch_name() -> str:
-    branch_name = _git_output("branch", "--show-current")
-    if branch_name:
-        return branch_name
-
-    refs = _git_output(
-        "for-each-ref",
-        "--format=%(refname:short)",
-        "--points-at",
-        "HEAD",
-        "refs/heads",
-        "refs/remotes/origin",
-    ).splitlines()
-    for ref in refs:
-        if ref and not ref.startswith("origin/"):
-            return ref
-    for ref in refs:
-        if ref.startswith("origin/") and ref != "origin/HEAD":
-            return ref.removeprefix("origin/")
-
-    raise SystemExit("debug notebook kernel id requires a named git branch")
-
-
-def _debug_kernel_branch_slug(
-    branch_slug: str,
-    commit_slug: str,
-    *,
-    kernel_title_suffix: str = "",
-) -> str:
-    fixed_parts = [DEBUG_KERNEL_TITLE_PREFIX]
-    if kernel_title_suffix:
-        fixed_parts.append(kernel_title_suffix)
-    fixed_parts.append(commit_slug)
-    max_branch_length = (
-        DEBUG_KERNEL_TITLE_MAX_LENGTH
-        - sum(len(part) for part in fixed_parts)
-        - len(fixed_parts)
-    )
-    if max_branch_length < 1:
-        raise SystemExit("debug notebook kernel title prefix is too long")
-    if len(branch_slug) <= max_branch_length:
-        return branch_slug
-
-    shortened_slug = branch_slug[:max_branch_length].strip("-")
-    if not shortened_slug:
-        raise SystemExit(f"cannot shorten debug kernel branch slug {branch_slug!r}")
-    return shortened_slug
 
 
 def _metadata_slug(value: str) -> str:
@@ -650,91 +569,42 @@ def _metadata_owner(metadata: dict) -> str:
     return owner
 
 
-def _dataset_source_slugs(model_dataset_slug: str) -> tuple[str, str, str]:
-    return (
-        WHEELHOUSE_DATASET_SLUG,
-        PUBLIC_GAMES_DATASET_SLUG,
-        model_dataset_slug,
-    )
-
-
-def _sync_metadata(
-    *,
-    model_dataset_slug: str = DEFAULT_MODEL_DATASET_SLUG,
-    kernel_title_suffix: str = "",
-) -> dict:
+def _sync_metadata() -> dict:
     if not METADATA_TEMPLATE_PATH.exists():
         raise SystemExit(
             f"missing Kaggle debug kernel metadata template: {METADATA_TEMPLATE_PATH}"
         )
 
     meta = json.loads(METADATA_TEMPLATE_PATH.read_text(encoding="utf-8"))
-    meta["id"], meta["title"] = _current_debug_kernel_identity(
-        kaggle_owner(),
-        kernel_title_suffix=kernel_title_suffix,
-    )
+    meta["id"], meta["title"] = _current_debug_kernel_identity(kaggle_owner())
     meta["enable_gpu"] = _ACCELERATORS[ACCELERATOR]["gpu"]
     meta["enable_internet"] = False
-    meta["dataset_sources"] = kaggle_dataset_sources(
-        _dataset_source_slugs(model_dataset_slug)
-    )
+    meta["dataset_sources"] = kaggle_dataset_sources(DATASET_SOURCE_SLUGS)
     meta["model_sources"] = []
     METADATA_PATH.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
     return meta
 
 
-def _parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Build the ARC Prize 2026 Kaggle RTX 6000 debug notebook.",
-    )
-    parser.add_argument("--metadata-only", action="store_true")
-    parser.add_argument("--config-relative-path", default=DEFAULT_CONFIG_RELATIVE_PATH)
-    parser.add_argument("--model-dataset-slug", default=DEFAULT_MODEL_DATASET_SLUG)
-    parser.add_argument("--kernel-title-suffix", default="")
-    return parser.parse_args(argv)
-
-
-def main(argv: list[str] | None = None) -> None:
-    args = _parse_args(sys.argv[1:] if argv is None else argv)
-    if args.metadata_only:
-        meta = _sync_metadata(
-            model_dataset_slug=args.model_dataset_slug,
-            kernel_title_suffix=args.kernel_title_suffix,
-        )
+def main() -> None:
+    if len(sys.argv) == 2 and sys.argv[1] == "--metadata-only":
+        meta = _sync_metadata()
         print(
             "[build_debug_notebook] Synced "
-            f"{_display_path(METADATA_PATH)} as {meta['id']}"
+            f"{METADATA_PATH.relative_to(ROOT)} as {meta['id']}"
         )
         return
+    if len(sys.argv) != 1:
+        raise SystemExit("usage: build_debug_notebook.py [--metadata-only]")
 
     NOTEBOOK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    NOTEBOOK_PATH.write_text(
-        json.dumps(
-            build(
-                config_relative_path=args.config_relative_path,
-                model_dataset_slug=args.model_dataset_slug,
-            ),
-            indent=1,
-        ),
-        encoding="utf-8",
-    )
-    print(f"[build_debug_notebook] Wrote {_display_path(NOTEBOOK_PATH)}")
+    NOTEBOOK_PATH.write_text(json.dumps(build(), indent=1), encoding="utf-8")
+    print(f"[build_debug_notebook] Wrote {NOTEBOOK_PATH.relative_to(ROOT)}")
 
-    meta = _sync_metadata(
-        model_dataset_slug=args.model_dataset_slug,
-        kernel_title_suffix=args.kernel_title_suffix,
-    )
+    meta = _sync_metadata()
     print(
         "[build_debug_notebook] Synced "
-        f"{_display_path(METADATA_PATH)} as {meta['id']}"
+        f"{METADATA_PATH.relative_to(ROOT)} as {meta['id']}"
     )
-
-
-def _display_path(path: Path) -> str:
-    try:
-        return str(path.relative_to(ROOT))
-    except ValueError:
-        return str(path)
 
 
 if __name__ == "__main__":

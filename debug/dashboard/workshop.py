@@ -172,8 +172,6 @@ def default_result_dir_for_test(
 
 
 def _command_prefix(script_name: str) -> list[str]:
-    if script_name.startswith("vllm_"):
-        return ["uv", "run", "--group", "dev"]
     if script_name.startswith("openai_"):
         return [
             "uv",

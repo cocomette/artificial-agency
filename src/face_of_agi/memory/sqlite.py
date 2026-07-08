@@ -10,9 +10,9 @@ from typing import Any
 from face_of_agi.contracts import (
     ContextDocuments,
     EExperimentRecord,
+    CompacterLevelSummaryRecord,
     MStateRecord,
     ObservationRef,
-    RunMetadataRecord,
     TurnMetrics,
     RoleContext,
 )
@@ -65,11 +65,14 @@ _CURRENT_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
         "metadata_json",
         "created_at",
     ),
-    "run_metadata": (
+    "compacter_level_summaries": (
         "id",
-        "game_id",
         "run_id",
-        "kind",
+        "game_id",
+        "completed_level",
+        "source_state_ids_json",
+        "previous_actions_summary",
+        "previous_strategy_summary",
         "metadata_json",
         "created_at",
     ),
@@ -146,83 +149,20 @@ class SQLiteDatabase:
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
 
-                CREATE TABLE IF NOT EXISTS run_metadata (
+                CREATE TABLE IF NOT EXISTS compacter_level_summaries (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    game_id TEXT NOT NULL,
                     run_id TEXT NOT NULL,
-                    kind TEXT NOT NULL,
+                    game_id TEXT NOT NULL,
+                    completed_level INTEGER NOT NULL,
+                    source_state_ids_json TEXT NOT NULL,
+                    previous_actions_summary TEXT NOT NULL,
+                    previous_strategy_summary TEXT NOT NULL,
                     metadata_json TEXT NOT NULL,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
                 """
             )
             self._require_current_schema(connection)
-
-    def write_run_metadata(
-        self,
-        *,
-        game_id: str,
-        run_id: str,
-        kind: str,
-        metadata: dict[str, Any] | None = None,
-    ) -> RunMetadataRecord:
-        """Write one run-level metadata row."""
-
-        with self.connect() as connection:
-            cursor = connection.execute(
-                """
-                INSERT INTO run_metadata (
-                    game_id,
-                    run_id,
-                    kind,
-                    metadata_json
-                )
-                VALUES (?, ?, ?, ?)
-                """,
-                (
-                    game_id,
-                    run_id,
-                    kind,
-                    _to_json(metadata or {}),
-                ),
-            )
-            record_id = int(cursor.lastrowid)
-            row = connection.execute(
-                "SELECT * FROM run_metadata WHERE id = ?",
-                (record_id,),
-            ).fetchone()
-
-        return self._row_to_run_metadata(row)
-
-    def list_run_metadata(
-        self,
-        *,
-        run_id: str | None = None,
-        game_id: str | None = None,
-        kind: str | None = None,
-    ) -> list[RunMetadataRecord]:
-        """List run-level metadata rows, optionally filtered."""
-
-        clauses: list[str] = []
-        values: list[str] = []
-        if run_id is not None:
-            clauses.append("run_id = ?")
-            values.append(run_id)
-        if game_id is not None:
-            clauses.append("game_id = ?")
-            values.append(game_id)
-        if kind is not None:
-            clauses.append("kind = ?")
-            values.append(kind)
-
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        with self.connect() as connection:
-            rows = connection.execute(
-                f"SELECT * FROM run_metadata {where} ORDER BY id",
-                values,
-            ).fetchall()
-
-        return [self._row_to_run_metadata(row) for row in rows]
 
     def write_m_state(
         self,
@@ -449,6 +389,48 @@ class SQLiteDatabase:
 
         return self._row_to_m_state(row)
 
+    def merge_m_state_metadata(
+        self,
+        *,
+        state_id: int,
+        metadata: dict[str, Any],
+    ) -> MStateRecord:
+        """Merge additional metadata into an existing M state row."""
+
+        with self.connect() as connection:
+            source_row = connection.execute(
+                "SELECT metadata_json FROM m_states WHERE id = ?",
+                (state_id,),
+            ).fetchone()
+            if source_row is None:
+                raise RuntimeError(f"unknown M state row: {state_id}")
+
+            current_metadata = from_memory_jsonable(
+                json.loads(str(source_row["metadata_json"]))
+            )
+            if not isinstance(current_metadata, dict):
+                raise RuntimeError(
+                    f"M state row metadata is not an object: {state_id}"
+                )
+            merged_metadata = {**current_metadata, **metadata}
+            connection.execute(
+                """
+                UPDATE m_states
+                SET metadata_json = ?
+                WHERE id = ?
+                """,
+                (
+                    _to_json(merged_metadata),
+                    state_id,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM m_states WHERE id = ?",
+                (state_id,),
+            ).fetchone()
+
+        return self._row_to_m_state(row)
+
     def list_m_states(self, *, game_id: str | None = None) -> list[MStateRecord]:
         """List M state rows, optionally scoped to one game."""
 
@@ -509,7 +491,7 @@ class SQLiteDatabase:
             return None
         return self._row_to_m_state(row)
 
-    def read_recent_agent_game_contexts_before(
+    def read_recent_agent_context_history_before(
         self,
         *,
         game_id: str,
@@ -517,14 +499,14 @@ class SQLiteDatabase:
         state_id: int,
         limit: int,
     ) -> tuple[str, ...]:
-        """Return recent same-run complete agent game contexts before a state id."""
+        """Return recent same-run agent context snapshots before a state id."""
 
         if limit <= 0:
             return ()
         with self.connect() as connection:
             rows = connection.execute(
                 """
-                SELECT agent_context_json
+                SELECT metadata_json
                 FROM m_states
                 WHERE game_id = ?
                   AND run_id = ?
@@ -532,15 +514,172 @@ class SQLiteDatabase:
                   AND chosen_action_json IS NOT NULL
                   AND agent_trace_json IS NOT NULL
                 ORDER BY id DESC
-                LIMIT ?
                 """,
-                (game_id, run_id, state_id, limit),
+                (game_id, run_id, state_id),
             ).fetchall()
 
-        return tuple(
-            _role_context_from_json(row["agent_context_json"]).game
-            for row in rows
-        )
+        snapshots: list[str] = []
+        for row in rows:
+            snapshot = _metadata_snapshot_text(
+                row["metadata_json"],
+                key="agent_context_history",
+                required_fields=("current_strategy",),
+            )
+            if snapshot is not None:
+                snapshots.append(snapshot)
+            if len(snapshots) == limit:
+                break
+        return tuple(snapshots)
+
+    def read_agent_strategy_history_between(
+        self,
+        *,
+        game_id: str,
+        run_id: str,
+        after_state_id: int | None,
+        through_state_id: int,
+    ) -> tuple[str, ...]:
+        """Return same-run strategy snapshots in an M-state id interval."""
+
+        clauses = [
+            "game_id = ?",
+            "run_id = ?",
+            "id <= ?",
+            "chosen_action_json IS NOT NULL",
+            "agent_trace_json IS NOT NULL",
+        ]
+        values: list[Any] = [game_id, run_id, through_state_id]
+        if after_state_id is not None:
+            clauses.append("id > ?")
+            values.append(after_state_id)
+        where = " AND ".join(clauses)
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"SELECT metadata_json FROM m_states WHERE {where} ORDER BY id",
+                values,
+            ).fetchall()
+
+        snapshots: list[str] = []
+        for row in rows:
+            snapshot = _metadata_snapshot_text(
+                row["metadata_json"],
+                key="agent_context_history",
+                required_fields=("current_strategy",),
+            )
+            if snapshot is not None:
+                snapshots.append(snapshot)
+        return tuple(snapshots)
+
+    def write_compacter_level_summary(
+        self,
+        *,
+        run_id: str,
+        game_id: str,
+        completed_level: int,
+        source_state_ids: tuple[int, ...],
+        previous_actions_summary: str,
+        previous_strategy_summary: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> CompacterLevelSummaryRecord:
+        """Write one completed-level compacter summary."""
+
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO compacter_level_summaries (
+                    run_id,
+                    game_id,
+                    completed_level,
+                    source_state_ids_json,
+                    previous_actions_summary,
+                    previous_strategy_summary,
+                    metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    game_id,
+                    completed_level,
+                    _to_json(source_state_ids),
+                    previous_actions_summary,
+                    previous_strategy_summary,
+                    _to_json(metadata or {}),
+                ),
+            )
+            record_id = int(cursor.lastrowid)
+            row = connection.execute(
+                "SELECT * FROM compacter_level_summaries WHERE id = ?",
+                (record_id,),
+            ).fetchone()
+        return self._row_to_compacter_level_summary(row)
+
+    def read_latest_compacter_level_summary(
+        self,
+        *,
+        run_id: str | None = None,
+        game_id: str,
+    ) -> CompacterLevelSummaryRecord | None:
+        """Return the latest compacter level summary for one game."""
+
+        clauses = ["game_id = ?"]
+        values: list[Any] = [game_id]
+        if run_id is not None:
+            clauses.append("run_id = ?")
+            values.append(run_id)
+        where = " AND ".join(clauses)
+        with self.connect() as connection:
+            row = connection.execute(
+                f"""
+                SELECT *
+                FROM compacter_level_summaries
+                WHERE {where}
+                ORDER BY completed_level DESC, id DESC
+                LIMIT 1
+                """,
+                values,
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_compacter_level_summary(row)
+
+    def read_compacter_context_before(
+        self,
+        *,
+        game_id: str,
+        state_id: int,
+    ) -> str:
+        """Return the newest compacter context before a state id."""
+
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT metadata_json
+                FROM m_states
+                WHERE game_id = ?
+                  AND id < ?
+                  AND chosen_action_json IS NOT NULL
+                  AND agent_trace_json IS NOT NULL
+                ORDER BY id DESC
+                """,
+                (game_id, state_id),
+            ).fetchall()
+
+        for row in rows:
+            snapshot = _metadata_snapshot_text(
+                row["metadata_json"],
+                key="compacter_context",
+                required_fields=(
+                    "world_description",
+                    "special_events",
+                    "action_effects",
+                    "previous_actions_summary",
+                    "previous_strategy_summary",
+                ),
+            )
+            if snapshot is not None:
+                return snapshot
+        return ""
 
     def cleanup_m_states_keep_latest_per_game(self) -> None:
         """Keep only the newest M state row for each game."""
@@ -824,19 +963,9 @@ class SQLiteDatabase:
                 DELETE FROM model_input_debug_records;
                 DELETE FROM m_states;
                 DELETE FROM e_experiments;
-                DELETE FROM run_metadata;
+                DELETE FROM compacter_level_summaries;
                 """
             )
-
-    def _row_to_run_metadata(self, row: sqlite3.Row) -> RunMetadataRecord:
-        return RunMetadataRecord(
-            id=int(row["id"]),
-            game_id=str(row["game_id"]),
-            run_id=str(row["run_id"]),
-            kind=str(row["kind"]),
-            metadata=from_memory_jsonable(json.loads(str(row["metadata_json"]))),
-            created_at=str(row["created_at"]),
-        )
 
     def _row_to_m_state(self, row: sqlite3.Row) -> MStateRecord:
         return MStateRecord(
@@ -893,6 +1022,29 @@ class SQLiteDatabase:
             attempt=int(row["attempt"]),
             request=from_memory_jsonable(json.loads(str(row["request_json"]))),
             usage=_from_nullable_json(row["usage_json"]),
+            metadata=from_memory_jsonable(json.loads(str(row["metadata_json"]))),
+            created_at=str(row["created_at"]),
+        )
+
+    def _row_to_compacter_level_summary(
+        self,
+        row: sqlite3.Row,
+    ) -> CompacterLevelSummaryRecord:
+        raw_source_ids = from_memory_jsonable(
+            json.loads(str(row["source_state_ids_json"]))
+        )
+        if not isinstance(raw_source_ids, list):
+            raise RuntimeError(
+                "stored compacter level summary source ids must be a JSON list"
+            )
+        return CompacterLevelSummaryRecord(
+            id=int(row["id"]),
+            run_id=str(row["run_id"]),
+            game_id=str(row["game_id"]),
+            completed_level=int(row["completed_level"]),
+            source_state_ids=tuple(int(item) for item in raw_source_ids),
+            previous_actions_summary=str(row["previous_actions_summary"]),
+            previous_strategy_summary=str(row["previous_strategy_summary"]),
             metadata=from_memory_jsonable(json.loads(str(row["metadata_json"]))),
             created_at=str(row["created_at"]),
         )
@@ -962,6 +1114,34 @@ def _from_nullable_json(value: Any) -> dict[str, Any] | None:
     if value is None:
         return None
     return from_memory_jsonable(json.loads(str(value)))
+
+
+def _metadata_snapshot_text(
+    raw_metadata: Any,
+    *,
+    key: str,
+    required_fields: tuple[str, ...],
+) -> str | None:
+    """Return one structured metadata snapshot as stable prompt JSON."""
+
+    metadata = from_memory_jsonable(json.loads(str(raw_metadata)))
+    if not isinstance(metadata, dict):
+        raise RuntimeError("M state metadata must be a JSON object")
+    snapshot = metadata.get(key)
+    if snapshot is None:
+        return None
+    if not isinstance(snapshot, dict):
+        raise RuntimeError(f"M state metadata {key} must be a JSON object")
+    missing = [field for field in required_fields if field not in snapshot]
+    if missing:
+        raise RuntimeError(
+            f"M state metadata {key} is missing fields: " + ", ".join(missing)
+        )
+    return json.dumps(
+        {field: snapshot[field] for field in required_fields},
+        indent=2,
+        ensure_ascii=False,
+    )
 
 
 def _role_context_from_json(value: Any) -> RoleContext:
