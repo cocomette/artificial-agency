@@ -1,4 +1,4 @@
-# H100 full game-loop run: Agent X, transition change summaries, and
+# Modal H100 full game-loop run: Agent X, transition change summaries, and
 # active P updater slots share one vLLM-served Qwen3.6 FP8 model.
 game_index: 3
 operation_mode: offline

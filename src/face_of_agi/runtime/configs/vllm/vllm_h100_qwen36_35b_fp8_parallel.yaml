@@ -1,4 +1,4 @@
-# H100 parallel game-loop run: selected games run concurrently against
+# Modal H100 parallel game-loop run: selected games run concurrently against
 # one vLLM-served Qwen3.6 FP8 model. Keep vLLM server concurrency enabled;
 # do not add server args that force a single sequence, such as --max-num-seqs 1.
 operation_mode: offline

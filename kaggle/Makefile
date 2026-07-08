@@ -12,27 +12,41 @@ KAGGLE := KAGGLE_API_TOKEN=$$(cat "$(KAGGLE_TOKEN)") $(KAGGLE_CLI)
 KAGGLE_ACCELERATOR ?= NvidiaRtxPro6000
 KAGGLE_ACCELERATOR_ARGS := $(if $(strip $(KAGGLE_ACCELERATOR)),--accelerator $(KAGGLE_ACCELERATOR),)
 PUBLIC_GAMES_PYTHON ?= uv run --no-dev python
+MODAL_CLI ?= uv run --with modal modal
+MODAL_KAGGLE_SECRET ?= kaggle-api-token
 KAGGLE_SUBMISSION_CONFIG ?= src/face_of_agi/runtime/configs/vllm/vllm_rtx6000_qwen36_35b_fp8_parallel.yaml
 KAGGLE_SUBMISSION_MODEL_DATASET_SLUG ?= face-of-agi-qwen36-35b-fp8-weights
 KAGGLE_SUBMISSION_KERNEL_ID ?= $(FACE_OF_AGI_KAGGLE_OWNER)/face-of-agi-arc-agi-3-rtx6000
 KAGGLE_SUBMISSION_KERNEL_TITLE ?= FACE-OF-AGI ARC-AGI-3 RTX6000
+GEMMA_SUBMISSION_CONFIG ?= src/face_of_agi/runtime/configs/vllm/vllm_rtx6000_gemma4_parallel.yaml
+GEMMA_SUBMISSION_MODEL_DATASET_SLUG ?= face-of-agi-gemma4-31b-it-qat-w4a16-ct-weights
+GEMMA_SUBMISSION_KERNEL_ID ?= $(FACE_OF_AGI_KAGGLE_OWNER)/face-of-agi-arc-agi-3-rtx6000-gemma4
+GEMMA_SUBMISSION_KERNEL_TITLE ?= FACE-OF-AGI ARC-AGI-3 RTX6000 Gemma4
 KAGGLE_DEBUG_CONFIG ?= src/face_of_agi/runtime/configs/vllm/vllm_rtx6000_qwen36_35b_fp8_debug.yaml
 KAGGLE_DEBUG_MODEL_DATASET_SLUG ?= face-of-agi-qwen36-35b-fp8-weights
 DEBUG_KERNEL_TITLE_SUFFIX ?=
 DEBUG_KERNEL_TITLE_SUFFIX_ARG := $(if $(strip $(DEBUG_KERNEL_TITLE_SUFFIX)),--kernel-title-suffix "$(DEBUG_KERNEL_TITLE_SUFFIX)",)
+MODAL_MODEL_UPLOAD_REPO_ID ?= Qwen/Qwen3.6-35B-A3B-FP8
+MODAL_MODEL_UPLOAD_REVISION ?= main
+MODAL_MODEL_UPLOAD_SNAPSHOT_PATH ?=
+MODAL_MODEL_UPLOAD_SNAPSHOT_ARG := $(if $(strip $(MODAL_MODEL_UPLOAD_SNAPSHOT_PATH)),--snapshot-path $(MODAL_MODEL_UPLOAD_SNAPSHOT_PATH),)
+MODEL_DATASET_METADATA := upload/model-dataset/dataset-metadata.json
 
 WHEELHOUSE_DIR := build/wheelhouse
 WHEEL_PLATFORMS ?= manylinux_2_31_x86_64 manylinux_2_28_x86_64 manylinux_2_24_x86_64 manylinux2014_x86_64
 WHEEL_PLATFORM_ARGS := $(foreach platform,$(WHEEL_PLATFORMS),--platform $(platform))
 WHEEL_PYTHON_VERSION ?= 312
 WHEEL_ABI ?= cp312
+MODEL_BUILD_DIR := build/model/default
+MODEL_SOURCE_DIR ?=
+MODEL_REF ?= $(FACE_OF_AGI_KAGGLE_OWNER)/face-of-agi-qwen36-35b-fp8/pytorch/default
 PUBLIC_GAMES_DIR := build/public-games
 DEBUG_OUTPUT_DIR := $(ROOT)/runs/kaggle-debug
 UPLOAD_MODE ?= create
 VERSION_NOTES ?= FACE-OF-AGI Kaggle submission artifact update
 DEBUG_KERNEL ?=
 
-.PHONY: sync-metadata wheelhouse wheelhouse-upload public-games public-games-upload notebook submit status debug-metadata debug-notebook debug-submit debug-status debug-pull clean _check-kaggle
+.PHONY: sync-metadata wheelhouse wheelhouse-upload model-upload modal-kaggle-secret modal-model-upload modal-model-upload-dry-run modal-model-finalize modal-model-dataset-upload modal-model-dataset-upload-dry-run model-bootstrap-notebook model-bootstrap-submit model-bootstrap-submit-with-token model-bootstrap-status public-games public-games-upload notebook submit status gemma-notebook gemma-submit gemma-status debug-metadata debug-notebook debug-submit debug-status debug-pull clean _check-kaggle
 
 sync-metadata:
 	$(PYTHON) scripts/sync_kaggle_metadata.py
@@ -71,6 +85,93 @@ wheelhouse-upload: _check-kaggle wheelhouse
 		exit 1; \
 	fi
 
+model-upload: sync-metadata _check-kaggle
+	@if [ "$(UPLOAD_MODE)" = "create-model" ]; then \
+		$(KAGGLE) models create -p upload/model; \
+		exit 0; \
+	fi
+	@if [ -z "$(MODEL_SOURCE_DIR)" ]; then \
+		echo "ERROR: set MODEL_SOURCE_DIR to the local Hugging Face model directory."; \
+		exit 1; \
+	fi
+	rm -rf $(MODEL_BUILD_DIR)
+	mkdir -p $(MODEL_BUILD_DIR)
+	cp -R $(MODEL_SOURCE_DIR)/. $(MODEL_BUILD_DIR)/
+	cp upload/model/model-instance-metadata.json $(MODEL_BUILD_DIR)/model-instance-metadata.json
+	@if [ "$(UPLOAD_MODE)" = "create" ]; then \
+		$(KAGGLE) models variations create -p $(MODEL_BUILD_DIR) -q; \
+	elif [ "$(UPLOAD_MODE)" = "version" ]; then \
+		$(KAGGLE) models variations versions create $(MODEL_REF) -p $(MODEL_BUILD_DIR) -n "$(VERSION_NOTES)"; \
+	else \
+		echo "ERROR: UPLOAD_MODE must be create-model, create, or version"; \
+		exit 1; \
+	fi
+
+modal-kaggle-secret: _check-kaggle
+	@tmp=$$(mktemp); \
+	trap 'rm -f "$$tmp"' EXIT; \
+	$(PYTHON) -c 'import json, pathlib, sys; token = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").strip(); pathlib.Path(sys.argv[2]).write_text(json.dumps({"KAGGLE_API_TOKEN": token}), encoding="utf-8")' "$(KAGGLE_TOKEN)" "$$tmp"; \
+	$(MODAL_CLI) secret create --force "$(MODAL_KAGGLE_SECRET)" --from-json "$$tmp"
+
+modal-model-upload: sync-metadata
+	FACE_OF_AGI_MODAL_KAGGLE_SECRET="$(MODAL_KAGGLE_SECRET)" $(MODAL_CLI) run scripts/upload_modal_model_to_kaggle.py \
+		--repo-id "$(MODAL_MODEL_UPLOAD_REPO_ID)" \
+		--revision "$(MODAL_MODEL_UPLOAD_REVISION)" \
+		--upload-mode "$(UPLOAD_MODE)" \
+		--version-notes "$(VERSION_NOTES)" \
+		$(MODAL_MODEL_UPLOAD_SNAPSHOT_ARG)
+
+modal-model-upload-dry-run: sync-metadata
+	FACE_OF_AGI_MODAL_KAGGLE_SECRET="$(MODAL_KAGGLE_SECRET)" $(MODAL_CLI) run scripts/upload_modal_model_to_kaggle.py \
+		--repo-id "$(MODAL_MODEL_UPLOAD_REPO_ID)" \
+		--revision "$(MODAL_MODEL_UPLOAD_REVISION)" \
+		--upload-mode "$(UPLOAD_MODE)" \
+		--version-notes "$(VERSION_NOTES)" \
+		$(MODAL_MODEL_UPLOAD_SNAPSHOT_ARG) \
+		--dry-run
+
+modal-model-finalize: sync-metadata
+	FACE_OF_AGI_MODAL_KAGGLE_SECRET="$(MODAL_KAGGLE_SECRET)" $(MODAL_CLI) run scripts/upload_modal_model_to_kaggle.py \
+		--repo-id "$(MODAL_MODEL_UPLOAD_REPO_ID)" \
+		--revision "$(MODAL_MODEL_UPLOAD_REVISION)" \
+		--upload-mode finalize \
+		$(MODAL_MODEL_UPLOAD_SNAPSHOT_ARG)
+
+modal-model-dataset-upload: sync-metadata
+	FACE_OF_AGI_MODAL_KAGGLE_SECRET="$(MODAL_KAGGLE_SECRET)" $(MODAL_CLI) run scripts/upload_modal_model_to_kaggle.py \
+		--artifact-kind dataset \
+		--metadata-path "$(MODEL_DATASET_METADATA)" \
+		--repo-id "$(MODAL_MODEL_UPLOAD_REPO_ID)" \
+		--revision "$(MODAL_MODEL_UPLOAD_REVISION)" \
+		--upload-mode "$(UPLOAD_MODE)" \
+		--version-notes "$(VERSION_NOTES)" \
+		$(MODAL_MODEL_UPLOAD_SNAPSHOT_ARG)
+
+modal-model-dataset-upload-dry-run: sync-metadata
+	FACE_OF_AGI_MODAL_KAGGLE_SECRET="$(MODAL_KAGGLE_SECRET)" $(MODAL_CLI) run scripts/upload_modal_model_to_kaggle.py \
+		--artifact-kind dataset \
+		--metadata-path "$(MODEL_DATASET_METADATA)" \
+		--repo-id "$(MODAL_MODEL_UPLOAD_REPO_ID)" \
+		--revision "$(MODAL_MODEL_UPLOAD_REVISION)" \
+		--upload-mode "$(UPLOAD_MODE)" \
+		--version-notes "$(VERSION_NOTES)" \
+		$(MODAL_MODEL_UPLOAD_SNAPSHOT_ARG) \
+		--dry-run
+
+model-bootstrap-notebook: sync-metadata
+	$(PYTHON) scripts/build_model_bootstrap_notebook.py
+
+model-bootstrap-submit: model-bootstrap-notebook _check-kaggle
+	$(KAGGLE) kernels push -p model-bootstrap/
+
+model-bootstrap-submit-with-token: sync-metadata _check-kaggle
+	MODEL_BOOTSTRAP_EMBED_KAGGLE_TOKEN=true $(PYTHON) scripts/build_model_bootstrap_notebook.py
+	$(KAGGLE) kernels push -p model-bootstrap/
+
+model-bootstrap-status: sync-metadata _check-kaggle
+	@KERNEL_ID=$$($(PYTHON) -c "import json; print(json.load(open('model-bootstrap/kernel-metadata.json'))['id'])"); \
+	$(KAGGLE) kernels status $$KERNEL_ID
+
 public-games: sync-metadata
 	$(PUBLIC_GAMES_PYTHON) scripts/prepare_public_games.py
 
@@ -98,6 +199,19 @@ status: sync-metadata _check-kaggle
 	@KERNEL_ID=$$($(PYTHON) -c "import json; print(json.load(open('notebooks/kernel-metadata.json'))['id'])"); \
 	$(KAGGLE) kernels status $$KERNEL_ID
 
+gemma-notebook:
+	$(MAKE) notebook \
+		KAGGLE_SUBMISSION_CONFIG="$(GEMMA_SUBMISSION_CONFIG)" \
+		KAGGLE_SUBMISSION_MODEL_DATASET_SLUG="$(GEMMA_SUBMISSION_MODEL_DATASET_SLUG)" \
+		KAGGLE_SUBMISSION_KERNEL_ID="$(GEMMA_SUBMISSION_KERNEL_ID)" \
+		KAGGLE_SUBMISSION_KERNEL_TITLE="$(GEMMA_SUBMISSION_KERNEL_TITLE)"
+
+gemma-submit: gemma-notebook _check-kaggle
+	$(KAGGLE) kernels push -p notebooks/ $(KAGGLE_ACCELERATOR_ARGS)
+
+gemma-status: _check-kaggle
+	$(KAGGLE) kernels status "$(GEMMA_SUBMISSION_KERNEL_ID)"
+
 debug-metadata: sync-metadata
 	$(PYTHON) scripts/build_debug_notebook.py \
 		--config-relative-path "$(KAGGLE_DEBUG_CONFIG)" \
@@ -124,4 +238,4 @@ debug-pull: debug-metadata _check-kaggle
 	$(KAGGLE) kernels output $$KERNEL_ID -p $(DEBUG_OUTPUT_DIR) -o --file-pattern '.*\.sqlite$$'
 
 clean:
-	rm -rf build notebooks/submission.ipynb debug-notebooks/debug.ipynb debug-notebooks/kernel-metadata.json __pycache__ scripts/__pycache__
+	rm -rf build notebooks/submission.ipynb debug-notebooks/debug.ipynb debug-notebooks/kernel-metadata.json model-bootstrap/model_bootstrap.ipynb __pycache__ scripts/__pycache__

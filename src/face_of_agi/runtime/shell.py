@@ -693,11 +693,11 @@ def _with_shared_vlm_updater_config(
 def _shared_vllm_runtime_options(config: ModelRoleConfig) -> dict[str, Any]:
     """Return shared vLLM behavior options without changing role prompts."""
 
-    server_keys = {"server", "server_args"}
+    modal_server_keys = {"server", "server_args"}
     options = {
         key: value
         for key, value in config.options.items()
-        if key not in server_keys
+        if key not in modal_server_keys
     }
     server_options = config.options.get("server")
     if (

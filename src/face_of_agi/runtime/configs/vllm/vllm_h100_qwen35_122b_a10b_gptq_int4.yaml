@@ -1,4 +1,4 @@
-# H100 full game-loop run: X, S, and active P updater slots share one
+# Modal H100 full game-loop run: X, S, and active P updater slots share one
 # vLLM-served Qwen3.5 122B-A10B GPTQ Int4 model.
 #
 # This variant caps context size aggressively so the 122B GPTQ model has enough

@@ -48,21 +48,9 @@ def render_scoring(database_folder: str) -> None:
     """Render per-game, per-level scoring against human baseline stats."""
 
     cursor_minutes = _render_time_cursor()
-    baseline_stats: dict[str, Any] = {}
-    if BASELINE_STATS_PATH.exists():
-        try:
-            baseline_stats = _load_baseline_stats(str(BASELINE_STATS_PATH))
-        except Exception as exc:
-            st.error(str(exc))
-            return
-    else:
-        st.warning(
-            "Human baseline stats are not included in this public source tree. "
-            "Generate them from a licensed local source with "
-            "`debug/scoring/build_human_baseline_stats.py` to enable scoring."
-        )
 
     try:
+        baseline_stats = _load_baseline_stats(str(BASELINE_STATS_PATH))
         memory_scores, warnings = _load_memory_scores(database_folder, cursor_minutes)
     except Exception as exc:
         st.error(str(exc))

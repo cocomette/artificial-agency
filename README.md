@@ -41,10 +41,9 @@ Create or refresh the local game catalog before using `game_index`:
 uv run --no-dev python -m face_of_agi.runtime.shell --list-games
 ```
 
-This writes the ignored file `src/face_of_agi/environment/local_games.json`.
-The starter loop uses `game_index` from
-`src/face_of_agi/runtime/configs/starter_loop.yaml` to choose one of those
-catalog entries.
+This writes `src/face_of_agi/environment/local_games.json`. The starter loop
+uses `game_index` from `src/face_of_agi/runtime/configs/starter_loop.yaml` to
+choose one of those catalog entries.
 
 Run the starter config:
 
@@ -147,13 +146,6 @@ model APIs or a live vLLM server.
 
 Testing details live in `doc/test/test_suite.md` and `doc/test/end_to_end.md`.
 
-## License
-
-Project source, scripts, configs, docs, and supporting materials are offered
-under `Apache-2.0`. Third-party dependencies, datasets, model weights, and
-other external artifacts remain under their own license terms. See `LICENSE`,
-`NOTICE`, and `THIRD_PARTY_LICENSES.md`.
-
 ## Pull Requests
 
 Pull requests also validate the source branch name. Use lowercase kebab-case
@@ -180,4 +172,3 @@ wp/<work-package-or-step-summary>
 - `doc/test/`: regression and end-to-end test commands.
 - `doc/architecture/techstack.md`: current tools, frameworks, and runtime stack.
 - `doc/run_runtime.md`: runtime command notes.
-- `kaggle/README.md`: optional Kaggle notebook build and upload workflow.

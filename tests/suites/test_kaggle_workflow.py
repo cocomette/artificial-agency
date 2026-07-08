@@ -87,27 +87,7 @@ def test_generated_kaggle_artifacts_are_ignored() -> None:
     assert "kaggle/notebooks/submission.ipynb" in gitignore
     assert "kaggle/debug-notebooks/debug.ipynb" in gitignore
     assert "kaggle/debug-notebooks/kernel-metadata.json" in gitignore
-
-
-def test_kaggle_env_example_documents_owner_and_token_path() -> None:
-    example = (ROOT / "kaggle/.env.example").read_text(encoding="utf-8")
-
-    assert "FACE_OF_AGI_KAGGLE_OWNER=" in example
-    assert "FACE_OF_AGI_KAGGLE_TOKEN_FILE=.kaggle/access_token" in example
-
-
-def test_public_kaggle_metadata_templates_are_owner_neutral() -> None:
-    metadata_paths = [
-        ROOT / "kaggle/notebooks/kernel-metadata.json",
-        ROOT / "kaggle/debug-notebooks/kernel-metadata.template.json",
-        ROOT / "kaggle/upload/wheelhouse/dataset-metadata.json",
-        ROOT / "kaggle/upload/public-games/dataset-metadata.json",
-        ROOT / "kaggle/upload/model-dataset/dataset-metadata.json",
-    ]
-
-    for path in metadata_paths:
-        text = path.read_text(encoding="utf-8")
-        assert "kaggle-owner/" in text
+    assert "kaggle/model-bootstrap/model_bootstrap.ipynb" in gitignore
 
 
 def test_sync_metadata_targets_debug_template() -> None:

@@ -1,4 +1,4 @@
-# H100 public-game debug run: a public batch runs concurrently against
+# Modal H100 public-game debug run: a public batch runs concurrently against
 # one shared local vLLM-served Qwen3.6 FP8 model.
 operation_mode: offline
 game_catalog_path: src/face_of_agi/environment/local_games.json
