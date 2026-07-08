@@ -9,9 +9,9 @@ game step.
 - `EnvironmentConfig`: ARC game selection and environment-local settings.
 - `EnvironmentAdapter`: selected ARC-AGI integration boundary.
 - `StateMemory`: persistent memory domain `M`.
-- `ExperimentalMemory`: rolling experiment frame buffer `E`.
+- `ExperimentalMemory`: rolling experiment buffer `E`.
 - `ModelRegistry`: registered model role implementations.
-- Initial `ContextDocuments`: role context documents for `S`, `G`, and `X`.
+- Initial empty v1 ledger and current frame bundle.
 
 ## Per-Step Inputs
 
@@ -19,21 +19,16 @@ game step.
 - Current `EnvironmentInfo`, including lifecycle state and available actions.
 - Current action space.
 - Persistent memory records from `M`, including current and past real states.
-- Rolling experimental memory records from `E`, including prior tool outputs.
-- Model outputs returned by `X`, `S`, `G`, and `P`.
+- Rolling experimental memory records from `E`, for debug/trace inspection.
+- Model outputs returned by active Agent X, Change Summary, Memory, World,
+  Goal, Interest, and Reward Judge roles.
 
-## Agent Tool Inputs
+## Model Context Inputs
 
-When `X` asks to call a tool, orchestration receives a `ToolCall` containing:
-
-- tool name: `world` or `goal`
-- `ObservationRef` pointing to state or experimental memory
-- candidate `ActionSpec` for world calls only
-
-The reference may identify a current state, a past real state, or a prior
-experimental prediction. Orchestration resolves the reference before calling
-the tool model.
-
-Tool calls do not carry inline frames as model inputs. The frame or prediction
-used by `S` or `G` must be the exact object resolved from `M` or `E` by
-orchestration.
+Orchestration feeds original first/current frames and sanitized
+action/change/reward ledger rows into Memory. Goal reads Memory, with an
+additional reward-only Goal call before Memory regeneration. Agent X reads
+Memory, Goal, current frame, recent reward-bearing action history, valid
+actions, and World/Interest candidate tables for the final selection stage.
+World and Interest also receive recent action history. Reward Judge receives
+the executed World prediction and observed Change Summary.

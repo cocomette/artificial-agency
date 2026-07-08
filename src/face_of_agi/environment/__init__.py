@@ -6,7 +6,6 @@ from arcengine import GameAction, GameState
 from face_of_agi.environment.adapter import ArcEnvironmentAdapter, EnvironmentAdapter
 from face_of_agi.environment.config import (
     EnvironmentConfig,
-    UpdaterRuntimeConfig,
     load_environment_config,
     load_game_catalog,
     write_game_catalog,
@@ -20,7 +19,6 @@ __all__ = [
     "GameAction",
     "GameState",
     "OperationMode",
-    "UpdaterRuntimeConfig",
     "resolve_visualization",
     "load_environment_config",
     "load_game_catalog",

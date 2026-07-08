@@ -1,245 +1,230 @@
-"""Smoke tests for vLLM-only runtime wiring."""
+"""Runtime/config smoke tests for the active role set."""
 
-from io import StringIO
+from __future__ import annotations
+
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from face_of_agi.environment.config import (
-    EnvironmentConfig,
-    ModelRuntimeConfig,
     ModelRoleConfig,
-    UpdaterRuntimeConfig,
     load_environment_config,
 )
-from face_of_agi.models.orchestrator_agent.providers.vllm import (
-    VLLMOrchestratorAgentAdapter,
-)
-from face_of_agi.models.updater.providers.vllm import VLLMUpdaterAdapter
-import face_of_agi.runtime.kaggle as kaggle
-from face_of_agi.runtime import shell
-from face_of_agi.runtime.parallel import ParallelGameRunSpec
+from face_of_agi.models.orchestrator_agent.config import VLLMOrchestratorAgentConfig
+from face_of_agi.models.world.config import VLLMWorldConfig
+from face_of_agi.runtime.shell import _build_model_registry, _config_kwargs
 
 
-def _vllm_role(**options: object) -> ModelRoleConfig:
-    return ModelRoleConfig(
-        backend="vllm",
-        model="fake-vllm",
-        options=dict(options),
-    )
+def test_environment_config_loads_active_model_shape(tmp_path) -> None:
+    path = tmp_path / "active.yaml"
+    path.write_text(_active_config_yaml(), encoding="utf-8")
+
+    config = load_environment_config(path)
+
+    assert config.models.agent.backend == "vllm"
+    assert config.models.change.backend == "vllm"
+    assert config.models.memory.backend == "vllm"
+    assert config.models.world.backend == "vllm"
+    assert config.models.goal.backend == "vllm"
+    assert config.models.reward_judge.backend == "vllm"
+    assert not hasattr(config, "online_lora")
+    assert config.animation_keyframe_pixel_threshold == 8
 
 
-def _updater_config() -> UpdaterRuntimeConfig:
-    return UpdaterRuntimeConfig(agent=_vllm_role(), general=_vllm_role())
-
-
-def test_shell_model_registry_wires_vllm_roles_and_observation_text() -> None:
-    registry = shell._build_model_registry(
-        agent_config=_vllm_role(),
-        change_config=_vllm_role(),
-        historizer_config=_vllm_role(),
-        updater_config=_updater_config(),
-        observation_text_config={
-            "crop_cells": 2,
-            "overflow_chars_per_frame": 99,
-            "include_rows": False,
-            "include_components": False,
-            "include_component_runs": False,
-            "compact_components": True,
-        },
-    )
-
-    assert isinstance(registry.orchestrator_agent, VLLMOrchestratorAgentAdapter)
-    assert registry.change_summary_model is not None
-    assert registry.agent_context_historizer_model is not None
-    assert registry.updater_tasks is not None
-    assert isinstance(registry.updater_tasks.agent_game_updater, VLLMUpdaterAdapter)
-    assert registry.orchestrator_agent.config.observation_text.crop_cells == 2
-    assert (
-        registry.orchestrator_agent.config.observation_text.include_components
-        is False
-    )
-    assert registry.orchestrator_agent.config.observation_text.include_rows is False
-    assert (
-        registry.orchestrator_agent.config.observation_text.include_component_runs
-        is False
-    )
-    assert registry.orchestrator_agent.config.observation_text.compact_components is True
-    assert registry.change_summary_model.config.observation_text.crop_cells == 2
-    assert registry.change_summary_model.config.observation_text.include_rows is False
-    assert (
-        registry.change_summary_model.config.observation_text.compact_components
-        is True
-    )
-    assert registry.updater_tasks.agent_game_updater.config.observation_text == (
-        registry.orchestrator_agent.config.observation_text
-    )
-
-
-def test_shared_vllm_server_max_model_len_becomes_role_context_limit() -> None:
+def test_vllm_config_kwargs_include_shared_runtime_options() -> None:
     shared = ModelRoleConfig(
         backend="vllm",
-        model="fake-vllm",
+        model="shared-qwen",
         options={
-            "server": {"max_model_len": 12345},
-            "temperature": 0.0,
+            "base_url": "http://127.0.0.1:8000/v1",
+            "temperature": 0.2,
         },
     )
-    role = ModelRoleConfig(backend="vllm")
+    role = ModelRoleConfig(
+        backend="vllm",
+        options={"max_completion_tokens": 128},
+    )
 
-    merged = shell._with_shared_vlm_role_config(role, shared)
+    from face_of_agi.runtime.shell import _with_shared_vlm_role_config
 
-    assert merged.options["max_context_tokens"] == 12345
-    assert merged.options["temperature"] == 0.0
-    assert "server" not in merged.options
+    merged = _with_shared_vlm_role_config(role, shared)
 
-
-def test_shell_rejects_removed_change_frame_budget_key() -> None:
-    with pytest.raises(ValueError, match="max_evidence_frames.*max_frames_per_call"):
-        shell._build_model_registry(
-            agent_config=_vllm_role(),
-            change_config=_vllm_role(max_evidence_frames=5),
-            historizer_config=_vllm_role(),
-            updater_config=_updater_config(),
-        )
+    world_kwargs = _config_kwargs(merged, VLLMWorldConfig)
+    agent_kwargs = _config_kwargs(merged, VLLMOrchestratorAgentConfig)
+    assert world_kwargs["model"] == "shared-qwen"
+    assert world_kwargs["base_url"] == "http://127.0.0.1:8000/v1"
+    assert world_kwargs["temperature"] == 0.2
+    assert agent_kwargs["max_completion_tokens"] == 128
 
 
-@pytest.mark.parametrize("backend", ["openai", "ollama", "huggingface", "diffusers"])
-def test_shell_rejects_removed_real_backends(backend: str) -> None:
-    with pytest.raises(ValueError, match="use vllm"):
-        shell._build_model_registry(
-            agent_config=ModelRoleConfig(backend=backend, model="old"),
-            change_config=_vllm_role(),
-            historizer_config=_vllm_role(),
-            updater_config=_updater_config(),
-        )
-
-
-def test_environment_config_loads_shared_observation_text(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        """
-game_index: 0
-max_actions_per_level: 1
-models:
-  observation_text:
-    crop_cells: 2
-    overflow_chars_per_frame: 77
-    include_rows: false
-    include_components: false
-    include_component_runs: false
-    compact_components: true
-  shared_vlm:
-    backend: vllm
-    model: fake-vllm
-  agent:
-    backend: vllm
-  change:
-    backend: vllm
-  historizer:
-    backend: vllm
-  updater:
-    agent:
-      backend: vllm
-    general:
-      backend: vllm
-""".lstrip(),
+def test_environment_config_loads_animation_keyframe_threshold(tmp_path) -> None:
+    path = tmp_path / "active.yaml"
+    path.write_text(
+        _active_config_yaml() + "animation_keyframe_pixel_threshold: 3\n",
         encoding="utf-8",
     )
 
-    config = load_environment_config(config_path)
+    config = load_environment_config(path)
 
-    assert config.models.observation_text == {
-        "crop_cells": 2,
-        "overflow_chars_per_frame": 77,
-        "include_rows": False,
-        "include_components": False,
-        "include_component_runs": False,
-        "compact_components": True,
-    }
-    assert config.models.agent.backend == "vllm"
+    assert config.animation_keyframe_pixel_threshold == 3
 
 
-def test_kaggle_worker_wires_shared_observation_text(
-    monkeypatch,
-    tmp_path: Path,
+def test_environment_config_rejects_online_lora_block(tmp_path) -> None:
+    path = tmp_path / "active.yaml"
+    path.write_text(
+        _active_config_yaml()
+        + "online_lora:\n"
+        + "  enabled: true\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="online_lora has been removed"):
+        load_environment_config(path)
+
+
+def test_schema_instruction_flag_lands_on_vllm_config_not_options() -> None:
+    role_config = ModelRoleConfig(
+        backend="vllm",
+        model="model",
+        options={
+            "include_output_schema_in_instructions": True,
+            "temperature": 0.1,
+        },
+    )
+
+    world = VLLMWorldConfig(**_config_kwargs(role_config, VLLMWorldConfig))
+    agent = VLLMOrchestratorAgentConfig(
+        **_config_kwargs(role_config, VLLMOrchestratorAgentConfig)
+    )
+
+    assert world.include_output_schema_in_instructions is True
+    assert agent.include_output_schema_in_instructions is True
+    assert "include_output_schema_in_instructions" not in world.options
+    assert "include_output_schema_in_instructions" not in agent.options
+
+
+def test_environment_config_rejects_negative_animation_keyframe_threshold(
+    tmp_path,
 ) -> None:
-    observation_text = {
-        "crop_cells": 3,
-        "overflow_chars_per_frame": 123,
-        "include_rows": True,
-        "include_components": True,
-        "include_component_runs": True,
-        "compact_components": True,
-    }
-    captured: dict[str, object] = {}
-
-    class StopAfterRegistry(Exception):
-        pass
-
-    def fake_build_model_registry(**kwargs: object) -> object:
-        captured.update(kwargs)
-        raise StopAfterRegistry
-
-    monkeypatch.setattr(kaggle, "_build_model_registry", fake_build_model_registry)
-    environment_config = EnvironmentConfig(
-        game_id="fake-game",
-        max_actions_per_level=1,
-        models=ModelRuntimeConfig(
-            observation_text=observation_text,
-            shared_vlm=ModelRoleConfig(backend="vllm", model="fake-vllm"),
-            agent=ModelRoleConfig(backend="vllm"),
-            change=ModelRoleConfig(backend="vllm"),
-            historizer=ModelRoleConfig(backend="vllm"),
-            updater=UpdaterRuntimeConfig(
-                agent=ModelRoleConfig(backend="vllm"),
-                general=ModelRoleConfig(backend="vllm"),
-            ),
-        ),
-    )
-    spec = ParallelGameRunSpec(
-        game_index=0,
-        game_id="fake-game",
-        run_id="run-1",
-        database_path=tmp_path / "memory.sqlite",
-        environment_config=environment_config,
-        arc_environment=object(),
+    path = tmp_path / "active.yaml"
+    path.write_text(
+        _active_config_yaml() + "animation_keyframe_pixel_threshold: -1\n",
+        encoding="utf-8",
     )
 
-    with pytest.raises(StopAfterRegistry):
-        kaggle._run_kaggle_game(spec, StringIO())
+    try:
+        load_environment_config(path)
+    except ValueError as exc:
+        assert "animation_keyframe_pixel_threshold must be non-negative" in str(exc)
+    else:
+        raise AssertionError("expected config validation to reject negative threshold")
 
-    assert captured["observation_text_config"] == observation_text
 
-
-def test_rtx6000_configs_load_multimodal_runtime_contract() -> None:
-    config_dir = Path("src/face_of_agi/runtime/configs/vllm")
-    debug_config = load_environment_config(
-        config_dir / "vllm_rtx6000_qwen36_35b_fp8_debug.yaml"
+def test_committed_runtime_configs_load_without_removed_keys() -> None:
+    config_root = "src/face_of_agi/runtime/configs"
+    output = subprocess.check_output(
+        ["git", "ls-files", config_root],
+        text=True,
     )
-    parallel_config = load_environment_config(
-        config_dir / "vllm_rtx6000_qwen36_35b_fp8_parallel.yaml"
+    config_paths = sorted(
+        Path(line)
+        for line in output.splitlines()
+        if line.endswith(".yaml") and Path(line).exists()
     )
 
-    assert debug_config.models.observation_text["crop_cells"] == 3
-    assert parallel_config.models.observation_text["crop_cells"] == 3
-    assert debug_config.models.observation_text["overflow_chars_per_frame"] > 0
-    assert parallel_config.models.observation_text["overflow_chars_per_frame"] > 0
-    assert debug_config.models.observation_text["include_rows"] is True
-    assert debug_config.models.observation_text["include_components"] is True
-    assert debug_config.models.observation_text["include_component_runs"] is True
-    assert debug_config.models.observation_text["compact_components"] is True
-    assert parallel_config.models.observation_text["include_rows"] is True
-    assert parallel_config.models.observation_text["include_components"] is True
-    assert parallel_config.models.observation_text["include_component_runs"] is True
-    assert parallel_config.models.observation_text["compact_components"] is True
-    assert debug_config.models.shared_vlm.options["server"]["max_model_len"] >= 65536
-    assert parallel_config.models.shared_vlm.options["server"]["max_model_len"] == 65536
-    assert debug_config.models.shared_vlm.options["input_image_size"] == "1024x1024"
-    assert parallel_config.models.shared_vlm.options["input_image_size"] == "1024x1024"
-    assert debug_config.models.change.options["max_frames_per_call"] >= 2
-    assert parallel_config.models.change.options["max_frames_per_call"] >= 2
-    assert debug_config.models.change.options["reduce_chunk_summaries"] is True
-    assert parallel_config.models.change.options["reduce_chunk_summaries"] is True
-    assert debug_config.models.change.options["reducer_keyframe_limit"] == 8
-    assert parallel_config.models.change.options["reducer_keyframe_limit"] == 8
+    assert config_paths
+    for path in config_paths:
+        config = load_environment_config(path)
+        assert not hasattr(config, "online_lora")
+
+
+def test_environment_config_rejects_removed_role_keys(tmp_path) -> None:
+    path = tmp_path / "removed-role.yaml"
+    path.write_text(
+        _active_config_yaml()
+        + "  historizer:\n"
+        + "    backend: vllm\n"
+        + "    model: qwen\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="models.historizer"):
+        load_environment_config(path)
+
+
+def test_environment_config_rejects_removed_normalized_crop_key(tmp_path) -> None:
+    path = tmp_path / "removed-crop.yaml"
+    path.write_text(
+        _active_config_yaml()
+        + "  agent:\n"
+        + "    input_image_crop_box_normalized: [0, 0, 1, 1]\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="input_image_crop_arc_grid_edges"):
+        load_environment_config(path)
+
+
+def test_build_model_registry_wires_active_vllm_roles_only() -> None:
+    model = "Qwen/Qwen3.6-35B-A3B-FP8"
+    role = ModelRoleConfig(backend="vllm", model=model)
+
+    registry = _build_model_registry(
+        agent_config=role,
+        change_config=role,
+        memory_config=role,
+        world_config=role,
+        goal_config=role,
+        interest_config=role,
+        reward_judge_config=role,
+        shared_vlm_config=ModelRoleConfig(),
+    )
+
+    assert registry.orchestrator_agent is not None
+    assert registry.change_summary_model is not None
+    assert registry.memory_model is not None
+    assert registry.world_model is not None
+    assert registry.goal_model is not None
+    assert registry.interest_model is not None
+    assert registry.reward_judge_model is not None
+
+
+def _active_config_yaml(*, shared_server_model_path: str | None = None) -> str:
+    shared = ""
+    if shared_server_model_path is not None:
+        shared = (
+            "  shared_vlm:\n"
+            "    backend: vllm\n"
+            "    model: shared-qwen\n"
+            "    server:\n"
+            f"      model_path: {shared_server_model_path}\n"
+        )
+    return (
+        "game_index: 0\n"
+        "max_actions_per_level: 1\n"
+        "operation_mode: offline\n"
+        "models:\n"
+        + shared +
+        "  agent:\n"
+        "    backend: vllm\n"
+        "    model: qwen\n"
+        "  change:\n"
+        "    backend: vllm\n"
+        "    model: qwen\n"
+        "  memory:\n"
+        "    backend: vllm\n"
+        "    model: qwen\n"
+        "  world:\n"
+        "    backend: vllm\n"
+        "    model: qwen\n"
+        "  goal:\n"
+        "    backend: vllm\n"
+        "    model: qwen\n"
+        "  interest:\n"
+        "    backend: vllm\n"
+        "    model: qwen\n"
+        "  reward_judge:\n"
+        "    backend: vllm\n"
+        "    model: qwen\n"
+    )

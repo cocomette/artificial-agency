@@ -9,7 +9,9 @@ import streamlit as st
 from debug.dashboard.memory_reader import (
     load_m_states,
     load_model_input_debug_records,
+    load_v1_artifacts,
     matching_model_input_records,
+    matching_v1_artifacts,
 )
 from debug.dashboard.runner import (
     RUNNER_PLAYBACK_REQUEST_KEY,
@@ -28,7 +30,7 @@ def render_offline_inspector(database_path: str) -> None:
     """Render the offline persisted-memory inspector."""
 
     try:
-        states, model_input_records = _load_memory(database_path)
+        states, model_input_records, v1_artifacts = _load_memory(database_path)
     except Exception as exc:
         st.error(str(exc))
         return
@@ -49,16 +51,25 @@ def render_offline_inspector(database_path: str) -> None:
         model_input_records,
         selected_state,
     )
-    render_selected_turn(selected_state, selected_model_inputs)
+    render_selected_turn(
+        selected_state,
+        selected_model_inputs,
+        matching_v1_artifacts(v1_artifacts, selected_state),
+    )
 
 
 @st.cache_data(show_spinner=False)
 def _load_memory(
     database_path: str,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    dict[str, list[dict[str, Any]]],
+]:
     return (
         load_m_states(database_path),
         load_model_input_debug_records(database_path),
+        load_v1_artifacts(database_path),
     )
 
 

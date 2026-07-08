@@ -13,7 +13,6 @@ MODEL_INPUT_SLOTS: tuple[tuple[str, str], ...] = (
     ("agent", "Agent X"),
     ("change", "Change Summary"),
     ("historizer", "Context Historizer"),
-    ("world_model", "World Model"),
     ("updater_agent", "Agent Updater"),
     ("updater_general", "General Updater"),
 )

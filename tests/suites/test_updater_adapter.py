@@ -1,42 +1,42 @@
-"""Tests for vLLM updater prompts."""
+"""Tests for the active updater P prompt adapter tasks."""
 
 from __future__ import annotations
 
 import json
 from typing import Any
 
-from arcengine import GameAction
 import pytest
+from PIL import Image
 
-from face_of_agi.contracts import ActionSpec, Observation, RoleContext
+from face_of_agi.contracts import (
+    ActionHistoryEntry,
+    ActionSpec,
+    Observation,
+    RoleContext,
+)
 from face_of_agi.models.updater import (
     AGENT_GAME_CONTEXT_KEYS,
+    AGENT_GAME_CONTEXT_MAX_CHARS,
     AgentGameContextUpdateInput,
     GeneralKnowledgeUpdateInput,
     PromptUpdateProviderResponse,
     PromptUpdateRequest,
-    PromptUpdateResult,
     PromptUpdaterAdapter,
     UpdaterConfig,
-    UpdaterContextTarget,
     UpdaterOutputError,
     agent_game_updated_context_json_schema,
     parse_agent_game_updated_context_output,
-    parse_updated_context_output,
     updated_context_json_schema,
-)
-from face_of_agi.models.updater.config import VLLMUpdaterConfig
-from face_of_agi.models.updater.providers.vllm import (
-    VLLMUpdaterAdapter,
-    VLLMUpdaterProvider,
+    updater_instruction_path,
 )
 
 
-class FakePromptUpdaterProvider:
+class FakeUpdaterProvider:
     backend = "fake"
     model = "fake-model"
 
-    def __init__(self) -> None:
+    def __init__(self, *responses: str) -> None:
+        self.responses = list(responses)
         self.requests: list[PromptUpdateRequest] = []
 
     def update_prompt(
@@ -44,270 +44,201 @@ class FakePromptUpdaterProvider:
         request: PromptUpdateRequest,
     ) -> PromptUpdateProviderResponse:
         self.requests.append(request)
-        if request.target.task == "agent_game":
-            payload = {
-                "updated_context": {
-                    key: f"{request.target.role}-{key}"
-                    for key in AGENT_GAME_CONTEXT_KEYS
-                }
-            }
-        else:
-            payload = {"updated_context": f"{request.target.role}-general"}
+        text = self.responses.pop(0)
+        return PromptUpdateProviderResponse(target=request.target, text=text)
+
+    def repair_prompt(
+        self,
+        request: PromptUpdateRequest,
+        *,
+        invalid_text: str,
+        validation_error: str,
+        attempt: int,
+    ) -> PromptUpdateProviderResponse:
+        self.requests.append(request)
+        text = self.responses.pop(0)
         return PromptUpdateProviderResponse(
             target=request.target,
-            text=json.dumps(payload),
+            text=text,
+            metadata={
+                "invalid_text": invalid_text,
+                "validation_error": validation_error,
+                "attempt": attempt,
+            },
         )
 
-    def repair_prompt(self, *args: Any, **kwargs: Any) -> PromptUpdateProviderResponse:
-        raise AssertionError("repair should not be needed")
+
+def test_instruction_paths_cover_active_tasks(tmp_path) -> None:
+    assert updater_instruction_path(
+        task="agent_game",
+        instruction_dir=tmp_path,
+    ) == tmp_path / "agent_game_context_updater_prompt.md"
+    assert updater_instruction_path(
+        task="general",
+        role="agent",
+        instruction_dir=tmp_path,
+    ) == tmp_path / "agent_general_context_updater_prompt.md"
 
 
-class FakeCompletions:
-    def __init__(self, responses: list[dict[str, Any]]) -> None:
-        self.responses = responses
-        self.calls: list[dict[str, Any]] = []
-
-    def create(self, **kwargs: Any) -> dict[str, Any]:
-        self.calls.append(kwargs)
-        return self.responses.pop(0)
-
-
-class FakeClient:
-    def __init__(self, responses: list[dict[str, Any]]) -> None:
-        self.chat = type(
-            "FakeChat",
-            (),
-            {"completions": FakeCompletions(responses)},
-        )()
-
-
-def _grid(fill: int = 0) -> list[list[int]]:
-    return [[fill for _x in range(64)] for _y in range(64)]
-
-
-def _agent_update_input() -> AgentGameContextUpdateInput:
-    grid = _grid()
-    grid[9][8] = 3
-    return AgentGameContextUpdateInput(
-        previous_context=RoleContext(general="general", game="old game context"),
-        current_observation=Observation(id="obs-1", step=1, frame=grid),
-        allowed_actions=(ActionSpec("ACTION1"), ActionSpec(GameAction.ACTION6)),
-        glossary_actions=(ActionSpec("ACTION1"), ActionSpec(GameAction.ACTION6)),
-        action_history_window=3,
-    )
-
-
-def _chat_response(content: str) -> dict[str, Any]:
-    return {
-        "id": "resp-updater",
-        "model": "fake-vllm",
-        "choices": [
-            {
-                "message": {"role": "assistant", "content": content},
-                "finish_reason": "stop",
-            }
-        ],
+def test_agent_game_updater_returns_structured_agent_context(tmp_path) -> None:
+    _write_instruction_files(tmp_path)
+    response = {
+        "updated_context": {
+            key: f"{key} updated" for key in AGENT_GAME_CONTEXT_KEYS
+        }
     }
-
-
-def _assert_no_stale_text_prompt_terms(text: str) -> None:
-    lower_text = text.lower()
-    stale_terms = (
-        "attached image",
-        "attached frame",
-        "current image frame",
-        "0..1000",
-        "0 to 1000",
+    provider = FakeUpdaterProvider(json.dumps(response))
+    updater = PromptUpdaterAdapter(
+        provider,
+        UpdaterConfig(instruction_dir=str(tmp_path), frame_scale=1),
     )
-    for term in stale_terms:
-        assert term not in lower_text
 
+    result = updater.update_agent_game_context(
+        AgentGameContextUpdateInput(
+            previous_context=RoleContext(general="K", game="old"),
+            current_observation=_observation(),
+            allowed_actions=(ActionSpec(action_id="ACTION1"),),
+            glossary_actions=(ActionSpec(action_id="ACTION1"),),
+            action_history_window=3,
+        )
+    )
 
-def _text_part(content: Any) -> str:
-    assert isinstance(content, list)
-    assert content[0]["type"] == "text"
-    return content[0]["text"]
-
-
-def _image_parts(content: Any) -> list[dict[str, Any]]:
-    assert isinstance(content, list)
-    return [part for part in content if part.get("type") == "image_url"]
-
-
-def test_prompt_updater_builds_agent_observation_text_request() -> None:
-    provider = FakePromptUpdaterProvider()
-    updater = PromptUpdaterAdapter(provider=provider, config=UpdaterConfig())
-
-    result = updater.update_agent_game_context(_agent_update_input())
-
-    assert "agent-goals" in result.game
     request = provider.requests[0]
     assert request.target.role == "agent"
     assert request.target.task == "agent_game"
-    _assert_no_stale_text_prompt_terms(request.instructions)
-    _assert_no_stale_text_prompt_terms(request.text)
-    assert "ARC grid 0..63 coordinates" not in request.instructions
-    assert "visible cropped coordinates" in request.instructions
-    assert "3 to 60" in request.instructions
-    assert "shape, colors" not in request.instructions
-    assert "ARC color glossary" in request.instructions
-    assert "0=white" not in request.instructions
-    assert "A=cyan" not in request.instructions
-    assert "symbol A (cyan)" not in request.instructions
-    assert "canonical glossary colors" not in request.instructions
-    assert "symbol A: light cyan" in request.instructions
-    assert "symbol 0" in request.instructions
-    assert "symbol F" in request.instructions
-    assert "A-cells" in request.instructions
-    assert "Action history window" not in request.instructions
-    assert len(request.images) == 1
-    assert request.images[0].label == "current_observation"
-    assert request.images[0].image.size == (2048, 2048)
-    assert "## Current observation" in request.text
-    assert "## current_observation\n\n### frame 0" in request.text
-    assert "x_range: 3..60" in request.text
-    assert "ACTION6(x,y 3..60,target)" in request.text
-    assert "## Action history window" not in request.text
-    assert "observation_id:" not in request.text
-    assert "crop_bounds_original_xyxy:" not in request.text
-    assert "coordinate_system:" not in request.text
-    assert "symbols:" not in request.text
-    assert "ARC color symbols" not in request.text
-    assert "image_url" not in request.text
-    assert "base64" not in request.text
+    assert request.output_schema == agent_game_updated_context_json_schema()
+    assert "## Action glossary" in request.instructions
+    assert request.images[0].label == "current_observation_frame"
+    assert json.loads(result.game) == response["updated_context"]
 
 
-def test_vllm_updater_sends_plain_text_message() -> None:
-    updated_context = {
+def test_agent_game_updater_prompt_renders_action_history_relative_to_crop(
+    tmp_path,
+) -> None:
+    _write_instruction_files(tmp_path)
+    response = {
         "updated_context": {
-            key: f"updated {key}" for key in AGENT_GAME_CONTEXT_KEYS
+            key: f"{key} updated" for key in AGENT_GAME_CONTEXT_KEYS
         }
     }
-    client = FakeClient([_chat_response(json.dumps(updated_context))])
-    updater = VLLMUpdaterAdapter(
-        VLLMUpdaterConfig(model="fake-vllm", repair_attempts=0),
-        client=client,
+    provider = FakeUpdaterProvider(json.dumps(response))
+    updater = PromptUpdaterAdapter(
+        provider,
+        UpdaterConfig(
+            instruction_dir=str(tmp_path),
+            frame_scale=1,
+            input_image_crop_arc_grid_edges=4,
+        ),
     )
 
-    result = updater.update_agent_game_context(_agent_update_input())
+    updater.update_agent_game_context(
+        AgentGameContextUpdateInput(
+            previous_context=RoleContext(general="K", game="old"),
+            current_observation=_observation(),
+            allowed_actions=(ActionSpec(action_id="ACTION6"),),
+            glossary_actions=(ActionSpec(action_id="ACTION6"),),
+            action_history_window=1,
+            action_history=(
+                ActionHistoryEntry(
+                    action=ActionSpec(action_id="ACTION6", data={"x": 4, "y": 60}),
+                    controllable=True,
+                    changed_pixel_percent=0,
+                    change_summary="no changes",
+                ),
+            ),
+        )
+    )
 
-    assert "updated goals" in result.game
-    request = client.chat.completions.calls[0]
-    _assert_no_stale_text_prompt_terms(json.dumps(request))
-    text = _text_part(request["messages"][1]["content"])
-    assert "## Current observation" in text
-    image_parts = _image_parts(request["messages"][1]["content"])
-    assert len(image_parts) == 1
-    assert image_parts[0]["image_url"]["url"].startswith("data:image/png;base64,")
-    serialized = json.dumps(request)
-    assert "image_url" in serialized
-    assert "data:image/png;base64," in serialized
+    assert (
+        '1. ACTION6 {"x": 0, "y": 1000} [latest] [changed_pixel_percent=0] '
+        "change: no changes"
+    ) in provider.requests[0].text
 
 
-def test_general_updater_uses_text_json_payload() -> None:
-    provider = FakePromptUpdaterProvider()
-    updater = PromptUpdaterAdapter(provider=provider, config=UpdaterConfig())
+def test_general_updater_updates_agent_general_context(tmp_path) -> None:
+    _write_instruction_files(tmp_path)
+    provider = FakeUpdaterProvider(
+        json.dumps({"updated_context": "new general context"})
+    )
+    updater = PromptUpdaterAdapter(
+        provider,
+        UpdaterConfig(instruction_dir=str(tmp_path)),
+    )
 
     result = updater.update_general_knowledge(
         GeneralKnowledgeUpdateInput(
             role="agent",
-            previous_context=RoleContext(general="old general", game="game"),
+            previous_context=RoleContext(general="old K", game="live L"),
             run_id="run-1",
             game_id="game-1",
         )
     )
 
-    assert result.general == "agent-general"
     request = provider.requests[0]
+    assert request.target.role == "agent"
     assert request.target.task == "general"
-    assert isinstance(json.loads(request.text), dict)
-    assert "ARC color glossary" not in request.instructions
+    assert request.output_schema == updated_context_json_schema()
+    assert result == RoleContext(general="new general context", game="live L")
 
 
-def test_updater_output_parsers_accept_expected_json() -> None:
-    assert parse_updated_context_output('{"updated_context": "new"}') == "new"
-
-    parsed = parse_agent_game_updated_context_output(
-        json.dumps(
-            {
-                "updated_context": {
-                    key: f"value {key}" for key in AGENT_GAME_CONTEXT_KEYS
-                }
-            }
-        )
-    )
-    assert "value goals" in parsed
-
-
-def test_updater_schemas_include_configured_max_lengths() -> None:
-    general_schema = updated_context_json_schema(general_context_max_chars=123)
-    agent_schema = agent_game_updated_context_json_schema(
-        agent_game_context_max_chars=456,
-        agent_game_context_field_max_chars=78,
-    )
-
-    assert general_schema["properties"]["updated_context"]["maxLength"] == 123
-    updated_context_schema = agent_schema["properties"]["updated_context"]
-    assert "456 characters" in updated_context_schema["description"]
-    assert (
-        updated_context_schema["properties"]["goals"]["maxLength"]
-        == 78
-    )
-
-
-def test_updater_parsers_reject_oversized_output() -> None:
-    with pytest.raises(UpdaterOutputError, match="too long"):
-        parse_updated_context_output(
-            '{"updated_context": "abcdef"}',
-            max_chars=5,
-        )
-
-    payload = {
+def test_agent_game_updater_repairs_invalid_output(tmp_path) -> None:
+    _write_instruction_files(tmp_path)
+    repaired = {
         "updated_context": {
-            key: ("abcdef" if key == "goals" else f"value {key}")
-            for key in AGENT_GAME_CONTEXT_KEYS
+            key: f"{key} repaired" for key in AGENT_GAME_CONTEXT_KEYS
         }
     }
-    with pytest.raises(UpdaterOutputError, match="too long"):
+    provider = FakeUpdaterProvider("{}", json.dumps(repaired))
+    updater = PromptUpdaterAdapter(
+        provider,
+        UpdaterConfig(instruction_dir=str(tmp_path), repair_attempts=1),
+    )
+
+    result = updater.update_agent_game_context(
+        AgentGameContextUpdateInput(
+            previous_context=RoleContext(game="old"),
+            current_observation=_observation(),
+            allowed_actions=(ActionSpec(action_id="ACTION1"),),
+            glossary_actions=(ActionSpec(action_id="ACTION1"),),
+            action_history_window=1,
+        )
+    )
+
+    assert len(provider.requests) == 2
+    assert json.loads(result.game) == repaired["updated_context"]
+
+
+def test_agent_game_parser_rejects_missing_field() -> None:
+    with pytest.raises(UpdaterOutputError, match="missing keys"):
         parse_agent_game_updated_context_output(
-            json.dumps(payload),
-            field_max_chars=5,
+            json.dumps({"updated_context": {"goals": "only goals"}})
         )
 
 
-def test_vllm_updater_provider_clips_invalid_output_in_repair_prompt() -> None:
-    client = FakeClient([_chat_response('{"updated_context": "ok"}')])
-    provider = VLLMUpdaterProvider(
-        VLLMUpdaterConfig(
-            model="fake-vllm",
-            repair_invalid_output_preview_chars=80,
-        ),
-        client=client,
-    )
-    target = UpdaterContextTarget(
-        role="agent",
-        segment="general",
-        task="general",
-        previous_context=RoleContext(general="old", game="game"),
-    )
-    request = PromptUpdateRequest(
-        target=target,
-        instructions="instructions",
-        text="input",
-        output_schema=updated_context_json_schema(),
-    )
-    invalid_text = "a" * 120 + "TAIL"
+def test_agent_game_parser_rejects_context_over_character_cap() -> None:
+    oversized = {key: "" for key in AGENT_GAME_CONTEXT_KEYS}
+    oversized["history"] = "x" * AGENT_GAME_CONTEXT_MAX_CHARS
 
-    provider.repair_prompt(
-        request,
-        invalid_text=invalid_text,
-        validation_error="bad",
-        attempt=1,
+    with pytest.raises(UpdaterOutputError, match="12000 character cap"):
+        parse_agent_game_updated_context_output(
+            json.dumps({"updated_context": oversized})
+        )
+
+
+def _write_instruction_files(path) -> None:
+    (path / "agent_game_context_updater_prompt.md").write_text(
+        "agent game instructions",
+        encoding="utf-8",
+    )
+    (path / "agent_general_context_updater_prompt.md").write_text(
+        "agent general instructions",
+        encoding="utf-8",
     )
 
-    repair_text = client.chat.completions.calls[0]["messages"][1]["content"]
-    assert isinstance(repair_text, str)
-    assert "Invalid output preview:" in repair_text
-    assert "omitted" in repair_text
-    assert "TAIL" in repair_text
-    assert invalid_text not in repair_text
+
+def _observation() -> Observation:
+    return Observation(
+        id="obs-1",
+        step=1,
+        frame=Image.new("RGB", (8, 8), color=(1, 2, 3)),
+    )

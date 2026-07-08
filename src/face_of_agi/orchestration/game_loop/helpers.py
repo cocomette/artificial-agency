@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from time import perf_counter
+from math import isfinite
 from typing import Any, Sequence
 
 from face_of_agi.contracts import (
@@ -19,19 +20,17 @@ from face_of_agi.contracts import (
     FrameTurnContext,
     Observation,
 )
+from face_of_agi.frames import observation_to_pil_image
+from face_of_agi.models.arc_grid_crop import crop_image_arc_grid_edges
 from face_of_agi.models.action_history import model_facing_action_text
-from face_of_agi.models.observation_text import cropped_changed_cell_count
 from face_of_agi.models.adapters import OrchestratorAgentModel
+from face_of_agi.models.image_inputs import resize_image
 from face_of_agi.models.orchestrator_agent import AgentToolRuntime
 from face_of_agi.debug.bus import DebugBus
 from face_of_agi.debug.events import (
     AgentFrameworkInputCaptured,
     AgentProviderRequestsCaptured,
     ModelCallCompleted,
-)
-from face_of_agi.orchestration.game_loop.fallbacks import (
-    fallback_decision_result,
-    model_observation_text_config,
 )
 from face_of_agi.runtime import timing as runtime_timing
 
@@ -79,58 +78,47 @@ def decide_frame_turn(
     if not frame_context.control_mode.controllable:
         return synthetic_animation_decision(frame_context), 0.0
 
+    prompt_actions = prompt_action_outcome(
+        action_space=frame_context.control_mode.allowed_actions,
+        action_history=frame_context.recent_action_history,
+        action_suppression_zero_changed_pixel_turns=(
+            action_suppression_zero_changed_pixel_turns
+        ),
+        updater_stagnation_warning_zero_changed_pixel_turns=0,
+        crop_edges=model_input_crop_edges(agent),
+    )
+    debug.emit(
+        AgentFrameworkInputCaptured(
+            context=contexts.agent,
+            current_observation=frame_context.current_observation,
+            action_space=prompt_actions.allowed_actions,
+            recent_action_history=frame_context.recent_action_history,
+            tool_runtime=tool_runtime,
+        )
+    )
     decision_started_at = perf_counter()
-    fallback_action_space = frame_context.control_mode.allowed_actions
-    try:
-        prompt_actions = prompt_action_outcome(
-            action_space=frame_context.control_mode.allowed_actions,
-            action_history=frame_context.recent_action_history,
-            action_suppression_zero_changed_pixel_turns=(
-                action_suppression_zero_changed_pixel_turns
-            ),
-            updater_stagnation_warning_zero_changed_pixel_turns=0,
+    with runtime_timing.span(
+        "game_loop.agent_decide",
+        step=frame_context.current_observation.step,
+    ):
+        decision = agent.decide(
+            context=contexts.agent,
+            current_observation=frame_context.current_observation,
+            action_space=prompt_actions.allowed_actions,
+            tool_runtime=tool_runtime,
+            recent_action_history=frame_context.recent_action_history,
+            glossary_actions=frame_context.control_mode.allowed_actions,
+            first_observation_ref=frame_context.first_observation_ref,
+            recent_action_history_available=recent_action_history_available,
+            action_outcome_evidence=prompt_actions.evidence,
         )
-        fallback_action_space = prompt_actions.allowed_actions
-        debug.emit(
-            AgentFrameworkInputCaptured(
-                context=contexts.agent,
-                current_observation=frame_context.current_observation,
-                action_space=prompt_actions.allowed_actions,
-                recent_action_history=frame_context.recent_action_history,
-                tool_runtime=tool_runtime,
-            )
+    decision_duration_seconds = perf_counter() - decision_started_at
+    debug.emit(
+        ModelCallCompleted(
+            role="agent",
+            duration_seconds=decision_duration_seconds,
         )
-        with runtime_timing.span(
-            "game_loop.agent_decide",
-            step=frame_context.current_observation.step,
-        ):
-            decision = agent.decide(
-                context=contexts.agent,
-                current_observation=frame_context.current_observation,
-                action_space=prompt_actions.allowed_actions,
-                tool_runtime=tool_runtime,
-                recent_action_history=frame_context.recent_action_history,
-                glossary_actions=frame_context.control_mode.allowed_actions,
-                first_observation_ref=frame_context.first_observation_ref,
-                recent_action_history_available=recent_action_history_available,
-                action_outcome_evidence=prompt_actions.evidence,
-            )
-    except Exception as exc:
-        decision = fallback_decision_result(
-            frame_context=frame_context,
-            turn_id=turn_id,
-            action_space=fallback_action_space,
-            error=exc,
-            observation_text_config=model_observation_text_config(agent),
-        )
-    finally:
-        decision_duration_seconds = perf_counter() - decision_started_at
-        debug.emit(
-            ModelCallCompleted(
-                role="agent",
-                duration_seconds=decision_duration_seconds,
-            )
-        )
+    )
     debug.capture_model_inputs(frame_context, turn_id, agent)
     debug.emit(
         AgentProviderRequestsCaptured(
@@ -173,36 +161,12 @@ def validate_decision(
     if action.is_none():
         raise RuntimeError("final controllable frame cannot submit synthetic NONE")
 
-    matched = next(
-        (
-            candidate
-            for candidate in control_mode.allowed_actions
-            if candidate.action_id == action.action_id
-        ),
-        None,
+    is_allowed = any(
+        candidate.action_id == action.action_id
+        for candidate in control_mode.allowed_actions
     )
-    if matched is None:
+    if not is_allowed:
         raise RuntimeError(f"X returned invalid action for current frame: {action.name}")
-    if _requires_action_data(matched):
-        _validate_action6_payload(action)
-    else:
-        if action.data is not None:
-            raise RuntimeError("simple final action must not include action data")
-        if action.target is not None:
-            raise RuntimeError("simple final action must not include target text")
-
-
-def _requires_action_data(action: ActionSpec) -> bool:
-    return action.is_complex() or action.name == "ACTION6"
-
-
-def _validate_action6_payload(action: ActionSpec) -> None:
-    if action.data is None:
-        raise RuntimeError("ACTION6 final action requires action data")
-    _action6_arc_grid_coordinate(action, "x")
-    _action6_arc_grid_coordinate(action, "y")
-    if action.target is None or not action.target.strip():
-        raise RuntimeError("ACTION6 final action requires non-empty target text")
 
 
 def bounded_agent_action_history(
@@ -247,6 +211,7 @@ def prompt_action_outcome(
     action_history: Sequence[ActionHistoryItem],
     action_suppression_zero_changed_pixel_turns: int,
     updater_stagnation_warning_zero_changed_pixel_turns: int,
+    crop_edges: Any | None = None,
 ) -> PromptActionOutcome:
     """Return prompt-facing allowed actions plus low-information evidence."""
 
@@ -266,13 +231,21 @@ def prompt_action_outcome(
     disabled_reason = ""
     repeated_action = ""
     repeated_count = 0
+    suppress_action6_as_class = _suppress_action6_as_class(actions)
 
-    latest_streak = _latest_same_action_streak(controllable_history)
-    latest_same_action_zero_changed_pixel_count = (
-        _latest_same_action_zero_changed_pixel_count(latest_streak)
+    latest_streak = _latest_same_action_streak(
+        controllable_history,
+        suppress_action6_as_class=suppress_action6_as_class,
+    )
+    latest_same_action_zero_changed_pixel_turn_count = (
+        _latest_same_action_zero_changed_pixel_turn_count(latest_streak)
     )
     if latest_streak:
-        repeated_action = _action_suppression_label(latest_streak[0].action)
+        repeated_action = _action_suppression_label(
+            latest_streak[0].action,
+            suppress_action6_as_class=suppress_action6_as_class,
+            crop_edges=crop_edges,
+        )
         repeated_count = len(latest_streak)
 
     if (
@@ -287,16 +260,20 @@ def prompt_action_outcome(
         if (
             allowed_match
             and _is_suppressible_prompt_action(latest_action)
-            and all(entry.changed_pixel_count == 0 for entry in latest_window)
+            and all(entry.changed_pixel_percent == 0.0 for entry in latest_window)
         ):
-            suppression_label = _action_suppression_label(latest_action)
-            if latest_action.name == "ACTION6":
+            suppression_label = _action_suppression_label(
+                latest_action,
+                suppress_action6_as_class=suppress_action6_as_class,
+                crop_edges=crop_edges,
+            )
+            if latest_action.name == "ACTION6" and not suppress_action6_as_class:
                 suppressed_actions = (suppression_label,)
                 suppression_reason = (
                     f"{suppression_label} was prompt-suppressed because the "
                     f"latest {action_suppression_zero_changed_pixel_turns} "
                     "controllable uses of that coordinate had "
-                    "changed_cells=0. ACTION6 remains available; choose a "
+                    "changed_pixel_percent=0. ACTION6 remains available; choose a "
                     "different coordinate."
                 )
             else:
@@ -311,7 +288,7 @@ def prompt_action_outcome(
                     suppression_reason = (
                         f"{suppression_label} was omitted because the latest "
                         f"{action_suppression_zero_changed_pixel_turns} controllable "
-                        "uses of that action had changed_cells=0."
+                        "uses of that action had changed_pixel_percent=0."
                     )
                 else:
                     disabled_reason = (
@@ -321,7 +298,7 @@ def prompt_action_outcome(
 
     stagnation_warning = (
         updater_stagnation_warning_zero_changed_pixel_turns > 0
-        and latest_same_action_zero_changed_pixel_count
+        and latest_same_action_zero_changed_pixel_turn_count
         >= updater_stagnation_warning_zero_changed_pixel_turns
     )
     return PromptActionOutcome(
@@ -334,7 +311,7 @@ def prompt_action_outcome(
             latest_repeated_action=repeated_action,
             latest_repeated_action_count=repeated_count,
             latest_same_action_zero_changed_pixel_turn_count=(
-                latest_same_action_zero_changed_pixel_count
+                latest_same_action_zero_changed_pixel_turn_count
             ),
             stagnation_warning_threshold=(
                 updater_stagnation_warning_zero_changed_pixel_turns
@@ -346,13 +323,24 @@ def prompt_action_outcome(
 
 def _latest_same_action_streak(
     history: Sequence[ActionHistoryEntry],
+    *,
+    suppress_action6_as_class: bool,
 ) -> tuple[ActionHistoryEntry, ...]:
     if not history:
         return ()
-    latest_identity = _action_suppression_identity(history[-1].action)
+    latest_identity = _action_suppression_identity(
+        history[-1].action,
+        suppress_action6_as_class=suppress_action6_as_class,
+    )
     streak: list[ActionHistoryEntry] = []
     for entry in reversed(history):
-        if _action_suppression_identity(entry.action) != latest_identity:
+        if (
+            _action_suppression_identity(
+                entry.action,
+                suppress_action6_as_class=suppress_action6_as_class,
+            )
+            != latest_identity
+        ):
             break
         streak.append(entry)
     return tuple(streak)
@@ -373,12 +361,12 @@ def _controllable_entries_since_last_reset(
     )
 
 
-def _latest_same_action_zero_changed_pixel_count(
+def _latest_same_action_zero_changed_pixel_turn_count(
     history: Sequence[ActionHistoryEntry],
 ) -> int:
     count = 0
     for entry in history:
-        if entry.changed_pixel_count != 0:
+        if entry.changed_pixel_percent != 0.0:
             break
         count += 1
     return count
@@ -388,14 +376,27 @@ def _is_suppressible_prompt_action(action: ActionSpec) -> bool:
     return (
         not action.is_none()
         and (
-            action.name == "ACTION6"
+            (action.name == "ACTION6" and bool(action.data))
             or (action.data is None and not action.is_complex())
         )
     )
 
 
-def _action_suppression_identity(action: ActionSpec) -> tuple[Any, ...]:
+def _suppress_action6_as_class(actions: Sequence[ActionSpec]) -> bool:
+    del actions
+    return False
+
+
+def _action_suppression_identity(
+    action: ActionSpec,
+    *,
+    suppress_action6_as_class: bool,
+) -> tuple[Any, ...]:
     if action.name == "ACTION6":
+        if suppress_action6_as_class:
+            return ("ACTION6",)
+        if not action.data:
+            return ("ACTION6", None, None)
         return (
             "ACTION6",
             _action6_arc_grid_coordinate(action, "x"),
@@ -406,10 +407,30 @@ def _action_suppression_identity(action: ActionSpec) -> tuple[Any, ...]:
     return (action.name,)
 
 
-def _action_suppression_label(action: ActionSpec) -> str:
-    if action.name == "ACTION6":
-        return model_facing_action_text(action)
+def _action_suppression_label(
+    action: ActionSpec,
+    *,
+    suppress_action6_as_class: bool,
+    crop_edges: Any | None = None,
+) -> str:
+    if action.name == "ACTION6" and not suppress_action6_as_class:
+        return model_facing_action_text(
+            action,
+            crop_edges=crop_edges,
+        )
     return action.name
+
+
+def model_input_crop_edges(model: Any) -> Any | None:
+    """Return the prompt image crop edges exposed by a model adapter, if any."""
+
+    crop_edges = getattr(model, "input_image_crop_arc_grid_edges", None)
+    if crop_edges is not None:
+        return crop_edges
+    config = getattr(model, "config", None)
+    if config is None:
+        return None
+    return getattr(config, "input_image_crop_arc_grid_edges", None)
 
 
 def _action6_arc_grid_coordinate(action: ActionSpec, key: str) -> int:
@@ -431,37 +452,203 @@ def build_action_history_entry(
     frame_context: FrameTurnContext,
     final_action: ActionSpec,
     next_observation: Observation,
-    changed_pixel_count: int,
+    changed_pixel_percent: float,
     change_summary: str,
-    changed_cell_percent: float | None = None,
-    completed_levels: int | None = None,
-    action_count: int | None = None,
+    retained_animation_frame_count: int = 0,
+    skipped_animation_frame_count: int | None = None,
+    animation_avg_changed_pixel_percent: float | None = None,
 ) -> ActionHistoryEntry:
     """Build one prompt-facing history entry after a valid frame decision."""
 
-    if changed_pixel_count < 0:
-        raise ValueError("changed_pixel_count must be non-negative")
+    if not isfinite(changed_pixel_percent) or not 0 <= changed_pixel_percent <= 100:
+        raise ValueError("changed_pixel_percent must be finite and within 0..100")
+    if retained_animation_frame_count < 0:
+        raise ValueError("retained_animation_frame_count must be non-negative")
+    if (
+        animation_avg_changed_pixel_percent is not None
+        and (
+            not isfinite(animation_avg_changed_pixel_percent)
+            or not 0 <= animation_avg_changed_pixel_percent <= 100
+        )
+    ):
+        raise ValueError(
+            "animation_avg_changed_pixel_percent must be finite and within 0..100"
+        )
     return ActionHistoryEntry(
         action=final_action,
         controllable=frame_context.control_mode.controllable,
-        changed_pixel_count=changed_pixel_count,
+        changed_pixel_percent=changed_pixel_percent,
         change_summary=change_summary,
-        changed_cell_percent=changed_cell_percent,
-        completed_levels=completed_levels,
-        action_count=action_count,
+        retained_animation_frame_count=retained_animation_frame_count,
         skipped_intermediate_animation_frame_count=(
-            skipped_intermediate_animation_frame_count(
+            skipped_animation_frame_count
+            if skipped_animation_frame_count is not None
+            else skipped_intermediate_animation_frame_count(
                 frame_context,
                 next_observation=next_observation,
             )
         ),
+        animation_avg_changed_pixel_percent=animation_avg_changed_pixel_percent,
     )
 
 
-def changed_pixel_count(left: Any, right: Any) -> int:
-    """Return changed ARC cells in the model-visible cropped frame."""
+def observation_visible_changed_pixel_percent(
+    left: Observation,
+    right: Observation,
+    *,
+    frame_scale: int,
+    size: str | tuple[int, int] | None,
+    resample: str,
+    crop_edges: Any | None,
+) -> float:
+    """Return changed-pixel percent after the model-visible image transform."""
 
-    return cropped_changed_cell_count(left, right)
+    return image_changed_pixel_percent(
+        model_visible_observation_image(
+            left,
+            frame_scale=frame_scale,
+            size=size,
+            resample=resample,
+            crop_edges=crop_edges,
+        ),
+        model_visible_observation_image(
+            right,
+            frame_scale=frame_scale,
+            size=size,
+            resample=resample,
+            crop_edges=crop_edges,
+        ),
+    )
+
+
+def max_observation_transition_changed_pixel_percent(
+    observations: Sequence[Observation],
+    *,
+    frame_scale: int,
+    size: str | tuple[int, int] | None,
+    resample: str,
+    crop_edges: Any | None,
+) -> float:
+    """Return the largest model-visible consecutive-frame change in a bundle."""
+
+    values = observation_transition_changed_pixel_percents(
+        observations,
+        frame_scale=frame_scale,
+        size=size,
+        resample=resample,
+        crop_edges=crop_edges,
+    )
+    return max(values, default=0.0)
+
+
+def average_observation_transition_changed_pixel_percent(
+    observations: Sequence[Observation],
+    *,
+    frame_scale: int,
+    size: str | tuple[int, int] | None,
+    resample: str,
+    crop_edges: Any | None,
+) -> float | None:
+    """Return average model-visible consecutive-frame change for animation evidence."""
+
+    values = observation_transition_changed_pixel_percents(
+        observations,
+        frame_scale=frame_scale,
+        size=size,
+        resample=resample,
+        crop_edges=crop_edges,
+    )
+    if not values:
+        return None
+    return float(sum(values) / len(values))
+
+
+def observation_transition_changed_pixel_percents(
+    observations: Sequence[Observation],
+    *,
+    frame_scale: int,
+    size: str | tuple[int, int] | None,
+    resample: str,
+    crop_edges: Any | None,
+) -> tuple[float, ...]:
+    """Return model-visible changed-pixel percentages for consecutive frames."""
+
+    if len(observations) < 2:
+        return ()
+    images = tuple(
+        model_visible_observation_image(
+            observation,
+            frame_scale=frame_scale,
+            size=size,
+            resample=resample,
+            crop_edges=crop_edges,
+        )
+        for observation in observations
+    )
+    return tuple(
+        image_changed_pixel_percent(left, right)
+        for left, right in zip(images, images[1:])
+    )
+
+
+def model_visible_observation_image(
+    observation: Observation,
+    *,
+    frame_scale: int,
+    size: str | tuple[int, int] | None,
+    resample: str,
+    crop_edges: Any | None,
+) -> Any:
+    """Return the image evidence exactly as the change-summary model sees it."""
+
+    return crop_image_arc_grid_edges(
+        resize_image(
+            observation_to_pil_image(observation, frame_scale=frame_scale),
+            size=size,
+            resample=resample,
+        ),
+        crop_edges,
+    )
+
+
+def image_changed_pixel_percent(left_image: Any, right_image: Any) -> float:
+    """Return changed-pixel percentage between exact RGB images."""
+
+    import numpy as np
+
+    left_array = np.asarray(left_image.convert("RGB"))
+    right_array = np.asarray(right_image.convert("RGB"))
+    if left_array.shape != right_array.shape:
+        return 100.0
+    surface_size = _frame_surface_size(left_array)
+    if surface_size <= 0:
+        return 0.0
+    changed = left_array != right_array
+    if changed.ndim == 3:
+        changed = np.any(changed, axis=-1)
+    return float(np.count_nonzero(changed) * 100.0 / surface_size)
+
+
+def changed_pixel_count(left: Any, right: Any) -> int:
+    """Return the raw frame cell/pixel count changed between two frames."""
+
+    import numpy as np
+
+    left_array = np.asarray(left)
+    right_array = np.asarray(right)
+    if left_array.shape != right_array.shape:
+        return max(_frame_surface_size(left_array), _frame_surface_size(right_array))
+    if left_array.shape == ():
+        return 0 if _structurally_equal(left, right) else 1
+    if _numeric_array(left_array) and _numeric_array(right_array):
+        changed = left_array != right_array
+        if _rgb_like_array(left_array):
+            changed = np.any(changed, axis=-1)
+        return int(np.count_nonzero(changed))
+    changed = left_array != right_array
+    if _rgb_like_array(left_array):
+        changed = np.any(changed, axis=-1)
+    return int(np.count_nonzero(changed))
 
 
 def unroll_observation(

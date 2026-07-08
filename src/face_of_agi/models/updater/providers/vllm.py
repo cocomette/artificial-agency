@@ -5,16 +5,12 @@ from __future__ import annotations
 from typing import Any
 
 from face_of_agi.debug.capture import capture_vllm_model_input
-from face_of_agi.models.image_inputs import vllm_text_image_content
+from face_of_agi.models.image_inputs import frame_to_provider_data_url
 from face_of_agi.models.providers.vllm import (
     VLLMChatClient,
     chat_message_optional_content,
     chat_response_metadata,
     json_schema_response_format,
-)
-from face_of_agi.models.structured_output import (
-    DEFAULT_INVALID_OUTPUT_PREVIEW_CHARS,
-    clipped_invalid_output_preview,
 )
 from face_of_agi.models.updater.adapter import PromptUpdaterAdapter
 from face_of_agi.models.updater.config import VLLMUpdaterConfig
@@ -131,24 +127,9 @@ class VLLMUpdaterProvider:
             [
                 f"Repair attempt {attempt}: the previous updater output was invalid.",
                 "Validation error:\n" + validation_error,
-                "Invalid output preview:\n"
-                + clipped_invalid_output_preview(
-                    invalid_text,
-                    max_chars=getattr(
-                        self.config,
-                        "repair_invalid_output_preview_chars",
-                        DEFAULT_INVALID_OUTPUT_PREVIEW_CHARS,
-                    ),
-                ),
+                "Invalid output:\n" + invalid_text,
                 "Original updater input:\n" + request.text,
-                _repair_output_instruction(
-                    request,
-                    agent_game_context_max_chars=getattr(
-                        self.config,
-                        "agent_game_context_max_chars",
-                        AGENT_GAME_CONTEXT_MAX_CHARS,
-                    ),
-                ),
+                _repair_output_instruction(request),
             ]
         )
         return [
@@ -188,21 +169,33 @@ class VLLMUpdaterProvider:
         *,
         content: str | None = None,
     ) -> dict[str, Any]:
-        text = request.text if content is None else content
-        if not request.images:
-            return {
-                "role": "user",
-                "content": text,
+        message_content: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": request.text if content is None else content,
             }
-        return {
-            "role": "user",
-            "content": vllm_text_image_content(
-                text,
-                tuple(image.image for image in request.images),
-                detail=self.config.input_image_detail,
-                mime_type=self.config.image_mime_type,
-            ),
-        }
+        ]
+        for image in request.images:
+            message_content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": self._image_data_url(image.image),
+                        "detail": self.config.input_image_detail,
+                    },
+                }
+            )
+        return {"role": "user", "content": message_content}
+
+    def _image_data_url(self, frame: Any) -> str:
+        return frame_to_provider_data_url(
+            frame,
+            frame_scale=self.config.frame_scale,
+            size=self.config.input_image_size,
+            resample=self.config.input_image_resample,
+            mime_type=self.config.image_mime_type,
+            crop_edges=self.config.input_image_crop_arc_grid_edges,
+        )
 
     def _capture_request(
         self,
@@ -232,18 +225,14 @@ class VLLMUpdaterProvider:
         )
 
 
-def _repair_output_instruction(
-    request: PromptUpdateRequest,
-    *,
-    agent_game_context_max_chars: int = AGENT_GAME_CONTEXT_MAX_CHARS,
-) -> str:
+def _repair_output_instruction(request: PromptUpdateRequest) -> str:
     if request.target.task == "agent_game":
         return (
             "Return only corrected JSON with exactly one top-level "
             "`updated_context` field. Its value must be an object containing "
             "exactly these string fields: goals, game_mechanics, policy, "
             "history, extras. The full serialized context must be no more "
-            f"than {agent_game_context_max_chars} characters. Use enough "
+            f"than {AGENT_GAME_CONTEXT_MAX_CHARS} characters. Use enough "
             "detail to preserve useful current context, remove chronological "
             "action logs, and delete stale or duplicate details. When the "
             "evidence supports a revision, "

@@ -18,21 +18,19 @@ from face_of_agi.contracts import (
 )
 from face_of_agi.frames import (
     FRAME_PAYLOAD_TYPE,
+    observation_to_pil_image,
     to_memory_jsonable,
 )
 from face_of_agi.models.action_glossary import append_action_glossary
-from face_of_agi.models.color_glossary import append_arc_color_glossary
 from face_of_agi.models.action_history import (
     grouped_action_history_text,
     model_facing_action_text,
+    model_facing_action_text_for_crop,
 )
-from face_of_agi.models.action_coordinates import action6_coordinate_range_text
 from face_of_agi.models.historizer import (
     AGENT_CONTEXT_HISTORY_KEYS,
     AgentContextHistorySummary,
 )
-from face_of_agi.models.observation_text import serialize_observation
-from face_of_agi.models.image_inputs import observation_to_cropped_image
 from face_of_agi.models.structured_output import (
     append_output_schema_to_instructions,
     provider_repair_callback,
@@ -41,11 +39,9 @@ from face_of_agi.models.structured_output import (
 from face_of_agi.models.updater.config import UpdaterConfig
 from face_of_agi.models.updater.contracts import (
     AGENT_GAME_CONTEXT_KEYS,
-    AGENT_GAME_CONTEXT_FIELD_MAX_CHARS,
     AGENT_GAME_CONTEXT_MAX_CHARS,
     ContextSegment,
     AgentGameContextUpdateInput,
-    GENERAL_CONTEXT_MAX_CHARS,
     GeneralKnowledgeUpdateInput,
     PromptImage,
     PromptUpdateProviderResponse,
@@ -111,20 +107,13 @@ class PromptUpdaterAdapter:
             previous_context=update_input.previous_context,
             text=_agent_game_prompt_text(
                 update_input,
-                observation_text_config=self.config.observation_text,
+                crop_edges=self.config.input_image_crop_arc_grid_edges,
             ),
             glossary_actions=update_input.glossary_actions,
-            images=(
-                PromptImage(
-                    label="current_observation",
-                    image=observation_to_cropped_image(
-                        update_input.current_observation,
-                        observation_text_config=self.config.observation_text,
-                        frame_scale=self.config.frame_scale,
-                        size=self.config.input_image_size,
-                        resample=self.config.input_image_resample,
-                    ),
-                ),
+            images=_current_observation_image(
+                update_input.current_observation,
+                role="agent game",
+                frame_scale=self.config.frame_scale,
             ),
         )
 
@@ -160,8 +149,8 @@ class PromptUpdaterAdapter:
         task: UpdaterTask,
         previous_context: RoleContext,
         text: str,
-        glossary_actions: Sequence[ActionSpec] | None = None,
         images: tuple[PromptImage, ...] = (),
+        glossary_actions: Sequence[ActionSpec] | None = None,
     ) -> RoleContext:
         if task == "agent_game" and glossary_actions is None:
             raise ValueError(f"{task} updater requires glossary actions")
@@ -171,27 +160,7 @@ class PromptUpdaterAdapter:
             task=task,
             previous_context=previous_context,
         )
-        general_context_max_chars = getattr(
-            self.config,
-            "general_context_max_chars",
-            GENERAL_CONTEXT_MAX_CHARS,
-        )
-        agent_game_context_max_chars = getattr(
-            self.config,
-            "agent_game_context_max_chars",
-            AGENT_GAME_CONTEXT_MAX_CHARS,
-        )
-        agent_game_context_field_max_chars = getattr(
-            self.config,
-            "agent_game_context_field_max_chars",
-            AGENT_GAME_CONTEXT_FIELD_MAX_CHARS,
-        )
-        output_schema = updater_output_json_schema(
-            task,
-            general_context_max_chars=general_context_max_chars,
-            agent_game_context_max_chars=agent_game_context_max_chars,
-            agent_game_context_field_max_chars=agent_game_context_field_max_chars,
-        )
+        output_schema = updater_output_json_schema(task)
         instructions_text = load_updater_instructions(
             task=task,
             role=role,
@@ -199,13 +168,10 @@ class PromptUpdaterAdapter:
         )
         if task == "agent_game":
             assert glossary_actions is not None
-            instructions_text = append_arc_color_glossary(
-                append_action_glossary(
-                    instructions_text,
-                    glossary_actions,
-                    mode="agent_update",
-                    observation_text_config=self.config.observation_text,
-                )
+            instructions_text = append_action_glossary(
+                instructions_text,
+                glossary_actions,
+                mode="agent_update",
             )
         instructions = append_output_schema_to_instructions(
             instructions_text,
@@ -230,9 +196,6 @@ class PromptUpdaterAdapter:
             text_of=lambda item: item.text,
             validate=_updated_context_validator(
                 task=task,
-                general_context_max_chars=general_context_max_chars,
-                agent_game_context_max_chars=agent_game_context_max_chars,
-                agent_game_context_field_max_chars=agent_game_context_field_max_chars,
             ),
             repair=provider_repair_callback(
                 self.provider,
@@ -291,22 +254,13 @@ def _with_updated_segment(
     return RoleContext(general=context.general, game=updated_text)
 
 
-def parse_updated_context_output(
-    text: str,
-    *,
-    max_chars: int | None = GENERAL_CONTEXT_MAX_CHARS,
-) -> str:
+def parse_updated_context_output(text: str) -> str:
     """Parse the required JSON updater output contract."""
 
-    return _parse_string_updated_context_output(text, max_chars=max_chars)
+    return _parse_string_updated_context_output(text)
 
 
-def parse_agent_game_updated_context_output(
-    text: str,
-    *,
-    total_max_chars: int | None = AGENT_GAME_CONTEXT_MAX_CHARS,
-    field_max_chars: int | None = AGENT_GAME_CONTEXT_FIELD_MAX_CHARS,
-) -> str:
+def parse_agent_game_updated_context_output(text: str) -> str:
     """Parse agent-game context JSON and return it as context text."""
 
     loaded = _load_updated_context_json(text)
@@ -337,38 +291,21 @@ def parse_agent_game_updated_context_output(
             "agent game updater updated_context values must be strings: "
             + ", ".join(sorted(invalid))
         )
-    if field_max_chars is not None:
-        max_chars = int(field_max_chars)
-        oversized = [
-            key
-            for key, value in updated_context.items()
-            if len(value.strip()) > max_chars
-        ]
-        if oversized:
-            raise UpdaterOutputError(
-                "agent game updater updated_context values are too long: "
-                + ", ".join(sorted(oversized))
-                + f" exceed the {max_chars} character cap"
-            )
     ordered_context = {
         key: updated_context[key] for key in AGENT_GAME_CONTEXT_KEYS
     }
     updated_text = json.dumps(ordered_context, indent=2, ensure_ascii=False)
-    _validate_agent_game_context_length(updated_text, max_chars=total_max_chars)
+    _validate_agent_game_context_length(updated_text)
     return updated_text
 
 
-def _validate_agent_game_context_length(
-    updated_text: str,
-    *,
-    max_chars: int | None = AGENT_GAME_CONTEXT_MAX_CHARS,
-) -> None:
-    if max_chars is None or len(updated_text) <= int(max_chars):
+def _validate_agent_game_context_length(updated_text: str) -> None:
+    if len(updated_text) <= AGENT_GAME_CONTEXT_MAX_CHARS:
         return
     raise UpdaterOutputError(
         "agent game updater updated_context is too long: "
         f"{len(updated_text)} characters exceeds the "
-        f"{int(max_chars)} character cap. Revise the full "
+        f"{AGENT_GAME_CONTEXT_MAX_CHARS} character cap. Revise the full "
         "context below the cap by removing stale details, duplicate evidence, "
         "and chronological action logs while preserving current goals, "
         "mechanics, policy, history, and extras that improve the next "
@@ -376,33 +313,24 @@ def _validate_agent_game_context_length(
     )
 
 
+def _updated_context_parser(task: UpdaterTask):
+    if task == "agent_game":
+        return parse_agent_game_updated_context_output
+    return parse_updated_context_output
+
+
 def _updated_context_validator(
     *,
     task: UpdaterTask,
-    general_context_max_chars: int | None = GENERAL_CONTEXT_MAX_CHARS,
-    agent_game_context_max_chars: int | None = AGENT_GAME_CONTEXT_MAX_CHARS,
-    agent_game_context_field_max_chars: int | None = AGENT_GAME_CONTEXT_FIELD_MAX_CHARS,
 ):
     def validate(text: str) -> str:
-        if task == "agent_game":
-            return parse_agent_game_updated_context_output(
-                text,
-                total_max_chars=agent_game_context_max_chars,
-                field_max_chars=agent_game_context_field_max_chars,
-            )
-        return parse_updated_context_output(
-            text,
-            max_chars=general_context_max_chars,
-        )
+        parser = _updated_context_parser(task)
+        return parser(text)
 
     return validate
 
 
-def _parse_string_updated_context_output(
-    text: str,
-    *,
-    max_chars: int | None = GENERAL_CONTEXT_MAX_CHARS,
-) -> str:
+def _parse_string_updated_context_output(text: str) -> str:
     """Parse the default JSON updater output contract."""
 
     loaded = _load_updated_context_json(text)
@@ -410,12 +338,6 @@ def _parse_string_updated_context_output(
     if not isinstance(updated_context, str):
         raise UpdaterOutputError(
             "updater response JSON is missing string field 'updated_context'"
-        )
-    if max_chars is not None and len(updated_context.strip()) > int(max_chars):
-        raise UpdaterOutputError(
-            "updater response field 'updated_context' is too long: "
-            f"{len(updated_context.strip())} characters exceeds the "
-            f"{int(max_chars)} character cap"
         )
     return updated_context
 
@@ -507,33 +429,47 @@ def _summarize_frame_payloads(value: Any) -> Any:
     return value
 
 
+def _current_observation_image(
+    current_observation: Observation | None,
+    *,
+    role: str,
+    frame_scale: int,
+) -> tuple[PromptImage, ...]:
+    if current_observation is None:
+        raise ValueError(f"{role} updater requires a current observation")
+    return (
+        PromptImage(
+            label="current_observation_frame",
+            image=observation_to_pil_image(
+                current_observation,
+                frame_scale=frame_scale,
+            ),
+        ),
+    )
+
+
 def _agent_game_prompt_text(
     update_input: AgentGameContextUpdateInput,
     *,
-    observation_text_config: Any,
+    crop_edges: Any | None,
 ) -> str:
     return "\n\n".join(
         [
             "## Previous agent game context\n\n"
             + _text_or_none(update_input.previous_context.game),
-            "## Current observation\n\n"
-            + serialize_observation(
-                update_input.current_observation,
-                config=observation_text_config,
-                label="current_observation",
-                include_header_metadata=False,
-            ).text,
             "## Allowed actions\n\n"
             + _allowed_actions_text(
                 update_input.allowed_actions,
-                observation_text_config=observation_text_config,
+                crop_edges=crop_edges,
             ),
             "## Action outcome evidence\n\n"
             + _action_outcome_evidence_text(update_input.action_outcome_evidence),
+            "## Action history window\n\n"
+            + _action_history_window_text(update_input.action_history_window),
             "## Action history\n\n"
             + _numbered_action_history_text(
                 update_input.action_history,
-                observation_text_config=observation_text_config,
+                crop_edges=crop_edges,
             ),
             "## Agent context history\n\n"
             + _agent_context_history_text(update_input.context_history),
@@ -557,7 +493,7 @@ def _text_or_none(value: str | None) -> str:
 def _allowed_actions_text(
     action_space: tuple[ActionSpec, ...],
     *,
-    observation_text_config: Any = None,
+    crop_edges: Any | None,
 ) -> str:
     if not action_space:
         return "none"
@@ -569,36 +505,49 @@ def _allowed_actions_text(
         )
     ]
     lines.extend(
-        f"- {_action_text(action, observation_text_config=observation_text_config)}"
+        f"- {_action_text(action, crop_edges=crop_edges)}"
         for action in action_space
     )
     return "\n".join(lines)
 
 
+def _action_history_window_text(window: int) -> str:
+    if window < 0:
+        raise ValueError("agent updater action history window must be non-negative")
+    return "\n".join(
+        [
+            f"- prior_action_group_window: {window}",
+            (
+                "- rows: up to this many prior controllable action groups, "
+                "followed by the latest transition group"
+            ),
+        ]
+    )
+
+
 def _numbered_action_history_text(
     history: tuple[ActionHistoryItem, ...],
     *,
-    observation_text_config: Any = None,
+    crop_edges: Any | None,
 ) -> str:
     if not history:
         return "none"
-    action6_range = action6_coordinate_range_text(observation_text_config)
     lines = [
         (
             "Numbered oldest-to-newest. Controllable action rows may include "
-            "nested animation_after rows; GAME_RESET rows mark environment "
+            "animation evidence fields; nested animation_after rows mark "
+            "synthetic animation-only turns. GAME_RESET rows mark environment "
             "resets between action groups, and SCORE_ADVANCE rows mark score "
             "or progress increases. The [latest] marker identifies the "
-            "transition, reset, or score marker that produced the current "
-            "observation. ACTION6 data in this history is rendered as ARC "
-            "grid coordinates and may include target text. Future ACTION6 "
-            "outputs should use visible cropped coordinates "
-            f"{action6_range} on both axes and include a target description."
+            "transition, reset, or score marker that produced the attached "
+            "current_observation_frame. ACTION6 data in this history is "
+            "rendered as normalized visual 0..1000 coordinates, matching the "
+            "coordinate space used for future ACTION6 outputs."
         )
     ]
     return grouped_action_history_text(
         history,
-        action_text=model_facing_action_text,
+        action_text=model_facing_action_text_for_crop(crop_edges),
         numbered=True,
         latest_description=lines[0],
     )
@@ -631,7 +580,7 @@ def _action_outcome_evidence_text(evidence: ActionOutcomeEvidence) -> str:
     if evidence.stagnation_warning:
         lines.append(
             "- STAGNATION_WARNING: ACTIVE; THE LATEST REPEATED CONTROLLABLE "
-            "ACTION HIT THE CHANGED_CELLS=0 WARNING THRESHOLD. "
+            "ACTION HIT THE CHANGED_PIXEL_PERCENT=0 WARNING THRESHOLD. "
             "IMMEDIATELY REVISE POLICY AND/OR GOALS: STOP THAT "
             "LOW-INFORMATION ACTION PATTERN, REPLACE ANY STALE GOAL "
             "HYPOTHESIS, AND FORCE A CONCRETE EXPLORATORY ACTION SEQUENCE "
@@ -695,20 +644,19 @@ def _metric_text(value: float | int | None) -> str:
 def _action_text(
     action: Any,
     *,
-    observation_text_config: Any = None,
+    crop_edges: Any | None,
 ) -> str:
     if isinstance(action, ActionSpec):
         return model_facing_action_text(
             action,
-            observation_text_config=observation_text_config,
+            crop_edges=crop_edges,
         )
     action_id = getattr(action, "action_id", action)
     name = getattr(action_id, "name", action_id)
     data = getattr(action, "data", None)
     is_complex = getattr(action, "is_complex", None)
     if callable(is_complex) and is_complex() and not data:
-        action6_range = action6_coordinate_range_text(observation_text_config)
-        return f"{name}(x,y {action6_range},target)"
+        return f"{name}(x,y normalized_0_1000)"
     if data:
         return f"{name} {json.dumps(data, sort_keys=True, ensure_ascii=False)}"
     return str(name)

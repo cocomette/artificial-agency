@@ -23,41 +23,26 @@ AGENT_GAME_CONTEXT_KEYS = (
     "history",
     "extras",
 )
-GENERAL_CONTEXT_MAX_CHARS = 20000
 AGENT_GAME_CONTEXT_MAX_CHARS = 12000
-AGENT_GAME_CONTEXT_FIELD_MAX_CHARS = 6000
 
 
-def updated_context_json_schema(
-    *,
-    general_context_max_chars: int | None = GENERAL_CONTEXT_MAX_CHARS,
-) -> dict[str, Any]:
+def updated_context_json_schema() -> dict[str, Any]:
     """Return the provider-neutral updater output JSON schema."""
-
-    updated_context_schema: dict[str, Any] = {
-        "type": "string",
-        "description": "The complete revised context text.",
-    }
-    if general_context_max_chars is not None:
-        updated_context_schema["maxLength"] = int(general_context_max_chars)
 
     return {
         "type": "object",
         "properties": {
-            "updated_context": updated_context_schema,
+            "updated_context": {
+                "type": "string",
+                "description": "The complete revised context text.",
+            },
         },
         "required": ["updated_context"],
         "additionalProperties": False,
     }
 
 
-def agent_game_updated_context_json_schema(
-    *,
-    agent_game_context_max_chars: int | None = AGENT_GAME_CONTEXT_MAX_CHARS,
-    agent_game_context_field_max_chars: int | None = (
-        AGENT_GAME_CONTEXT_FIELD_MAX_CHARS
-    ),
-) -> dict[str, Any]:
+def agent_game_updated_context_json_schema() -> dict[str, Any]:
     """Return the agent game updater output JSON schema."""
 
     descriptions = {
@@ -77,18 +62,13 @@ def agent_game_updated_context_json_schema(
                 "type": "object",
                 "description": (
                     "Complete latest agent game context. The serialized "
-                    f"context must be at most {agent_game_context_max_chars} "
+                    f"context must be at most {AGENT_GAME_CONTEXT_MAX_CHARS} "
                     "characters."
                 ),
                 "properties": {
                     key: {
                         "type": "string",
                         "description": descriptions[key],
-                        **(
-                            {"maxLength": int(agent_game_context_field_max_chars)}
-                            if agent_game_context_field_max_chars is not None
-                            else {}
-                        ),
                     }
                     for key in AGENT_GAME_CONTEXT_KEYS
                 },
@@ -103,23 +83,12 @@ def agent_game_updated_context_json_schema(
 
 def updater_output_json_schema(
     task: UpdaterTask,
-    *,
-    general_context_max_chars: int | None = GENERAL_CONTEXT_MAX_CHARS,
-    agent_game_context_max_chars: int | None = AGENT_GAME_CONTEXT_MAX_CHARS,
-    agent_game_context_field_max_chars: int | None = (
-        AGENT_GAME_CONTEXT_FIELD_MAX_CHARS
-    ),
 ) -> dict[str, Any]:
     """Return the provider-neutral output schema for one updater task."""
 
     if task == "agent_game":
-        return agent_game_updated_context_json_schema(
-            agent_game_context_max_chars=agent_game_context_max_chars,
-            agent_game_context_field_max_chars=agent_game_context_field_max_chars,
-        )
-    return updated_context_json_schema(
-        general_context_max_chars=general_context_max_chars,
-    )
+        return agent_game_updated_context_json_schema()
+    return updated_context_json_schema()
 
 
 @dataclass(slots=True)
@@ -134,7 +103,7 @@ class UpdaterContextTarget:
 
 @dataclass(slots=True)
 class PromptImage:
-    """Provider-neutral image attached to one prompt update request."""
+    """Provider-neutral image attached to a prompt updater request."""
 
     label: str
     image: Any

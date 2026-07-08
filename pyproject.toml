@@ -3,18 +3,23 @@ name = "face-of-agi"
 version = "0.1.0"
 description = "Minimal ARC-AGI-3 agent framework skeleton."
 readme = "README.md"
-license = "Apache-2.0"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "arc-agi>=0.9.8",
     "matplotlib>=3.10.9",
-    "openai>=2.34.0",
     "pyyaml>=6.0.3",
     "rich>=13.9.4",
 ]
 
 [project.optional-dependencies]
-ml = []
+ml = [
+    "hf-xet>=1.4.3",
+    "ollama>=0.6.1",
+    "openai>=2.34.0",
+    "protobuf>=6.33.0",
+    "safetensors>=0.7.0",
+    "sentencepiece>=0.2.1",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -35,10 +40,16 @@ test = [
     "pytest>=9.0.3",
 ]
 dev = [
+    "hf-xet>=1.4.3",
     "ipykernel>=6.29.5",
     "notebook>=7.4.2",
+    "ollama>=0.6.1",
+    "openai>=2.34.0",
+    "protobuf>=6.33.0",
     "pytest>=9.0.3",
+    "safetensors>=0.7.0",
+    "sentencepiece>=0.2.1",
 ]
 
 [tool.pytest.ini_options]
-pythonpath = [".", "src"]
+pythonpath = ["."]

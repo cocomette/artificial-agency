@@ -2,43 +2,46 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass
+from collections.abc import Sequence
 from typing import Any, Protocol
 
 from face_of_agi.contracts import ActionSpec, Observation
 
-DEFAULT_CHANGE_SUMMARY_MAX_CHARS = 2000
 
-
-def change_summary_json_schema(
-    *,
-    summary_max_chars: int | None = DEFAULT_CHANGE_SUMMARY_MAX_CHARS,
-) -> dict[str, Any]:
+def change_summary_json_schema() -> dict[str, Any]:
     """Return the provider-neutral change-summary output schema."""
-
-    summary_schema: dict[str, Any] = {
-        "type": "string",
-        "minLength": 1,
-        "description": "One or two concise sentences describing visible change.",
-    }
-    if summary_max_chars is not None:
-        summary_schema["maxLength"] = int(summary_max_chars)
 
     return {
         "type": "object",
         "properties": {
-            "summary": summary_schema,
+            "summary": {
+                "type": "string",
+                "description": "One or two concise sentences describing visible change.",
+            },
             "change_detected": {
                 "type": "boolean",
-                "description": (
-                    "Whether any adjacent serialized frame pair changed inside "
-                    "the cropped ARC-grid area."
-                ),
+                "description": "Whether the attached frames show a visible change.",
             },
         },
         "required": ["summary", "change_detected"],
         "additionalProperties": False,
+    }
+
+
+def openai_change_summary_text_format(
+    *,
+    schema: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return OpenAI Responses text format for change summaries."""
+
+    return {
+        "format": {
+            "type": "json_schema",
+            "name": "change_summary",
+            "strict": True,
+            "schema": schema or change_summary_json_schema(),
+        }
     }
 
 
@@ -47,10 +50,9 @@ class ChangeSummaryResult:
     """Provider-neutral output from the change summary role."""
 
     summary: str
-    changed_pixel_count: int
+    changed_pixel_percent: float
     change_detected: bool
     metadata: dict[str, Any]
-    changed_cell_percent: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,8 +75,10 @@ class ChangeSummaryProvider(Protocol):
         *,
         instructions_text: str,
         prompt_text: str,
-        images: Sequence[Any],
+        previous_image: Any,
+        current_image: Any,
         output_schema: dict[str, Any],
+        images: Sequence[Any] | None = None,
     ) -> ChangeSummaryProviderResponse:
         """Return raw provider text for a transition change summary."""
         ...
@@ -84,38 +88,15 @@ class ChangeSummaryProvider(Protocol):
         *,
         instructions_text: str,
         prompt_text: str,
-        images: Sequence[Any],
+        previous_image: Any,
+        current_image: Any,
         output_schema: dict[str, Any],
         invalid_text: str,
         validation_error: str,
         attempt: int,
+        images: Sequence[Any] | None = None,
     ) -> ChangeSummaryProviderResponse:
         """Return repaired provider text for invalid structured output."""
-        ...
-
-    def reduce_complete(
-        self,
-        *,
-        instructions_text: str,
-        prompt_text: str,
-        images: Sequence[Any],
-        output_schema: dict[str, Any],
-    ) -> ChangeSummaryProviderResponse:
-        """Return raw provider text for a final reduced change summary."""
-        ...
-
-    def repair_reduce_complete(
-        self,
-        *,
-        instructions_text: str,
-        prompt_text: str,
-        images: Sequence[Any],
-        output_schema: dict[str, Any],
-        invalid_text: str,
-        validation_error: str,
-        attempt: int,
-    ) -> ChangeSummaryProviderResponse:
-        """Return repaired provider text for an invalid reduced summary."""
         ...
 
 
@@ -129,7 +110,9 @@ class ChangeSummaryModel(Protocol):
         action: ActionSpec,
         *,
         glossary_actions: Sequence[ActionSpec],
+        changed_pixel_percent: float,
         frame_observations: Sequence[Observation] | None = None,
+        max_transition_changed_pixel_percent: float | None = None,
     ) -> ChangeSummaryResult:
         """Return one compact visual change summary."""
         ...

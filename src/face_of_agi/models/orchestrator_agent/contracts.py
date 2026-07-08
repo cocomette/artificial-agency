@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Protocol, Sequence
 
 from face_of_agi.contracts import (
+    AgentCandidateAction,
     ActionHistoryItem,
     ActionOutcomeEvidence,
     ActionSpec,
@@ -12,9 +13,13 @@ from face_of_agi.contracts import (
     ExperimentToolInvocationResult,
     Observation,
     ObservationRef,
+    GoalPrediction,
+    InterestPrediction,
+    MemoryDocument,
     RoleContext,
     ToolCall,
     ToolName,
+    WorldPrediction,
 )
 
 
@@ -47,6 +52,36 @@ class AgentToolRuntime(Protocol):
 
 class OrchestratorAgentModel(Protocol):
     """Agent role X that chooses final actions."""
+
+    def propose_candidate_actions(
+        self,
+        *,
+        memory: MemoryDocument,
+        goal: GoalPrediction,
+        current_observation: Observation,
+        action_space: Sequence[ActionSpec],
+        max_candidates: int,
+        recent_action_history: tuple[ActionHistoryItem, ...] = (),
+        glossary_actions: Sequence[ActionSpec],
+    ) -> tuple[AgentCandidateAction, ...]:
+        """Return distinct coordinate candidates for the v1 two-stage loop."""
+        ...
+
+    def select_action(
+        self,
+        *,
+        memory: MemoryDocument,
+        goal: GoalPrediction,
+        current_observation: Observation,
+        candidates: Sequence[AgentCandidateAction],
+        world_predictions: Sequence[WorldPrediction],
+        interest_prediction: InterestPrediction | None = None,
+        first_observation_ref: ObservationRef | None = None,
+        recent_action_history: tuple[ActionHistoryItem, ...] = (),
+        glossary_actions: Sequence[ActionSpec],
+    ) -> DecisionResult:
+        """Select one final action from world-evaluated candidates."""
+        ...
 
     def decide(
         self,

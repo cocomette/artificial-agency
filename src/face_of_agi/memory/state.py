@@ -12,13 +12,18 @@ from face_of_agi.contracts import (
     ActionHistoryScoreAdvanceMarker,
     AgentTrace,
     ActionSpec,
+    CandidatePredictionRecord,
     ContextDocuments,
     FrameControlMode,
+    GoalPredictionRecord,
+    JudgeScoreRecord,
     MStateRecord,
     Observation,
     ObservationRef,
+    RewardRecord,
     RoleContext,
     RunMetadataRecord,
+    TurnLedgerRecord,
     TurnMetrics,
 )
 from face_of_agi.debug.contracts import ModelInputDebugRecord
@@ -311,6 +316,125 @@ class StateMemory:
             run_id=run_id,
             game_id=game_id,
             kind=kind,
+        )
+
+    def write_turn_ledger(
+        self,
+        *,
+        run_id: str,
+        game_id: str,
+        turn_id: int,
+        m_state_id: int | None,
+        action: ActionSpec,
+        change_summary: str,
+        memory_document: str,
+        goal_prediction: Any | None = None,
+        reward: Any | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> TurnLedgerRecord:
+        """Store one v1 turn-ledger row."""
+
+        return self.database.write_turn_ledger(
+            run_id=run_id,
+            game_id=game_id,
+            turn_id=turn_id,
+            m_state_id=m_state_id,
+            action=action,
+            change_summary=change_summary,
+            memory_document=memory_document,
+            goal_prediction=goal_prediction,
+            reward=reward,
+            metadata=metadata,
+        )
+
+    def write_candidate_prediction(
+        self,
+        *,
+        run_id: str,
+        game_id: str,
+        turn_id: int,
+        candidate_index: int,
+        action: ActionSpec,
+        prediction: str,
+        source: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> CandidatePredictionRecord:
+        """Store one candidate world prediction."""
+
+        return self.database.write_candidate_prediction(
+            run_id=run_id,
+            game_id=game_id,
+            turn_id=turn_id,
+            candidate_index=candidate_index,
+            action=action,
+            prediction=prediction,
+            source=source,
+            metadata=metadata,
+        )
+
+    def write_judge_score(
+        self,
+        *,
+        run_id: str,
+        game_id: str,
+        turn_id: int,
+        candidate_prediction_id: int | None,
+        score: float,
+        notes: str,
+        error_tags: tuple[str, ...],
+        metadata: dict[str, Any] | None = None,
+    ) -> JudgeScoreRecord:
+        """Store one Reward Judge score."""
+
+        return self.database.write_judge_score(
+            run_id=run_id,
+            game_id=game_id,
+            turn_id=turn_id,
+            candidate_prediction_id=candidate_prediction_id,
+            score=score,
+            notes=notes,
+            error_tags=error_tags,
+            metadata=metadata,
+        )
+
+    def write_goal_prediction(
+        self,
+        *,
+        run_id: str,
+        game_id: str,
+        turn_id: int,
+        goal_prediction: Any,
+        memory_document: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> GoalPredictionRecord:
+        """Store one Goal prediction."""
+
+        return self.database.write_goal_prediction(
+            run_id=run_id,
+            game_id=game_id,
+            turn_id=turn_id,
+            goal_prediction=goal_prediction,
+            memory_document=memory_document,
+            metadata=metadata,
+        )
+
+    def write_reward(
+        self,
+        *,
+        run_id: str,
+        game_id: str,
+        turn_id: int,
+        reward: Any,
+        metadata: dict[str, Any] | None = None,
+    ) -> RewardRecord:
+        """Store one reward row."""
+
+        return self.database.write_reward(
+            run_id=run_id,
+            game_id=game_id,
+            turn_id=turn_id,
+            reward=reward,
+            metadata=metadata,
         )
 
     def write_model_input_debug_record(

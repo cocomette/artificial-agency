@@ -1,8 +1,8 @@
-# H100 full game-loop run: X, S, and active P updater slots share one
-# vLLM-served Qwen3.5 122B-A10B GPTQ Int4 model.
+# Modal H100 full game-loop run: all v1 roles share one vLLM-served
+# Qwen3.5 122B-A10B GPTQ Int4 model.
 #
-# This variant caps context size aggressively so the 122B GPTQ model has enough
-# headroom for KV cache on a single H100.
+# This variant caps image and context size aggressively so the 122B GPTQ model
+# has enough headroom for KV cache on a single H100.
 game_index: 3
 operation_mode: offline
 game_catalog_path: src/face_of_agi/environment/local_games.json
@@ -24,18 +24,19 @@ agent_updater_action_history_window: 20
 agent_context_history_window: 8
 max_actions_per_level: 100
 
+reward_action_penalty: 0.0
+reward_trace_seconds_penalty: 0.0
+reward_input_token_penalty_per_1k: 0.0
+reward_output_token_penalty_per_1k: 0.0
+
 models:
-  observation_text:
-    crop_cells: 3
-    overflow_chars_per_frame: 12000
-    include_rows: true
-    include_component_runs: true
   shared_vlm:
     backend: vllm
     model: Qwen/Qwen3.5-122B-A10B-GPTQ-Int4
-    input_image_size: 2048x2048
     base_url: http://127.0.0.1:8000/v1
     api_key: EMPTY
+    input_image_size: 512x512
+    input_image_resample: nearest
     temperature: 0
     # max_tokens: 900
     server:
@@ -64,13 +65,27 @@ models:
   change:
     backend: vllm
     include_output_schema_in_instructions: true
-  historizer:
+  memory:
     backend: vllm
     include_output_schema_in_instructions: true
-  updater:
-    agent:
-      backend: vllm
-      include_output_schema_in_instructions: true
-    general:
-      backend: vllm
-      include_output_schema_in_instructions: true
+    max_completion_tokens: 3072
+  world:
+    backend: vllm
+    input_image_crop_arc_grid_edges: 4
+    include_output_schema_in_instructions: true
+    max_completion_tokens: 2048
+  goal:
+    backend: vllm
+    include_output_schema_in_instructions: true
+    max_completion_tokens: 2048
+  interest:
+    backend: vllm
+    input_image_crop_arc_grid_edges: 4
+    include_output_schema_in_instructions: true
+    max_completion_tokens: 1024
+  reward_judge:
+    backend: vllm
+    input_image_crop_arc_grid_edges: 4
+    include_output_schema_in_instructions: true
+    max_completion_tokens: 1024
+

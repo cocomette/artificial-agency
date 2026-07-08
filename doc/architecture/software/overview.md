@@ -1,71 +1,64 @@
 # Software Architecture Overview
 
-This folder describes the current software architecture for the ARC-AGI-3
-agent runtime. It refines the higher-level direction from
-[`../system_architecture.md`](../system_architecture.md) and the concrete stack
-choices from [`../techstack.md`](../techstack.md).
+This folder describes the active ARC-AGI-3 runtime architecture. The running
+program is coordinated by orchestration, which owns environment interaction,
+model calls, reward computation, proxy learning-progress feedback, and SQLite
+persistence.
 
-The architecture is modular, but not peer-to-peer. The orchestration layer is
-the middle man for the running program. It owns the main execution loop,
-communicates with the ARC-AGI environment through the environment adapter,
-calls model roles, and reads and writes SQLite-backed memory.
+## Active Runtime Shape
 
-## Module Map
+Active model roles:
 
-- [`orchestration`](orchestration/overview.md): central runtime controller.
-- [`environment`](environment/overview.md): thin ARC-AGI integration boundary.
-- [`models`](models/overview.md): provider-neutral model role modules.
-- [`memory`](memory/overview.md): SQLite-backed state and experimental memory.
-- [`runtime`](runtime/overview.md): startup, config loading, and assembly.
-- [`updates`](updates/overview.md): post-step context update behavior.
-- [`shared_contracts`](shared_contracts/overview.md): typed cross-module data.
-- [`config.md`](config.md): runtime YAML configuration reference.
-- [`diagrams.md`](diagrams.md): high-level and sequence diagrams.
+- Change Summary converts observed frame transitions and animation bundles into
+  compact ground-truth text.
+- Memory regenerates a fresh free-form run memory document from the original
+  first frame, current frame, and a sanitized action/change/reward ledger.
+- World predicts change-summary-style text for candidate actions from the
+  current frame, candidate action, and Memory.
+- Goal predicts structured `goal`, `subgoals`, `steps_remaining`, and
+  `confidence` from Memory.
+- Interest scores the full candidate set for expected World learning-progress
+  proxy and expected Goal delta after World predictions are available.
+- Reward Judge scores World prediction text against Change Summary text.
+- Agent X proposes coordinate candidates and selects the final action from
+  World-evaluated and Interest-scored candidates.
+
+The no-LoRA branch is a static vLLM inference runtime. It does not train,
+schedule, load, unload, or activate adapters. `learning_progress` remains in the
+reward contract as immediate proxy feedback equal to Reward Judge prediction
+accuracy, not measured pre/post model improvement.
+
+The durable state database keeps `m_states` turn rows plus explicit v1 tables
+for turn ledgers, candidate predictions, judge scores, goal predictions,
+rewards, and model-input debug records. Replay-sample and adapter-update tables
+are not part of this branch. Older run databases are intentionally incompatible
+and should be reset before running this branch.
 
 ## Ownership Rule
 
-The orchestration layer is the only module allowed to coordinate cross-module
-side effects during a game step.
+Only orchestration coordinates cross-module side effects during a game step.
+Models do not read or write persistence directly. The runtime module starts the
+program and assembles dependencies, but the game loop remains owned by
+orchestration.
 
-That means:
+## Frame Turn Flow
 
-- environment frames flow into orchestration before any model sees them
-- model roles receive typed inputs composed by orchestration
-- updater context outputs return to orchestration before becoming active
-- SQLite reads and writes are coordinated by orchestration, not by model adapters
-- only orchestration submits final actions to the ARC-AGI environment
-- the main loop is owned by orchestration
+1. Read the current observation and action space from the environment.
+2. Prewrite the current source row in `M` when state memory is enabled.
+3. Bootstrap or reuse the latest Memory and Goal outputs.
+4. Build candidates from all simple actions plus up to the candidate cap of
+   Agent-proposed coordinate actions.
+5. Run World on each candidate, run Interest once on the full candidate table,
+   and ask Agent X to select one final candidate.
+6. Submit real actions only on controllable final frames; synthesize `NONE` for
+   animation-unroll frames.
+7. Summarize the observed transition with Change Summary.
+8. Judge the executed World prediction, call Goal once for reward-only Goal
+   delta, compute immediate reward, and append the finalized ledger row.
+9. Regenerate Memory from action/change/reward ledger rows and call Goal for
+   next-turn state.
+10. Persist `m_states` plus the v1 artifact tables.
 
-`M` is the durable source of truth for committed run state. During a turn,
-orchestration may hold live Python objects for current observations, traces,
-transition summaries, and role contexts. Those objects are the in-turn working
-state owned by orchestration; they are not a separate memory domain. When the
-turn boundary is reached, orchestration writes the authoritative result back
-to `M`.
-
-The runtime module may start the program and assemble dependencies, but it
-should not become a second controller for the game loop.
-
-## Runtime Shape
-
-At each frame turn, orchestration:
-
-1. reads the current observation and action space from the environment module
-2. loads or prewrites the current frame state in persistent memory `M`
-3. composes live working context for the orchestrator agent role
-4. either synthesizes `NONE` for animation-unroll frames or calls Agent `X` on
-   controllable final frames
-5. receives one final frame action from `X` or the synthetic animation decision
-6. submits that action to ARC only on controllable final frames
-7. resolves the observed next frame
-8. calls the change summary model on the observed transition
-9. summarizes recent agent context history when a historizer is configured
-10. invokes updater `P` with the live transition, trace, action history, and
-    update quantities
-11. applies updater-returned context documents to live working context
-12. persists the frame transition, trace, metrics, action history entry, and
-    current context into `M`
-13. clears per-turn transient state and advances to the next frame
-
-The current runtime exposes no real world or goal model providers. Agent tool
-contracts remain provider-neutral, but the configured tool list is empty.
+The next turn's World, Interest, Agent, and Memory calls receive recent reward
+and proxy learning-progress feedback through action history and Memory ledger
+rows.

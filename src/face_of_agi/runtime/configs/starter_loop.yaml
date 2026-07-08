@@ -18,27 +18,51 @@ debug_keep_all_m_states: false
 debug_trace: minimal
 debug_color: auto
 models:
-  observation_text:
-    crop_cells: 3
-    overflow_chars_per_frame: 12000
-    include_rows: true
-    include_component_runs: true
   shared_vlm:
     backend: vllm
     model: Qwen/Qwen3.6-35B-A3B-FP8
-    input_image_size: 2048x2048
-    base_url: http://127.0.0.1:8000/v1
-    api_key: EMPTY
-  agent:
-    backend: vllm
+    input_image_size: 1024x1024
+    input_image_resample: nearest
+    timeout: 1200
+    max_retries: 0
     max_tool_calls: 0
     repair_attempts: 1
+    temperature: 0.1
+  agent:
+    backend: vllm
+    input_image_crop_arc_grid_edges: 4
+    include_output_schema_in_instructions: true
+    max_completion_tokens: 2048
+    max_tool_calls: 0
+    repair_attempts: 1
+    options:
+      temperature: 0.2
   change:
     backend: vllm
-  historizer:
+    input_image_crop_arc_grid_edges: 4
+    include_output_schema_in_instructions: true
+    max_completion_tokens: 2048
+  memory:
     backend: vllm
-  updater:
-    agent:
-      backend: vllm
-    general:
-      backend: vllm
+    include_output_schema_in_instructions: true
+    max_completion_tokens: 3072
+  world:
+    backend: vllm
+    input_image_crop_arc_grid_edges: 4
+    include_output_schema_in_instructions: true
+    max_completion_tokens: 2048
+  goal:
+    backend: vllm
+    include_output_schema_in_instructions: true
+    max_completion_tokens: 2048
+  interest:
+    backend: vllm
+    input_image_crop_arc_grid_edges: 4
+    include_output_schema_in_instructions: true
+    max_completion_tokens: 1024
+  reward_judge:
+    backend: vllm
+    input_image_crop_arc_grid_edges: 4
+    include_output_schema_in_instructions: true
+    max_completion_tokens: 1024
+

@@ -1,7 +1,8 @@
 """Shared frame and image helpers.
 
 The runtime stores visual observations by reference. These helpers keep that
-storage path small and provider-neutral while still allowing refs to rehydrate.
+storage path small and provider-neutral while still allowing refs to rehydrate
+to real images for later model calls.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ DEFAULT_MEMORY_IMAGE_SIZE = (64, 64)
 def observation_to_pil_image(
     observation: Observation,
     *,
-    grid_scale: int = 4,
+    frame_scale: int = 4,
 ) -> Any:
     """Return the visible observation frame as a PIL RGB image."""
 
@@ -33,7 +34,7 @@ def observation_to_pil_image(
     return frame_to_pil_image(
         frame,
         step=observation.step,
-        grid_scale=grid_scale,
+        frame_scale=frame_scale,
         label=observation.id,
     )
 
@@ -42,7 +43,7 @@ def frame_to_pil_image(
     frame: Any,
     *,
     step: int = 0,
-    grid_scale: int = 4,
+    frame_scale: int = 4,
     label: str = "frame",
 ) -> Any:
     """Normalize a PIL/numpy/grid frame into a PIL RGB image."""
@@ -60,7 +61,7 @@ def frame_to_pil_image(
         rgb_array = frame_to_rgb_array(
             steps=step,
             frame=array,
-            scale=grid_scale,
+            scale=frame_scale,
         )
         return Image.fromarray(rgb_array).convert("RGB")
 
@@ -90,7 +91,7 @@ def image_to_data_url(
     size: str | tuple[int, int] | None = None,
     resample: str = "nearest",
 ) -> str:
-    """Encode an image as a PNG data URL for debug/memory tools."""
+    """Encode an image as a PNG data URL for provider APIs."""
 
     encoded = image_to_base64_png(image, size=size, resample=resample)
     return f"data:image/png;base64,{encoded}"
@@ -110,12 +111,12 @@ def normalize_frame_for_memory(
     frame: Any,
     *,
     size: tuple[int, int] = DEFAULT_MEMORY_IMAGE_SIZE,
-    grid_scale: int = 4,
+    frame_scale: int = 4,
 ) -> Any:
     """Return the 64x64 image that memory will persist, or the value unchanged."""
 
     try:
-        image = frame_to_pil_image(frame, grid_scale=grid_scale)
+        image = frame_to_pil_image(frame, frame_scale=frame_scale)
     except Exception:
         return frame
     return resize_image_if_needed(image, size=size, resample="nearest")
@@ -194,7 +195,7 @@ def _try_serialize_frame(value: Any) -> dict[str, Any] | None:
 def parse_image_size(
     size: str | tuple[int, int] | None,
     *,
-    field_name: str = "image_size",
+    field_name: str = "input_image_size",
 ) -> tuple[int, int] | None:
     """Return a PIL image size from a config value."""
 

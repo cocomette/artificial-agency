@@ -25,7 +25,8 @@ The source implementation lives in
 `src/face_of_agi/orchestration/game_loop/state_machine.py` as
 `GameLoopStateMachine`, which is called by the top-level `Orchestrator`. The
 state machine unrolls frame bundles, validates synthetic `NONE`, coordinates
-the updater boundary, and records frame-turn state when memory is wired.
+v1 model roles, computes reward/proxy learning-progress feedback, and records
+frame-turn state when memory is wired.
 
 Runtime remains a bootstrap/delegation layer and should not take ownership of
 game-step logic again.

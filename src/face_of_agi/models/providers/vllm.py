@@ -2,54 +2,67 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import os
-import re
 from dataclasses import dataclass, field
+import threading
 from typing import Any
+
+from face_of_agi.models.providers.openai import object_get, plain, set_optional
 
 DEFAULT_VLLM_BASE_URL = "http://127.0.0.1:8000/v1"
 DEFAULT_VLLM_API_KEY_ENV = "VLLM_API_KEY"
-DEFAULT_CONTEXT_TRUNCATION_MARGIN_TOKENS = 256
-DEFAULT_CONTEXT_OVERFLOW_RETRIES = 3
-TRUNCATION_MARKER = "\n\n[... truncated to fit vLLM context window ...]\n\n"
-_OVERFLOW_RE = re.compile(
-    r"maximum context length is (?P<max>\d+) tokens.*?"
-    r"requested (?P<output>\d+) output tokens.*?"
-    r"prompt contains at least (?P<input>\d+) input tokens",
-    re.IGNORECASE | re.DOTALL,
-)
 
 
-def object_get(value: Any, key: str, default: Any = None) -> Any:
-    """Read a key from SDK objects, dicts, or simple test doubles."""
+class _VLLMRequestGate:
+    """Small process-local read/write gate for vLLM server restarts."""
 
-    if isinstance(value, dict):
-        return value.get(key, default)
-    return getattr(value, key, default)
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._active_requests = 0
+        self._exclusive = False
+
+    @contextmanager
+    def request(self) -> Any:
+        with self._condition:
+            while self._exclusive:
+                self._condition.wait()
+            self._active_requests += 1
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._active_requests -= 1
+                if self._active_requests == 0:
+                    self._condition.notify_all()
+
+    @contextmanager
+    def exclusive(self) -> Any:
+        with self._condition:
+            while self._exclusive or self._active_requests:
+                self._condition.wait()
+            self._exclusive = True
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._exclusive = False
+                self._condition.notify_all()
 
 
-def plain(value: Any) -> Any:
-    """Convert SDK models into ordinary dict/list/scalar metadata."""
-
-    if value is None:
-        return None
-    if hasattr(value, "model_dump"):
-        return value.model_dump(mode="json", exclude_none=True)
-    if isinstance(value, dict):
-        return {key: plain(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [plain(item) for item in value]
-    return value
+_VLLM_REQUEST_GATE = _VLLMRequestGate()
 
 
-def set_optional(target: dict[str, Any], key: str, value: Any) -> None:
-    """Set a request field when it carries a meaningful value."""
+def vllm_request_gate() -> Any:
+    """Return the shared gate used by live vLLM inference requests."""
 
-    if value is None:
-        return
-    if value == {} or value == []:
-        return
-    target[key] = value
+    return _VLLM_REQUEST_GATE.request()
+
+
+def vllm_exclusive_gate() -> Any:
+    """Return the shared exclusive gate for local vLLM server suspension."""
+
+    return _VLLM_REQUEST_GATE.exclusive()
 
 
 @dataclass(slots=True)
@@ -70,10 +83,7 @@ class VLLMChatConfig:
     temperature: float | None = None
     top_p: float | None = None
     seed: int | None = None
-    max_context_tokens: int | None = None
-    truncate_context_on_overflow: bool = True
-    context_truncation_margin_tokens: int = DEFAULT_CONTEXT_TRUNCATION_MARGIN_TOKENS
-    context_overflow_retries: int = DEFAULT_CONTEXT_OVERFLOW_RETRIES
+    use_response_format: bool = False
     options: dict[str, Any] = field(default_factory=dict)
     extra_request_options: dict[str, Any] = field(default_factory=dict)
 
@@ -85,7 +95,6 @@ class VLLMChatClient:
         self.config = config
         self._client = client
         self.last_request: dict[str, Any] | None = None
-        self.last_truncation: dict[str, Any] | None = None
 
     def chat(
         self,
@@ -107,25 +116,9 @@ class VLLMChatClient:
             response_format=response_format,
             extra_body=extra_body,
         )
-        self.last_truncation = None
-        max_attempts = max(0, int(getattr(self.config, "context_overflow_retries", 0)))
-        for attempt in range(max_attempts + 1):
-            self.last_request = request
-            try:
-                return self._require_client().chat.completions.create(**request)
-            except Exception as exc:
-                overflow = _context_overflow_from_exception(exc)
-                if (
-                    overflow is None
-                    or attempt >= max_attempts
-                    or not getattr(self.config, "truncate_context_on_overflow", True)
-                ):
-                    raise
-                request = self._truncate_overflowing_request(
-                    request,
-                    overflow=overflow,
-                    attempt=attempt + 1,
-                )
+        self.last_request = request
+        with vllm_request_gate():
+            return self._require_client().chat.completions.create(**request)
 
     def build_request(
         self,
@@ -148,7 +141,8 @@ class VLLMChatClient:
         }
         set_optional(request, "tools", tools)
         set_optional(request, "tool_choice", tool_choice)
-        set_optional(request, "response_format", response_format)
+        if getattr(self.config, "use_response_format", False):
+            set_optional(request, "response_format", response_format)
         for key in (
             "max_tokens",
             "max_completion_tokens",
@@ -202,243 +196,6 @@ class VLLMChatClient:
             if value:
                 return value
         return "EMPTY"
-
-    def _truncate_overflowing_request(
-        self,
-        request: dict[str, Any],
-        *,
-        overflow: "ContextOverflow",
-        attempt: int,
-    ) -> dict[str, Any]:
-        max_context_tokens = _configured_max_context_tokens(self.config, overflow)
-        output_tokens = max(
-            overflow.requested_output_tokens,
-            _configured_output_tokens(self.config),
-        )
-        margin = max(
-            0,
-            int(
-                getattr(
-                    self.config,
-                    "context_truncation_margin_tokens",
-                    DEFAULT_CONTEXT_TRUNCATION_MARGIN_TOKENS,
-                )
-            ),
-        )
-        prompt_token_budget = max(1, max_context_tokens - output_tokens - margin)
-        target_ratio = min(0.95, prompt_token_budget / overflow.input_tokens)
-        truncated_request, truncation = truncate_chat_request_messages(
-            request,
-            target_ratio=target_ratio,
-        )
-        if truncation["removed_chars"] <= 0:
-            raise RuntimeError(
-                "vLLM context overflow could not be recovered because no "
-                "mutable chat message text was available to truncate"
-            )
-        self.last_truncation = {
-            **truncation,
-            "attempt": attempt,
-            "max_context_tokens": max_context_tokens,
-            "prompt_token_budget": prompt_token_budget,
-            "reported_input_tokens": overflow.input_tokens,
-            "reported_requested_output_tokens": overflow.requested_output_tokens,
-            "configured_output_tokens": output_tokens,
-        }
-        return truncated_request
-
-
-@dataclass(frozen=True, slots=True)
-class ContextOverflow:
-    """Parsed vLLM context overflow details."""
-
-    max_context_tokens: int
-    requested_output_tokens: int
-    input_tokens: int
-
-
-def _context_overflow_from_exception(exc: Exception) -> ContextOverflow | None:
-    """Return context overflow details parsed from a vLLM/OpenAI error."""
-
-    match = _OVERFLOW_RE.search(str(exc))
-    if match is None:
-        return None
-    return ContextOverflow(
-        max_context_tokens=int(match.group("max")),
-        requested_output_tokens=int(match.group("output")),
-        input_tokens=int(match.group("input")),
-    )
-
-
-def _configured_max_context_tokens(config: Any, overflow: ContextOverflow) -> int:
-    value = getattr(config, "max_context_tokens", None)
-    if value is None:
-        value = _config_options(config).get("max_context_tokens")
-    if value is None:
-        return overflow.max_context_tokens
-    return int(value)
-
-
-def _configured_output_tokens(config: Any) -> int:
-    for source in (config, _config_options(config)):
-        for key in ("max_completion_tokens", "max_tokens"):
-            if isinstance(source, dict):
-                value = source.get(key)
-            else:
-                value = getattr(source, key, None)
-            if value is not None:
-                return max(0, int(value))
-    return 0
-
-
-def _config_options(config: Any) -> dict[str, Any]:
-    options = getattr(config, "options", None)
-    return options if isinstance(options, dict) else {}
-
-
-def truncate_chat_request_messages(
-    request: dict[str, Any],
-    *,
-    target_ratio: float,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Return a request with mutable message text shortened by ratio."""
-
-    messages = request.get("messages")
-    if not isinstance(messages, list):
-        return dict(request), {
-            "removed_chars": 0,
-            "original_chars": 0,
-            "target_chars": 0,
-        }
-
-    mutable_lengths = [
-        _mutable_text_length(message.get("content"))
-        for message in messages
-        if _is_mutable_text_message(message)
-    ]
-    original_chars = sum(mutable_lengths)
-    target_chars = max(0, int(original_chars * max(0.0, min(1.0, target_ratio))))
-    if original_chars <= target_chars:
-        return dict(request), {
-            "removed_chars": 0,
-            "original_chars": original_chars,
-            "target_chars": target_chars,
-        }
-
-    allocations = _proportional_allocations(mutable_lengths, target_chars)
-    allocation_index = 0
-    truncated_messages: list[Any] = []
-    removed_chars = 0
-    for message in messages:
-        if not isinstance(message, dict):
-            truncated_messages.append(message)
-            continue
-        copied_message = dict(message)
-        if _is_mutable_text_message(message):
-            content = message["content"]
-            max_chars = allocations[allocation_index]
-            allocation_index += 1
-            copied_content, removed = _truncate_message_content(content, max_chars)
-            copied_message["content"] = copied_content
-            removed_chars += removed
-        truncated_messages.append(copied_message)
-
-    truncated_request = dict(request)
-    truncated_request["messages"] = truncated_messages
-    return truncated_request, {
-        "removed_chars": removed_chars,
-        "original_chars": original_chars,
-        "target_chars": target_chars,
-    }
-
-
-def _is_mutable_text_message(message: Any) -> bool:
-    if not isinstance(message, dict):
-        return False
-    if message.get("role") in {"system", "developer"}:
-        return False
-    return _mutable_text_length(message.get("content")) > 0
-
-
-def _mutable_text_length(content: Any) -> int:
-    if isinstance(content, str):
-        return len(content)
-    if isinstance(content, list):
-        return sum(
-            len(part.get("text"))
-            for part in content
-            if isinstance(part, dict)
-            and part.get("type") == "text"
-            and isinstance(part.get("text"), str)
-        )
-    return 0
-
-
-def _truncate_message_content(content: Any, max_chars: int) -> tuple[Any, int]:
-    if isinstance(content, str):
-        truncated = _truncate_text_middle(content, max_chars)
-        return truncated, len(content) - len(truncated)
-    if not isinstance(content, list):
-        return content, 0
-
-    text_lengths = [
-        len(part.get("text"))
-        for part in content
-        if isinstance(part, dict)
-        and part.get("type") == "text"
-        and isinstance(part.get("text"), str)
-    ]
-    allocations = _proportional_allocations(text_lengths, max_chars)
-    allocation_index = 0
-    copied_parts: list[Any] = []
-    removed = 0
-    for part in content:
-        if (
-            isinstance(part, dict)
-            and part.get("type") == "text"
-            and isinstance(part.get("text"), str)
-        ):
-            copied_part = dict(part)
-            text = part["text"]
-            allocated = allocations[allocation_index]
-            allocation_index += 1
-            copied_part["text"] = _truncate_text_middle(text, allocated)
-            removed += len(text) - len(copied_part["text"])
-            copied_parts.append(copied_part)
-        else:
-            copied_parts.append(part)
-    return copied_parts, removed
-
-
-def _proportional_allocations(lengths: list[int], target_total: int) -> list[int]:
-    if not lengths:
-        return []
-    total = sum(lengths)
-    if total <= 0:
-        return [0 for _length in lengths]
-    allocations: list[int] = []
-    remaining = target_total
-    for index, length in enumerate(lengths):
-        if index == len(lengths) - 1:
-            allocation = max(0, min(length, remaining))
-        else:
-            allocation = max(0, min(length, int(target_total * (length / total))))
-        allocations.append(allocation)
-        remaining -= allocation
-    return allocations
-
-
-def _truncate_text_middle(text: str, max_chars: int) -> str:
-    if max_chars >= len(text):
-        return text
-    if max_chars <= 0:
-        return ""
-    if max_chars <= len(TRUNCATION_MARKER) + 2:
-        return text[-max_chars:]
-    payload_chars = max_chars - len(TRUNCATION_MARKER)
-    head_chars = payload_chars // 2
-    tail_chars = payload_chars - head_chars
-    return text[:head_chars] + TRUNCATION_MARKER + text[-tail_chars:]
 
 
 def json_schema_response_format(

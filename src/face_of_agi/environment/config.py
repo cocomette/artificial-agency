@@ -36,20 +36,14 @@ class ModelRoleConfig:
 class ModelRuntimeConfig:
     """Runtime model backend config for agent and tool roles."""
 
-    observation_text: dict[str, Any] = field(default_factory=dict)
     shared_vlm: ModelRoleConfig = field(default_factory=ModelRoleConfig)
     agent: ModelRoleConfig = field(default_factory=ModelRoleConfig)
     change: ModelRoleConfig = field(default_factory=ModelRoleConfig)
-    historizer: ModelRoleConfig = field(default_factory=ModelRoleConfig)
-    updater: "UpdaterRuntimeConfig | None" = None
-
-
-@dataclass(slots=True)
-class UpdaterRuntimeConfig:
-    """Runtime backend config for updater task slots."""
-
-    agent: ModelRoleConfig = field(default_factory=ModelRoleConfig)
-    general: ModelRoleConfig = field(default_factory=ModelRoleConfig)
+    memory: ModelRoleConfig = field(default_factory=ModelRoleConfig)
+    world: ModelRoleConfig = field(default_factory=ModelRoleConfig)
+    goal: ModelRoleConfig = field(default_factory=ModelRoleConfig)
+    interest: ModelRoleConfig = field(default_factory=ModelRoleConfig)
+    reward_judge: ModelRoleConfig = field(default_factory=ModelRoleConfig)
 
 
 @dataclass(slots=True)
@@ -81,6 +75,14 @@ class EnvironmentConfig:
     animation_keyframe_pixel_threshold: int = 8
     action_suppression_zero_changed_pixel_turns: int = 3
     updater_stagnation_warning_zero_changed_pixel_turns: int = 3
+    candidate_action_count: int = 8
+    reward_lp_weight_start: float = 0.8
+    reward_lp_weight_end: float = 0.2
+    reward_progress_bonus: float = 1.0
+    reward_action_penalty: float = 0.0
+    reward_trace_seconds_penalty: float = 0.0
+    reward_input_token_penalty_per_1k: float = 0.0
+    reward_output_token_penalty_per_1k: float = 0.0
     debug_keep_all_m_states: bool = False
     debug_trace: DebugTraceMode = "minimal"
     debug_color: DebugColorMode = "auto"
@@ -101,6 +103,13 @@ def load_environment_config(path: str | Path) -> EnvironmentConfig:
         )
     max_actions_per_level = int(raw_data["max_actions_per_level"])
     operation_mode = OperationMode(str(raw_data.get("operation_mode", "offline")))
+    if "online_lora" in raw_data:
+        raise ValueError(
+            "online_lora has been removed; this branch supports static vLLM "
+            "inference with reward and proxy learning-progress feedback only"
+        )
+    models = _load_model_runtime_config(raw_data.get("models"))
+
     return EnvironmentConfig(
         max_actions_per_level=max_actions_per_level,
         max_levels_per_game=_optional_positive_int(
@@ -164,6 +173,42 @@ def load_environment_config(path: str | Path) -> EnvironmentConfig:
             raw_data.get("updater_stagnation_warning_zero_changed_pixel_turns", 3),
             key="updater_stagnation_warning_zero_changed_pixel_turns",
         ),
+        candidate_action_count=_positive_int(
+            raw_data.get("candidate_action_count", 8),
+            key="candidate_action_count",
+        ),
+        reward_lp_weight_start=_bounded_float(
+            raw_data.get("reward_lp_weight_start", 0.8),
+            key="reward_lp_weight_start",
+            minimum=0.0,
+            maximum=1.0,
+        ),
+        reward_lp_weight_end=_bounded_float(
+            raw_data.get("reward_lp_weight_end", 0.2),
+            key="reward_lp_weight_end",
+            minimum=0.0,
+            maximum=1.0,
+        ),
+        reward_progress_bonus=_non_negative_float(
+            raw_data.get("reward_progress_bonus", 1.0),
+            key="reward_progress_bonus",
+        ),
+        reward_action_penalty=_non_negative_float(
+            raw_data.get("reward_action_penalty", 0.0),
+            key="reward_action_penalty",
+        ),
+        reward_trace_seconds_penalty=_non_negative_float(
+            raw_data.get("reward_trace_seconds_penalty", 0.0),
+            key="reward_trace_seconds_penalty",
+        ),
+        reward_input_token_penalty_per_1k=_non_negative_float(
+            raw_data.get("reward_input_token_penalty_per_1k", 0.0),
+            key="reward_input_token_penalty_per_1k",
+        ),
+        reward_output_token_penalty_per_1k=_non_negative_float(
+            raw_data.get("reward_output_token_penalty_per_1k", 0.0),
+            key="reward_output_token_penalty_per_1k",
+        ),
         debug_keep_all_m_states=_optional_bool(
             raw_data.get("debug_keep_all_m_states"),
             default=False,
@@ -184,7 +229,7 @@ def load_environment_config(path: str | Path) -> EnvironmentConfig:
             raw_data.get("live_turn_monitor"),
             default=False,
         ),
-        models=_load_model_runtime_config(raw_data.get("models")),
+        models=models,
     )
 
 
@@ -198,42 +243,15 @@ def _load_model_runtime_config(value: Any) -> ModelRuntimeConfig:
 
     _reject_removed_model_keys(value)
     return ModelRuntimeConfig(
-        observation_text=_load_observation_text_config(value.get("observation_text")),
         shared_vlm=_load_model_role_config(value.get("shared_vlm")),
-        agent=_load_model_role_config(value.get("agent")),
+        agent=_load_required_model_role_config(value, "agent"),
         change=_load_required_model_role_config(value, "change"),
-        historizer=_load_model_role_config(value.get("historizer")),
-        updater=_load_updater_runtime_config(value.get("updater")),
+        memory=_load_required_model_role_config(value, "memory"),
+        world=_load_required_model_role_config(value, "world"),
+        goal=_load_required_model_role_config(value, "goal"),
+        interest=_load_required_model_role_config(value, "interest"),
+        reward_judge=_load_required_model_role_config(value, "reward_judge"),
     )
-
-
-def _load_updater_runtime_config(value: Any) -> UpdaterRuntimeConfig:
-    """Load updater task backend configs from YAML."""
-
-    if value is None:
-        raise ValueError("models.updater config is required")
-    if not isinstance(value, dict):
-        raise ValueError("updater config must be a mapping")
-    _reject_removed_updater_keys(value)
-
-    return UpdaterRuntimeConfig(
-        agent=_load_required_updater_task_config(value, "agent"),
-        general=_load_required_updater_task_config(value, "general"),
-    )
-
-
-def _load_required_updater_task_config(
-    value: dict[str, Any],
-    task_name: str,
-) -> ModelRoleConfig:
-    """Load one required updater task config."""
-
-    if task_name not in value:
-        raise ValueError(f"models.updater.{task_name} config is required")
-    config = _load_model_role_config(value[task_name])
-    if config.backend is None or config.backend == "":
-        raise ValueError(f"models.updater.{task_name}.backend is required")
-    return config
 
 
 def _load_required_model_role_config(
@@ -250,39 +268,11 @@ def _load_required_model_role_config(
     return config
 
 
-def _load_optional_active_model_role_config(
-    value: dict[str, Any],
-    role_name: str,
-) -> ModelRoleConfig | None:
-    """Load an optional active role, preserving absence as disabled."""
-
-    if role_name not in value:
-        return None
-    return _load_required_model_role_config(value, role_name)
-
-
 def _reject_removed_model_keys(value: dict[str, Any]) -> None:
-    removed = sorted(set(value) & {"world", "goal"})
+    removed = sorted(set(value) & {"historizer", "updater"})
     if removed:
         names = ", ".join(f"models.{key}" for key in removed)
-        raise ValueError(f"{names} config has been removed")
-
-
-def _reject_removed_updater_keys(value: dict[str, Any]) -> None:
-    removed = sorted(set(value) & {"world", "goal"})
-    if removed:
-        names = ", ".join(f"models.updater.{key}" for key in removed)
-        raise ValueError(f"{names} config has been removed")
-
-
-def _load_observation_text_config(value: Any) -> dict[str, Any]:
-    """Load shared text observation serializer options."""
-
-    if value is None:
-        return {}
-    if not isinstance(value, dict):
-        raise ValueError("models.observation_text config must be a mapping")
-    return dict(value)
+        raise ValueError(f"{names} config has been replaced by v1 roles")
 
 
 def _load_model_role_config(value: Any) -> ModelRoleConfig:
@@ -293,8 +283,10 @@ def _load_model_role_config(value: Any) -> ModelRoleConfig:
     if not isinstance(value, dict):
         raise ValueError("model role config must be a mapping")
 
+    _reject_removed_model_role_keys(value)
     known_keys = {"backend", "model", "max_tool_calls", "repair_attempts"}
     options = dict(value.get("options") or {})
+    _reject_removed_model_role_keys(options)
     for key, item in value.items():
         if key not in known_keys and key != "options":
             options[key] = item
@@ -314,6 +306,14 @@ def _load_model_role_config(value: Any) -> ModelRoleConfig:
         ),
         options=options,
     )
+
+
+def _reject_removed_model_role_keys(value: dict[str, Any]) -> None:
+    if "input_image_crop_box_normalized" in value:
+        raise ValueError(
+            "input_image_crop_box_normalized has been removed; use "
+            "input_image_crop_arc_grid_edges"
+        )
 
 
 def _read_yaml(path: str | Path) -> dict[str, Any]:
@@ -429,6 +429,21 @@ def _optional_string(value: Any) -> str | None:
     return str(value)
 
 
+def _string_tuple(value: Any, *, key: str) -> tuple[str, ...]:
+    """Normalize a required non-empty list of non-empty strings."""
+
+    if isinstance(value, str):
+        items = [value]
+    elif isinstance(value, (list, tuple)):
+        items = list(value)
+    else:
+        raise ValueError(f"{key} must be a non-empty string list")
+    parsed = tuple(str(item).strip() for item in items)
+    if not parsed or any(not item for item in parsed):
+        raise ValueError(f"{key} must be a non-empty string list")
+    return parsed
+
+
 def _optional_bool(value: Any, *, default: bool = False) -> bool:
     """Normalize optional boolean config values."""
 
@@ -462,6 +477,59 @@ def _optional_positive_int(value: Any, *, key: str) -> int | None:
     parsed = int(value)
     if parsed < 1:
         raise ValueError(f"{key} must be at least 1")
+    return parsed
+
+
+def _positive_int(value: Any, *, key: str) -> int:
+    """Normalize one required positive integer config value."""
+
+    parsed = int(value)
+    if parsed < 1:
+        raise ValueError(f"{key} must be at least 1")
+    return parsed
+
+
+def _bounded_float(
+    value: Any,
+    *,
+    key: str,
+    minimum: float,
+    maximum: float,
+) -> float:
+    """Normalize one float in an inclusive range."""
+
+    parsed = float(value)
+    if not minimum <= parsed <= maximum:
+        raise ValueError(f"{key} must be within {minimum}..{maximum}")
+    return parsed
+
+
+def _non_negative_float(value: Any, *, key: str) -> float:
+    """Normalize one non-negative float config value."""
+
+    parsed = float(value)
+    if parsed < 0:
+        raise ValueError(f"{key} must be non-negative")
+    return parsed
+
+
+def _positive_float(value: Any, *, key: str) -> float:
+    """Normalize one positive float config value."""
+
+    parsed = float(value)
+    if parsed <= 0:
+        raise ValueError(f"{key} must be positive")
+    return parsed
+
+
+def _finite_float(value: Any, *, key: str) -> float:
+    """Normalize one finite float config value."""
+
+    from math import isfinite
+
+    parsed = float(value)
+    if not isfinite(parsed):
+        raise ValueError(f"{key} must be finite")
     return parsed
 
 

@@ -12,13 +12,9 @@ AGENT_CONTEXT_HISTORY_KEYS = (
     "history",
     "extras",
 )
-DEFAULT_FIELD_EVOLUTION_MAX_CHARS = 2000
 
 
-def agent_context_history_json_schema(
-    *,
-    field_evolution_max_chars: int | None = DEFAULT_FIELD_EVOLUTION_MAX_CHARS,
-) -> dict[str, Any]:
+def agent_context_history_json_schema() -> dict[str, Any]:
     """Return the provider-neutral historizer output JSON schema."""
 
     descriptions = {
@@ -41,11 +37,6 @@ def agent_context_history_json_schema(
                     key: {
                         "type": "string",
                         "description": descriptions[key],
-                        **(
-                            {"maxLength": int(field_evolution_max_chars)}
-                            if field_evolution_max_chars is not None
-                            else {}
-                        ),
                     }
                     for key in AGENT_CONTEXT_HISTORY_KEYS
                 },

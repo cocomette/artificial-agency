@@ -9,8 +9,12 @@ import sys
 import zipfile
 from pathlib import Path
 
-from pip._vendor.packaging.requirements import Requirement
-from pip._vendor.packaging.utils import canonicalize_name
+try:
+    from packaging.requirements import Requirement
+    from packaging.utils import canonicalize_name
+except ModuleNotFoundError:  # pragma: no cover - fallback for bare system Python.
+    from pip._vendor.packaging.requirements import Requirement
+    from pip._vendor.packaging.utils import canonicalize_name
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -21,6 +25,7 @@ from kaggle_env import read_json_with_kaggle_dataset_id, write_json_if_changed  
 VLLM_VERSION = "0.19.1"
 WHEELHOUSE_DATASET_SLUG = "face-of-agi-wheelhouse"
 KAGGLE_TORCH_STACK = {
+    "cuda-bindings",
     "cuda-toolkit",
     "torch",
     "torchaudio",
@@ -54,11 +59,13 @@ VLLM_TORCH_DEPENDENCY_PACKAGES = (
     "ninja",
     "numpy>=1.23.5",
     "nvidia-cudnn-frontend>=1.13.0",
-    "nvidia-cutlass-dsl==4.6.0.dev0",
+    "nvidia-cutlass-dsl>=4.4.2",
     "nvidia-ml-py",
     "packaging>=24.2",
     "psutil",
+    "pycountry",
     "pydantic>=2.0",
+    "pydantic-extra-types",
     "requests",
     "setuptools",
     "tabulate",
@@ -104,6 +111,7 @@ def _pip_download(
     python_version: str,
     abi: str,
     no_deps: bool = False,
+    allow_pre: bool = False,
 ) -> None:
     command = [
         sys.executable,
@@ -122,6 +130,8 @@ def _pip_download(
     ]
     for platform in platforms:
         command.extend(["--platform", platform])
+    if allow_pre:
+        command.append("--pre")
     if no_deps:
         command.append("--no-deps")
     subprocess.check_call(command + list(packages))
@@ -134,6 +144,13 @@ def _wheel_for(output: Path, distribution: str, version: str | None = None) -> P
     if not matches:
         raise FileNotFoundError(f"Could not find {distribution} wheel in {output}")
     return matches[-1]
+
+
+def _remove_kaggle_torch_stack_wheels(output: Path) -> None:
+    for distribution in KAGGLE_TORCH_STACK:
+        normalized = canonicalize_name(distribution).replace("-", "_")
+        for wheel_path in output.glob(f"{normalized}-*.whl"):
+            wheel_path.unlink()
 
 
 def _vllm_dependency_requirements(output: Path) -> list[str]:
@@ -186,10 +203,12 @@ def build_wheelhouse(args: argparse.Namespace) -> None:
         platforms=args.platform,
         python_version=args.python_version,
         abi=args.abi,
+        allow_pre=True,
     )
+    _remove_kaggle_torch_stack_wheels(output)
     write_json_if_changed(
         output / "dataset-metadata.json",
-        read_json_with_kaggle_dataset_id(args.metadata, WHEELHOUSE_DATASET_SLUG),
+        read_json_with_kaggle_dataset_id(args.metadata, args.dataset_slug),
     )
 
 
@@ -200,6 +219,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--abi", default="cp312")
     parser.add_argument("--requirements", type=Path, required=True)
     parser.add_argument("--metadata", type=Path, required=True)
+    parser.add_argument("--dataset-slug", default=WHEELHOUSE_DATASET_SLUG)
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
 

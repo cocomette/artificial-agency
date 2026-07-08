@@ -67,7 +67,7 @@ def levels_completed(observation: Observation | None) -> int | None:
 
 
 def _load_duration_seconds(value: Any) -> float:
-    """Sum load_duration nanoseconds from provider usage payloads."""
+    """Sum Ollama-style load_duration nanoseconds from provider usage payloads."""
 
     if isinstance(value, dict):
         return _nanoseconds_to_seconds(value.get("load_duration"))

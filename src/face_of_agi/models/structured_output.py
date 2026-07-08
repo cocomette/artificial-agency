@@ -9,7 +9,6 @@ from typing import Any, Generic, TypeVar
 
 ResponseT = TypeVar("ResponseT")
 ValueT = TypeVar("ValueT")
-DEFAULT_INVALID_OUTPUT_PREVIEW_CHARS = 8000
 
 OUTPUT_SCHEMA_INSTRUCTION = (
     "Output JSON must match this schema exactly. Return only the JSON response"
@@ -108,38 +107,6 @@ def provider_repair_callback(
         )
 
     return repair
-
-
-def clipped_invalid_output_preview(
-    text: str,
-    *,
-    max_chars: int | None = DEFAULT_INVALID_OUTPUT_PREVIEW_CHARS,
-) -> str:
-    """Return a bounded head/tail preview of invalid structured output."""
-
-    if max_chars is None:
-        return text
-    max_chars = int(max_chars)
-    if len(text) <= max_chars:
-        return text
-    if max_chars <= 0:
-        return f"[invalid output omitted: original length {len(text)} chars]"
-
-    omitted = len(text)
-    head = 0
-    tail = 0
-    marker = ""
-    for _attempt in range(3):
-        marker = f"\n\n[... omitted {omitted} chars from invalid output ...]\n\n"
-        payload_budget = max_chars - len(marker)
-        if payload_budget <= 0:
-            return marker.strip()[:max_chars]
-        head = payload_budget // 2
-        tail = payload_budget - head
-        omitted = len(text) - head - tail
-
-    tail_text = text[-tail:] if tail > 0 else ""
-    return text[:head] + marker + tail_text
 
 
 def _preview(text: str, *, limit: int = 300) -> str:

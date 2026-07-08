@@ -211,10 +211,10 @@ class DebugTrace:
             self.updater_input(role=event.role, update_input=event.update_input)
         elif isinstance(event, UpdaterProviderOutputCaptured):
             self.updater_provider_output(role=event.role, adapter=event.adapter)
-        elif isinstance(event, MStatePersisted):
-            self.persisted_state(record_id=event.record_id, turn_id=event.turn_id)
         elif isinstance(event, ModelCallCompleted):
             return
+        elif isinstance(event, MStatePersisted):
+            self.persisted_state(record_id=event.record_id, turn_id=event.turn_id)
         elif isinstance(event, FrameTurnCompleted):
             return
         elif isinstance(event, RunStopped):
@@ -619,7 +619,6 @@ def _action_payload(action: ActionSpec | None) -> dict[str, Any] | None:
     return {
         "action_id": action.name,
         "data": action.data,
-        "target": action.target,
         "requires_data": action.is_complex(),
     }
 
@@ -641,12 +640,13 @@ def _action_history_payload(item: ActionHistoryItem) -> dict[str, Any]:
     return {
         "action": _action_payload(item.action),
         "controllable": item.controllable,
-        "changed_pixel_count": item.changed_pixel_count,
-        "changed_cell_percent": item.changed_cell_percent,
-        "completed_levels": item.completed_levels,
-        "action_count": item.action_count,
+        "changed_pixel_percent": item.changed_pixel_percent,
+        "retained_animation_frame_count": item.retained_animation_frame_count,
         "skipped_intermediate_animation_frame_count": (
             item.skipped_intermediate_animation_frame_count
+        ),
+        "animation_avg_changed_pixel_percent": (
+            item.animation_avg_changed_pixel_percent
         ),
         "change_summary": item.change_summary,
     }
@@ -668,12 +668,9 @@ def _tool_result_summary(result: ToolResult | None) -> dict[str, Any] | None:
 
 
 def _format_action(action: ActionSpec) -> str:
-    suffix = ""
-    if action.target is not None and action.target.strip():
-        suffix = f" target={action.target.strip()!r}"
     if action.data:
-        return f"{action.name} {action.data}{suffix}"
-    return action.name + suffix
+        return f"{action.name} {action.data}"
+    return action.name
 
 
 def _display_scalar(value: Any) -> str:

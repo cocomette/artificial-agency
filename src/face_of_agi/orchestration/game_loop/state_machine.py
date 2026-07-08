@@ -13,24 +13,25 @@ from face_of_agi.environment.adapter import EnvironmentAdapter
 from face_of_agi.environment.config import EnvironmentConfig
 from face_of_agi.memory import StateMemory
 from face_of_agi.models.change import ChangeSummaryModel, ChangeSummaryResult
-from face_of_agi.models.historizer import AgentContextHistorySummary
 from face_of_agi.models.adapters import (
-    AgentContextHistorizerModel,
+    GoalModel,
+    InterestModel,
+    MemoryModel,
     OrchestratorAgentModel,
+    RewardJudgeModel,
+    WorldModel,
 )
 from face_of_agi.models.orchestrator_agent import AgentToolRuntime
-from face_of_agi.models.updater import UpdaterTaskRegistry
 from face_of_agi.debug.bus import DebugBus
-from face_of_agi.debug.events import FrameTurnCompleted, RunStopped
+from face_of_agi.debug.events import FrameTurnCompleted
 from face_of_agi.orchestration.game_loop.actions import steps
 from face_of_agi.orchestration.game_loop.lifecycle import (
     check_lifecycle,
     check_runtime_deadline,
     finish_run,
     start_run,
-    startup_error_result,
-    stop_for_framework_error,
 )
+from face_of_agi.orchestration.game_loop import v1_roles
 from face_of_agi.runtime import timing as runtime_timing
 
 AgentToolRuntimeFactory = Callable[
@@ -54,8 +55,11 @@ class GameLoopStateMachine:
         contexts: ContextDocuments,
         agent: OrchestratorAgentModel,
         change_summary_model: ChangeSummaryModel,
-        agent_context_historizer: AgentContextHistorizerModel | None,
-        updater_tasks: UpdaterTaskRegistry,
+        memory_model: MemoryModel,
+        world_model: WorldModel,
+        goal_model: GoalModel,
+        interest_model: InterestModel,
+        reward_judge_model: RewardJudgeModel,
         tool_runtime_factory: AgentToolRuntimeFactory | None = None,
         debug: DebugBus,
     ) -> None:
@@ -63,8 +67,11 @@ class GameLoopStateMachine:
         self.contexts = contexts
         self.agent = agent
         self.change_summary_model = change_summary_model
-        self.agent_context_historizer = agent_context_historizer
-        self.updater_tasks = updater_tasks
+        self.memory_model = memory_model
+        self.world_model = world_model
+        self.goal_model = goal_model
+        self.interest_model = interest_model
+        self.reward_judge_model = reward_judge_model
         self.tool_runtime_factory = tool_runtime_factory
         self.debug = debug
 
@@ -77,38 +84,44 @@ class GameLoopStateMachine:
     ) -> GameRunResult:
         """Run one selected ARC game until a terminal loop condition."""
 
-        try:
-            session = start_run(
-                config=config,
-                environment=environment,
-                environment_config=environment_config,
-                contexts=self.contexts,
-                state_memory=self.state_memory,
-                debug=self.debug,
-            )
-        except Exception as exc:
-            result = startup_error_result(
-                config=config,
-                environment_config=environment_config,
-                error=exc,
-            )
-            self.debug.emit(RunStopped(result))
-            return result
-
-        with ThreadPoolExecutor(max_workers=2) as turn_executor:
+        session = start_run(
+            config=config,
+            environment=environment,
+            environment_config=environment_config,
+            contexts=self.contexts,
+            state_memory=self.state_memory,
+            debug=self.debug,
+        )
+        v1_roles.bootstrap_memory_goal(
+            session,
+            memory_model=self.memory_model,
+            goal_model=self.goal_model,
+            state_memory=self.state_memory,
+            debug=self.debug,
+        )
+        bootstrapped_restart_count = session.game_restart_count
+        with ThreadPoolExecutor(max_workers=1) as turn_executor:
             while session.running:
-                context_history_future: Future[AgentContextHistorySummary] | None = None
                 change_future: Future[ChangeSummaryResult] | None = None
 
-                try:
-                    session.process_turn = True
-                    if check_runtime_deadline(session):
-                        continue
-                    check_lifecycle(session)
-                except Exception as exc:
-                    stop_for_framework_error(session, error=exc)
+                session.process_turn = True
+                if check_runtime_deadline(session):
                     continue
+                check_lifecycle(session)
                 if not session.process_turn:
+                    if (
+                        session.running
+                        and session.game_restart_count
+                        != bootstrapped_restart_count
+                    ):
+                        v1_roles.reset_memory_goal_after_game_over(
+                            session,
+                            memory_model=self.memory_model,
+                            goal_model=self.goal_model,
+                            state_memory=self.state_memory,
+                            debug=self.debug,
+                        )
+                        bootstrapped_restart_count = session.game_restart_count
                     continue
 
                 turn_started_at = perf_counter()
@@ -126,22 +139,14 @@ class GameLoopStateMachine:
                         raise RuntimeError(
                             "current frame snapshot is missing control mode"
                         )
-                    run_context_updates = True
                     if check_runtime_deadline(session):
                         continue
 
-                    if run_context_updates:
-                        context_history_future = turn_executor.submit(
-                            steps.summarize_agent_context_history,
-                            session,
-                            state_memory=self.state_memory,
-                            agent_context_historizer=self.agent_context_historizer,
-                            debug=self.debug,
-                        )
-                    steps.decide(
+                    v1_roles.decide_with_world_candidates(
                         session,
                         agent=self.agent,
-                        contexts=self.contexts,
+                        world_model=self.world_model,
+                        interest_model=self.interest_model,
                         debug=self.debug,
                     )
                     if check_runtime_deadline(session):
@@ -175,36 +180,14 @@ class GameLoopStateMachine:
                     if check_runtime_deadline(session):
                         continue
 
-                    if run_context_updates:
-                        if context_history_future is None:
-                            raise RuntimeError(
-                                "frame turn is missing agent context history work"
-                            )
-                        try:
-                            agent_context_history = _wait_for_future(
-                                context_history_future,
-                                span_name="historizer.agent_context_history.wait",
-                                turn_id=current.turn_id,
-                                step=current.observation.step,
-                            )
-                        finally:
-                            self.debug.capture_model_inputs(
-                                current.to_frame_context(),
-                                current.turn_id,
-                                self.agent_context_historizer,
-                            )
-                            context_history_future = None
-                        if check_runtime_deadline(session):
-                            continue
-
-                        steps.run_updaters(
-                            session,
-                            contexts=self.contexts,
-                            agent_context_history=agent_context_history,
-                            updater_tasks=self.updater_tasks,
-                            state_memory=self.state_memory,
-                            debug=self.debug,
-                        )
+                    v1_roles.evaluate_observed_transition(
+                        session,
+                        reward_judge_model=self.reward_judge_model,
+                        memory_model=self.memory_model,
+                        goal_model=self.goal_model,
+                        state_memory=self.state_memory,
+                        debug=self.debug,
+                    )
                     steps.persist(
                         session,
                         contexts=self.contexts,
@@ -214,7 +197,9 @@ class GameLoopStateMachine:
                     current = steps.require_current(session)
                     decision = steps.require_decision(session)
                     if current.control_mode is None:
-                        raise RuntimeError("completed frame turn is missing control mode")
+                        raise RuntimeError(
+                            "completed frame turn is missing control mode"
+                        )
                     self.debug.emit(
                         FrameTurnCompleted(
                             run_id=session.config.run_id,
@@ -226,14 +211,16 @@ class GameLoopStateMachine:
                             frame_count=current.frame_count,
                             controllable=current.control_mode.controllable,
                             action=decision.final_action,
-                            turn_duration_seconds=perf_counter() - turn_started_at,
-                            completed_levels=_completed_levels_after_turn(session),
+                            turn_duration_seconds=(
+                                perf_counter() - turn_started_at
+                            ),
+                            completed_levels=_completed_levels_after_turn(
+                                session
+                            ),
                             remaining_actions=session.remaining_actions,
                         )
                     )
                     steps.advance(session)
-                except Exception as exc:
-                    stop_for_framework_error(session, error=exc)
                 finally:
                     _settle_abandoned_turn_future(
                         change_future,
@@ -243,19 +230,9 @@ class GameLoopStateMachine:
                             debug=self.debug,
                         ),
                     )
-                    _settle_abandoned_turn_future(
-                        context_history_future,
-                        capture=lambda: _capture_agent_context_history_inputs(
-                            session,
-                            historizer=self.agent_context_historizer,
-                            debug=self.debug,
-                        ),
-                    )
-
         return finish_run(
             session,
             contexts=self.contexts,
-            updater_tasks=self.updater_tasks,
             state_memory=self.state_memory,
             debug=self.debug,
         )
@@ -290,26 +267,7 @@ def _settle_abandoned_turn_future(
     except Exception:
         pass
     finally:
-        try:
-            capture()
-        except Exception:
-            pass
-
-
-def _capture_agent_context_history_inputs(
-    session,
-    *,
-    historizer: AgentContextHistorizerModel | None,
-    debug: DebugBus,
-) -> None:
-    current = session.current
-    if current is None:
-        return
-    debug.capture_model_inputs(
-        current.to_frame_context(),
-        current.turn_id,
-        historizer,
-    )
+        capture()
 
 
 def _completed_levels_after_turn(session) -> int:

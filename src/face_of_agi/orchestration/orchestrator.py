@@ -15,7 +15,6 @@ from face_of_agi.environment.adapter import EnvironmentAdapter
 from face_of_agi.environment.config import EnvironmentConfig
 from face_of_agi.memory import ExperimentalMemory, StateMemory
 from face_of_agi.models.adapters import ModelRegistry, OrchestratorAgentModel
-from face_of_agi.models.updater import UpdaterTaskRegistry
 from face_of_agi.debug.bus import DebugBus
 from face_of_agi.debug.sinks import DebugTrace
 from face_of_agi.orchestration.game_loop import (
@@ -80,10 +79,11 @@ class Orchestrator:
                 contexts=self.contexts,
                 agent=self._require_orchestrator_agent(),
                 change_summary_model=self.models.require_change_summary_model(),
-                agent_context_historizer=(
-                    self.models.agent_context_historizer_model
-                ),
-                updater_tasks=self.models.require_updater_tasks(),
+                memory_model=self.models.require_memory_model(),
+                world_model=self.models.require_world_model(),
+                goal_model=self.models.require_goal_model(),
+                interest_model=self.models.require_interest_model(),
+                reward_judge_model=self.models.require_reward_judge_model(),
                 tool_runtime_factory=self._build_agent_tool_runtime,
                 debug=active_debug,
             ).run(

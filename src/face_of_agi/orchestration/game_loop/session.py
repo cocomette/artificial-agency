@@ -12,11 +12,19 @@ from face_of_agi.contracts import (
     FrameControlMode,
     FrameTurnContext,
     GameRunResult,
+    AgentCandidateAction,
+    GoalPrediction,
+    InterestPrediction,
+    MemoryDocument,
     Observation,
     ObservationRef,
+    RewardJudgeScore,
     RuntimeConfig,
     TurnMetrics,
+    TurnLedgerEntry,
     UpdaterFrameTransitionInput,
+    TurnReward,
+    WorldPrediction,
 )
 from face_of_agi.environment.adapter import EnvironmentAdapter
 from face_of_agi.environment.config import EnvironmentConfig
@@ -82,6 +90,14 @@ class GameLoopSession:
     trace_cost_seconds: float | None = None
     turn_metrics: TurnMetrics | None = None
     update_input: UpdaterFrameTransitionInput | None = None
+    memory: MemoryDocument | None = None
+    goal: GoalPrediction | None = None
+    candidate_actions: tuple[AgentCandidateAction, ...] = ()
+    world_predictions: tuple[WorldPrediction, ...] = ()
+    interest_prediction: InterestPrediction | None = None
+    latest_judge_score: RewardJudgeScore | None = None
+    latest_reward: TurnReward | None = None
+    turn_ledger: list[TurnLedgerEntry] = field(default_factory=list)
     next_environment_observation: Observation | None = None
     next_frame_buffer: tuple[Observation, ...] = ()
     transition_frame_observations: tuple[Observation, ...] = ()

@@ -9,11 +9,16 @@ from typing import Any
 
 from face_of_agi.contracts import (
     ContextDocuments,
+    CandidatePredictionRecord,
     EExperimentRecord,
+    GoalPredictionRecord,
+    JudgeScoreRecord,
     MStateRecord,
     ObservationRef,
+    RewardRecord,
     RunMetadataRecord,
     TurnMetrics,
+    TurnLedgerRecord,
     RoleContext,
 )
 from face_of_agi.debug.contracts import ModelInputDebugRecord
@@ -70,6 +75,63 @@ _CURRENT_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
         "game_id",
         "run_id",
         "kind",
+        "metadata_json",
+        "created_at",
+    ),
+    "turn_ledgers": (
+        "id",
+        "game_id",
+        "run_id",
+        "turn_id",
+        "m_state_id",
+        "action_json",
+        "change_summary",
+        "memory_document",
+        "goal_prediction_json",
+        "reward_json",
+        "metadata_json",
+        "created_at",
+    ),
+    "candidate_predictions": (
+        "id",
+        "game_id",
+        "run_id",
+        "turn_id",
+        "candidate_index",
+        "action_json",
+        "prediction",
+        "source",
+        "metadata_json",
+        "created_at",
+    ),
+    "judge_scores": (
+        "id",
+        "game_id",
+        "run_id",
+        "turn_id",
+        "candidate_prediction_id",
+        "score",
+        "notes",
+        "error_tags_json",
+        "metadata_json",
+        "created_at",
+    ),
+    "goal_predictions": (
+        "id",
+        "game_id",
+        "run_id",
+        "turn_id",
+        "goal_prediction_json",
+        "memory_document",
+        "metadata_json",
+        "created_at",
+    ),
+    "rewards": (
+        "id",
+        "game_id",
+        "run_id",
+        "turn_id",
+        "reward_json",
         "metadata_json",
         "created_at",
     ),
@@ -154,6 +216,68 @@ class SQLiteDatabase:
                     metadata_json TEXT NOT NULL,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
+
+                CREATE TABLE IF NOT EXISTS turn_ledgers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    game_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    turn_id INTEGER NOT NULL,
+                    m_state_id INTEGER,
+                    action_json TEXT NOT NULL,
+                    change_summary TEXT NOT NULL,
+                    memory_document TEXT NOT NULL,
+                    goal_prediction_json TEXT,
+                    reward_json TEXT,
+                    metadata_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS candidate_predictions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    game_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    turn_id INTEGER NOT NULL,
+                    candidate_index INTEGER NOT NULL,
+                    action_json TEXT NOT NULL,
+                    prediction TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS judge_scores (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    game_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    turn_id INTEGER NOT NULL,
+                    candidate_prediction_id INTEGER,
+                    score REAL NOT NULL,
+                    notes TEXT NOT NULL,
+                    error_tags_json TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS goal_predictions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    game_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    turn_id INTEGER NOT NULL,
+                    goal_prediction_json TEXT NOT NULL,
+                    memory_document TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS rewards (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    game_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    turn_id INTEGER NOT NULL,
+                    reward_json TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
                 """
             )
             self._require_current_schema(connection)
@@ -223,6 +347,227 @@ class SQLiteDatabase:
             ).fetchall()
 
         return [self._row_to_run_metadata(row) for row in rows]
+
+    def write_turn_ledger(
+        self,
+        *,
+        game_id: str,
+        run_id: str,
+        turn_id: int,
+        m_state_id: int | None,
+        action: Any,
+        change_summary: str,
+        memory_document: str,
+        goal_prediction: Any | None = None,
+        reward: Any | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> TurnLedgerRecord:
+        """Write one v1 turn-ledger row."""
+
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO turn_ledgers (
+                    game_id,
+                    run_id,
+                    turn_id,
+                    m_state_id,
+                    action_json,
+                    change_summary,
+                    memory_document,
+                    goal_prediction_json,
+                    reward_json,
+                    metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    game_id,
+                    run_id,
+                    turn_id,
+                    m_state_id,
+                    _to_json(action),
+                    change_summary,
+                    memory_document,
+                    _to_nullable_json(goal_prediction),
+                    _to_nullable_json(reward),
+                    _to_json(metadata or {}),
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM turn_ledgers WHERE id = ?",
+                (int(cursor.lastrowid),),
+            ).fetchone()
+        return self._row_to_turn_ledger(row)
+
+    def write_candidate_prediction(
+        self,
+        *,
+        game_id: str,
+        run_id: str,
+        turn_id: int,
+        candidate_index: int,
+        action: Any,
+        prediction: str,
+        source: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> CandidatePredictionRecord:
+        """Write one candidate world prediction."""
+
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO candidate_predictions (
+                    game_id,
+                    run_id,
+                    turn_id,
+                    candidate_index,
+                    action_json,
+                    prediction,
+                    source,
+                    metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    game_id,
+                    run_id,
+                    turn_id,
+                    candidate_index,
+                    _to_json(action),
+                    prediction,
+                    source,
+                    _to_json(metadata or {}),
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM candidate_predictions WHERE id = ?",
+                (int(cursor.lastrowid),),
+            ).fetchone()
+        return self._row_to_candidate_prediction(row)
+
+    def write_judge_score(
+        self,
+        *,
+        game_id: str,
+        run_id: str,
+        turn_id: int,
+        candidate_prediction_id: int | None,
+        score: float,
+        notes: str,
+        error_tags: tuple[str, ...],
+        metadata: dict[str, Any] | None = None,
+    ) -> JudgeScoreRecord:
+        """Write one Reward Judge score."""
+
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO judge_scores (
+                    game_id,
+                    run_id,
+                    turn_id,
+                    candidate_prediction_id,
+                    score,
+                    notes,
+                    error_tags_json,
+                    metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    game_id,
+                    run_id,
+                    turn_id,
+                    candidate_prediction_id,
+                    float(score),
+                    notes,
+                    _to_json(tuple(error_tags)),
+                    _to_json(metadata or {}),
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM judge_scores WHERE id = ?",
+                (int(cursor.lastrowid),),
+            ).fetchone()
+        return self._row_to_judge_score(row)
+
+    def write_goal_prediction(
+        self,
+        *,
+        game_id: str,
+        run_id: str,
+        turn_id: int,
+        goal_prediction: Any,
+        memory_document: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> GoalPredictionRecord:
+        """Write one Goal prediction."""
+
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO goal_predictions (
+                    game_id,
+                    run_id,
+                    turn_id,
+                    goal_prediction_json,
+                    memory_document,
+                    metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    game_id,
+                    run_id,
+                    turn_id,
+                    _to_json(goal_prediction),
+                    memory_document,
+                    _to_json(metadata or {}),
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM goal_predictions WHERE id = ?",
+                (int(cursor.lastrowid),),
+            ).fetchone()
+        return self._row_to_goal_prediction(row)
+
+    def write_reward(
+        self,
+        *,
+        game_id: str,
+        run_id: str,
+        turn_id: int,
+        reward: Any,
+        metadata: dict[str, Any] | None = None,
+    ) -> RewardRecord:
+        """Write one reward row."""
+
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO rewards (
+                    game_id,
+                    run_id,
+                    turn_id,
+                    reward_json,
+                    metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    game_id,
+                    run_id,
+                    turn_id,
+                    _to_json(reward),
+                    _to_json(metadata or {}),
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM rewards WHERE id = ?",
+                (int(cursor.lastrowid),),
+            ).fetchone()
+        return self._row_to_reward(row)
 
     def write_m_state(
         self,
@@ -821,6 +1166,11 @@ class SQLiteDatabase:
         with self.connect() as connection:
             connection.executescript(
                 """
+                DELETE FROM rewards;
+                DELETE FROM goal_predictions;
+                DELETE FROM judge_scores;
+                DELETE FROM candidate_predictions;
+                DELETE FROM turn_ledgers;
                 DELETE FROM model_input_debug_records;
                 DELETE FROM m_states;
                 DELETE FROM e_experiments;
@@ -872,6 +1222,89 @@ class SQLiteDatabase:
                 json.loads(str(row["output_description_json"]))
             ),
             tool_result=from_memory_jsonable(json.loads(str(row["tool_result_json"]))),
+            metadata=from_memory_jsonable(json.loads(str(row["metadata_json"]))),
+            created_at=str(row["created_at"]),
+        )
+
+    def _row_to_turn_ledger(self, row: sqlite3.Row) -> TurnLedgerRecord:
+        return TurnLedgerRecord(
+            id=int(row["id"]),
+            game_id=str(row["game_id"]),
+            run_id=str(row["run_id"]),
+            turn_id=int(row["turn_id"]),
+            m_state_id=(
+                int(row["m_state_id"]) if row["m_state_id"] is not None else None
+            ),
+            action=from_memory_jsonable(json.loads(str(row["action_json"]))),
+            change_summary=str(row["change_summary"]),
+            memory_document=str(row["memory_document"]),
+            goal_prediction=_from_nullable_json(row["goal_prediction_json"]),
+            reward=_from_nullable_json(row["reward_json"]),
+            metadata=from_memory_jsonable(json.loads(str(row["metadata_json"]))),
+            created_at=str(row["created_at"]),
+        )
+
+    def _row_to_candidate_prediction(
+        self,
+        row: sqlite3.Row,
+    ) -> CandidatePredictionRecord:
+        return CandidatePredictionRecord(
+            id=int(row["id"]),
+            game_id=str(row["game_id"]),
+            run_id=str(row["run_id"]),
+            turn_id=int(row["turn_id"]),
+            candidate_index=int(row["candidate_index"]),
+            action=from_memory_jsonable(json.loads(str(row["action_json"]))),
+            prediction=str(row["prediction"]),
+            source=str(row["source"]),
+            metadata=from_memory_jsonable(json.loads(str(row["metadata_json"]))),
+            created_at=str(row["created_at"]),
+        )
+
+    def _row_to_judge_score(self, row: sqlite3.Row) -> JudgeScoreRecord:
+        return JudgeScoreRecord(
+            id=int(row["id"]),
+            game_id=str(row["game_id"]),
+            run_id=str(row["run_id"]),
+            turn_id=int(row["turn_id"]),
+            candidate_prediction_id=(
+                int(row["candidate_prediction_id"])
+                if row["candidate_prediction_id"] is not None
+                else None
+            ),
+            score=float(row["score"]),
+            notes=str(row["notes"]),
+            error_tags=tuple(
+                str(item)
+                for item in from_memory_jsonable(
+                    json.loads(str(row["error_tags_json"]))
+                )
+            ),
+            metadata=from_memory_jsonable(json.loads(str(row["metadata_json"]))),
+            created_at=str(row["created_at"]),
+        )
+
+    def _row_to_goal_prediction(self, row: sqlite3.Row) -> GoalPredictionRecord:
+        return GoalPredictionRecord(
+            id=int(row["id"]),
+            game_id=str(row["game_id"]),
+            run_id=str(row["run_id"]),
+            turn_id=int(row["turn_id"]),
+            goal_prediction=from_memory_jsonable(
+                json.loads(str(row["goal_prediction_json"]))
+            ),
+            memory_document=str(row["memory_document"]),
+            metadata=from_memory_jsonable(json.loads(str(row["metadata_json"]))),
+            created_at=str(row["created_at"]),
+        )
+
+    def _row_to_reward(self, row: sqlite3.Row) -> RewardRecord:
+        return RewardRecord(
+            id=int(row["id"]),
+            game_id=str(row["game_id"]),
+            run_id=str(row["run_id"]),
+            turn_id=int(row["turn_id"]),
+            reward=from_memory_jsonable(json.loads(str(row["reward_json"]))),
             metadata=from_memory_jsonable(json.loads(str(row["metadata_json"]))),
             created_at=str(row["created_at"]),
         )

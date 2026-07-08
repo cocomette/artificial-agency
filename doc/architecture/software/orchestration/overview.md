@@ -1,47 +1,32 @@
 # Orchestration Overview
 
-Orchestration is the central control layer for the runtime. It owns the game
-loop and is the only module that coordinates environment calls, model calls,
-memory reads and writes, updater calls, and action submission.
+Orchestration owns the game loop and coordinates environment, models, memory,
+debug tracing, and runtime lifecycle.
 
-The orchestrator agent `X` is a model role. The orchestration layer is the
-deterministic software controller that calls `X` and handles every side effect
-around it.
+Per controllable frame turn it:
 
-The top-level `Orchestrator` acts as a facade and dependency coordinator.
-Concrete workflows live in focused sub-orchestration components. The current
-ARC game loop is implemented as `GameLoopStateMachine` in
-`src/face_of_agi/orchestration/game_loop/state_machine.py`.
+1. builds a frame snapshot and optional source `M` row
+2. reuses the latest Memory and Goal outputs
+3. builds candidates from simple actions plus Agent X coordinate proposals
+4. runs World on each candidate
+5. runs Interest once on the full candidate set and World predictions
+6. asks Agent X to select the final candidate from the World/Interest table
+7. submits the action to the environment
+8. summarizes the observed transition
+9. judges the executed World prediction
+10. calls Goal once with previous Memory plus the next frame for reward-only
+   Goal delta, computes immediate reward, and appends the finalized ledger
+   entry
+11. regenerates Memory from action/change/reward ledger rows and calls Goal
+   again for next-turn state
+12. persists the `M` row plus v1 artifact tables
 
-The game loop defines frame-bundle unrolling, synthetic `NONE` decisions during
-non-controllable animation frames, and real environment action submission only
-on controllable final frames.
+There is no online trainer or adapter coordinator in this branch. Reward Judge
+prediction accuracy is written into `TurnReward.learning_progress` as proxy
+feedback. Recent action history and Memory ledger rows carry concise reward
+components so later model calls can use text feedback about which actions and
+transitions worked.
 
-## Responsibilities
-
-At a high level, orchestration:
-
-- starts and advances one ARC-AGI game run
-- receives observations and metadata from the environment module
-- composes current agent context from global `K^X` and selected-game `L^X`
-- calls Agent `X` only on controllable final frames
-- exposes an `AgentToolRuntime` with no available tools in the current runtime
-- receives the final action and trace from `X`, or synthesizes `NONE` and an
-  orchestration-owned trace for animation frames
-- sends final-frame real actions to the environment module
-- resolves the actual next frame for transition evidence
-- calls the change summary model for compact transition text
-- calls the agent context historizer when configured
-- runs updater `P` after each observed frame transition
-- applies updater-returned agent context to live working context documents
-- persists frame transitions, traces, metrics, action history, and context into
-  `M`
-
-## Boundary
-
-Orchestration depends on typed interfaces from the environment, memory, models,
-updates, and shared contracts modules. It does not depend on a specific model
-backend or provider-specific response format.
-
-The true main loop lives here. Runtime can assemble and invoke orchestration,
-but it should not grow independent game-step logic.
+Animation-unroll frames synthesize `NONE`; Agent X is skipped, but transition
+summary, ledger append, Memory, and Goal still run for retained animation
+keyframes.

@@ -11,6 +11,10 @@ def collect_model_input_payload(adapter: Any) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     _collect_prompt_request_payload(adapter, payload)
 
+    nested_openai = getattr(adapter, "_openai", None)
+    if nested_openai is not None:
+        _collect_prompt_request_payload(nested_openai, payload)
+
     return payload
 
 
@@ -25,6 +29,11 @@ def collect_model_io_payload(adapter: Any) -> dict[str, Any]:
     if provider is not None:
         _collect_prompt_request_payload(provider, payload)
         _collect_response_payload(provider, payload)
+
+    nested_openai = getattr(adapter, "_openai", None)
+    if nested_openai is not None:
+        _collect_prompt_request_payload(nested_openai, payload)
+        _collect_response_payload(nested_openai, payload)
 
     return payload
 

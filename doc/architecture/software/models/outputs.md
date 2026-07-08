@@ -1,46 +1,53 @@
 # Model Outputs
 
-## Agent `X`
+## Agent X
 
-The orchestrator agent returns:
+Agent X returns candidate proposals and final decisions:
 
-- one final `ActionSpec`
-- `AgentTrace` with reasoning summary, optional tool call/result records, and
-  metadata
-
-The current runtime exposes no real tools to `X`, so normal traces contain no
-tool results. Provider-specific responses are normalized inside the Agent X
-model layer before orchestration sees the final `DecisionResult`.
+- `AgentCandidateAction` rows for proposed coordinate actions
+- a final `DecisionResult` whose action must match one candidate
+- `AgentTrace` metadata for debugging and model-input inspection
 
 ## Change Summary
 
-The change model returns:
+The change summary role returns `ChangeSummaryResult`:
 
-- concise transition summary text
-- structured change fields
-- cropped changed-cell count
-- provider metadata
+- `summary`
+- `changed_pixel_percent`
+- `change_detected`
+- metadata
 
-Orchestration uses this output to build compact action history and updater
-input.
+## Memory
 
-## Agent Context Historizer
+Memory returns `MemoryDocument`:
 
-The historizer returns a structured summary of recent agent context evolution
-over the fields `goals`, `game_mechanics`, `policy`, `history`, and `extras`.
+- free-form `text`
+- optional metadata
 
-## Updater `P`
+## World
 
-The updater returns revised context documents for the orchestration-selected
-task.
+World returns `WorldPrediction`:
 
-- agent game updater replaces `RoleContext.game`
-- agent general updater replaces `RoleContext.general`
+- candidate `AgentCandidateAction`
+- predicted change-summary-style text
+- confidence
+- metadata
 
-Orchestration applies these outputs to its live `ContextDocuments` working
-state, then persists the resulting authoritative contexts into `M`.
+## Goal
 
-## Output Rule
+Goal returns `GoalPrediction`:
 
-Model outputs are data. Orchestration decides whether they are committed `M`
-history, active agent context, action history evidence, or updater input.
+- `goal`
+- `subgoals`
+- `steps_remaining`
+- `confidence`
+- metadata
+
+## Reward Judge
+
+Reward Judge returns `RewardJudgeScore`:
+
+- `score`
+- `notes`
+- `error_tags`
+- metadata
