@@ -7,12 +7,18 @@ import threading
 import time
 from typing import TextIO
 
-from face_of_agi.debug.events import DebugEvent, FrameTurnCompleted, ModelCallCompleted
+from face_of_agi.debug.events import (
+    DebugEvent,
+    FrameTurnCompleted,
+    ModelCallCompleted,
+    ModelCallEventRecorded,
+)
 
 _MODEL_AVG_FIELDS = {
     "agent": "avg_model_sec_agent",
     "change": "avg_model_sec_change",
     "historizer": "avg_model_sec_historizer",
+    "memory": "avg_model_sec_memory",
     "updater.agent": "avg_model_sec_updater_agent",
     "updater.general": "avg_model_sec_updater_general",
 }
@@ -46,7 +52,15 @@ class LiveTurnMonitor:
         """Record completed frame turns and print cadence summaries."""
 
         if isinstance(event, ModelCallCompleted):
-            self._record_model_call(event)
+            with self._lock:
+                self._record_model_call(event)
+            return
+        if isinstance(event, ModelCallEventRecorded):
+            if event.event != "repair_attempt":
+                return
+            with self._lock:
+                self.output.write(self._repair_attempt_line(event) + "\n")
+                self.output.flush()
             return
         if not isinstance(event, FrameTurnCompleted):
             return
@@ -84,12 +98,34 @@ class LiveTurnMonitor:
     def _record_model_call(self, event: ModelCallCompleted) -> None:
         if event.role not in _MODEL_AVG_FIELDS:
             return
-        with self._lock:
-            self._model_call_totals[event.role] += max(
-                0.0,
-                float(event.duration_seconds),
+        self._model_call_totals[event.role] += max(
+            0.0,
+            float(event.duration_seconds),
+        )
+        self._model_call_counts[event.role] += 1
+
+    def _repair_attempt_line(self, event: ModelCallEventRecorded) -> str:
+        attempt = _metadata_int(event.metadata, "attempt")
+        parts = [
+            "model_repair_attempt:",
+            f"role={event.role}",
+            f"provider={event.provider}",
+        ]
+        if event.game_id is not None:
+            parts.insert(2, f"game_id={event.game_id}")
+        if event.turn_id is not None:
+            parts.insert(
+                3 if event.game_id is not None else 2,
+                f"turn={event.turn_id}",
             )
-            self._model_call_counts[event.role] += 1
+        if event.model is not None:
+            parts.append(f"model={event.model}")
+        if attempt is not None:
+            parts.append(f"attempt={attempt}")
+        error_type = _metadata_str(event.metadata, "validation_error_type")
+        if error_type:
+            parts.append(f"error_type={error_type}")
+        return " ".join(parts)
 
     def _summary_line(self, now: float) -> str:
         avg_turn_seconds = self._total_turn_seconds / self._turn_count
@@ -131,3 +167,23 @@ class LiveTurnMonitor:
             )
             fields.append(f" {field}={average:.3f}")
         return "".join(fields)
+
+
+def _non_negative_int(value: object) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _metadata_int(metadata: dict[str, object] | None, key: str) -> int | None:
+    if not isinstance(metadata, dict) or key not in metadata:
+        return None
+    return _non_negative_int(metadata[key])
+
+
+def _metadata_str(metadata: dict[str, object] | None, key: str) -> str:
+    if not isinstance(metadata, dict):
+        return ""
+    value = metadata.get(key)
+    return value if isinstance(value, str) else ""

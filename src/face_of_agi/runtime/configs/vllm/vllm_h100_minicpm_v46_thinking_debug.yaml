@@ -1,0 +1,100 @@
+# Modal H100 public-game debug run using the OpenBMB MiniCPM-V 4.6 Thinking
+# checkpoint from the Modal Hugging Face cache.
+operation_mode: offline
+game_catalog_path: src/face_of_agi/environment/local_games.json
+environments_dir: ""
+recordings_dir: recordings
+seed: 0
+save_recording: false
+use_learned_contexts: false
+experimental_memory_turn_buffer: 1
+debug_keep_all_m_states: true
+enable_visualization: false
+render_mode: null
+debug_trace: off
+debug_color: never
+live_turn_monitor: true
+
+max_parallel_games: null
+max_game_retries: 1
+game_selection: all_available
+
+agent_action_history_window: 10
+agent_updater_action_history_window: 20
+agent_context_history_window: 10
+
+animation_keyframe_pixel_threshold: 20
+max_actions_per_level: 1000
+
+action_suppression_zero_changed_pixel_turns: 3
+updater_stagnation_warning_zero_changed_pixel_turns: 3
+
+models:
+  shared_vlm:
+    backend: vllm
+    model: openbmb/MiniCPM-V-4.6-Thinking
+    # Resize to 2048 then crop the 96px visual border in role configs. The
+    # resulting 1856x1856 board crop gives 64px per cell for a 29x29 ARC grid.
+    input_image_size: 2048x2048
+    input_image_resample: nearest
+    timeout: 600
+    max_retries: 0
+    max_tool_calls: 0
+    repair_attempts: 1
+    temperature: 0.0
+    options:
+      stop_token_ids: [248044, 248046]
+    server:
+      host: 127.0.0.1
+      port: 8000
+      max_model_len: 65536
+      extra_args:
+        - --gdn-prefill-backend
+        - triton
+        - --dtype
+        - auto
+        - --trust-remote-code
+        - --gpu-memory-utilization
+        - "0.95"
+        - --max-num-batched-tokens
+        - "65536"
+        - --max-num-seqs
+        - "128"
+        - --limit-mm-per-prompt
+        - '{"image": 20}'
+        - --disable-uvicorn-access-log
+  agent:
+    backend: vllm
+    input_image_crop_box_normalized: [0.046875, 0.046875, 0.953125, 0.953125]
+    include_output_schema_in_instructions: false
+    options:
+      chat_template_kwargs:
+        enable_thinking: true
+  change:
+    backend: vllm
+    input_image_crop_box_normalized: [0.046875, 0.046875, 0.953125, 0.953125]
+    include_output_schema_in_instructions: false
+    options:
+      chat_template_kwargs:
+        enable_thinking: true
+  historizer:
+    backend: vllm
+    include_output_schema_in_instructions: false
+    options:
+      chat_template_kwargs:
+        enable_thinking: false
+  updater:
+    general:
+      backend: vllm
+      include_output_schema_in_instructions: false
+      max_completion_tokens: 900
+      options:
+        chat_template_kwargs:
+          enable_thinking: false
+    agent:
+      backend: vllm
+      input_image_crop_box_normalized: [0.046875, 0.046875, 0.953125, 0.953125]
+      include_output_schema_in_instructions: false
+      options:
+        chat_template_kwargs:
+          enable_thinking: true

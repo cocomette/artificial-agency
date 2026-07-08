@@ -688,6 +688,8 @@ WorldModel.predict(context, action, observation_ref) -> ToolResult
 GoalModel.predict(context, action, observation_ref) -> ToolResult
 Agent.act(
   context,
+  first_observation,
+  previous_observation?,
   current_observation,
   tools,
   action_space

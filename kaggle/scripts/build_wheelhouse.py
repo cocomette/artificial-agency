@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -18,7 +19,11 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from kaggle_env import read_json_with_kaggle_dataset_id, write_json_if_changed  # noqa: E402
 
-VLLM_VERSION = "0.19.1"
+VLLM_VERSION = os.environ.get("FACE_OF_AGI_KAGGLE_VLLM_VERSION", "0.19.1")
+FULL_VLLM_DEPS = os.environ.get(
+    "FACE_OF_AGI_KAGGLE_FULL_VLLM_DEPS",
+    "",
+).lower() in {"1", "true", "yes", "on"}
 WHEELHOUSE_DATASET_SLUG = "face-of-agi-wheelhouse"
 KAGGLE_TORCH_STACK = {
     "cuda-toolkit",
@@ -27,7 +32,7 @@ KAGGLE_TORCH_STACK = {
     "torchvision",
     "triton",
 }
-NO_DEPS_STACK_PACKAGES = (
+NO_DEPS_STACK_PACKAGES = (f"vllm=={VLLM_VERSION}",) if FULL_VLLM_DEPS else (
     "compressed-tensors==0.15.0.1",
     "flashinfer-python==0.6.6",
     "quack-kernels==0.4.1",
@@ -35,15 +40,33 @@ NO_DEPS_STACK_PACKAGES = (
     f"vllm=={VLLM_VERSION}",
     "xgrammar==0.2.1",
 )
-NO_DEPS_STACK_NAMES = {
+NO_DEPS_STACK_NAMES = {"vllm"} if FULL_VLLM_DEPS else {
     "compressed-tensors",
     "flashinfer-python",
     "quack-kernels",
+    "tilelang",
+    "tokenspeed-mla",
     "torch-c-dlpack-ext",
     "vllm",
     "xgrammar",
 }
-VLLM_TORCH_DEPENDENCY_PACKAGES = (
+VLLM_NO_DEPS_DEPENDENCY_NAMES = (
+    {
+        # Torch 2.11.0 declares a Linux cuda-toolkit dependency that is not
+        # available in Kaggle's offline wheel inputs. Keep the pinned wheels
+        # in the MiniCPM wheelhouse but install them with --no-deps.
+        "torch",
+        "torchaudio",
+        "torchvision",
+    }
+    if FULL_VLLM_DEPS
+    else {
+        # This package declares broad Torch/CUDA dependencies; keep Kaggle's
+        # preinstalled stack authoritative and include only the matching wheel.
+        "humming-kernels",
+    }
+)
+VLLM_TORCH_DEPENDENCY_PACKAGES = () if FULL_VLLM_DEPS else (
     "apache-tvm-ffi>=0.1.2",
     "click",
     "cloudpickle",
@@ -54,7 +77,7 @@ VLLM_TORCH_DEPENDENCY_PACKAGES = (
     "ninja",
     "numpy>=1.23.5",
     "nvidia-cudnn-frontend>=1.13.0",
-    "nvidia-cutlass-dsl==4.6.0.dev0",
+    "nvidia-cutlass-dsl>=4.4.2",
     "nvidia-ml-py",
     "packaging>=24.2",
     "psutil",
@@ -67,6 +90,12 @@ VLLM_TORCH_DEPENDENCY_PACKAGES = (
     "typing-extensions>=4.10.0",
     "z3-solver<4.15.5,>=4.13.0",
 )
+FULL_VLLM_EXTRA_PACKAGES = (
+    # Torch 2.11's CUDA 13 wheel imports libcupti.so.13 at startup. The
+    # nvidia-cuda-cupti wheel is tagged manylinux_2_25, so it is downloaded
+    # separately below instead of relying on the default wheelhouse platform.
+    "nvidia-cuda-cupti==13.0.85",
+) if FULL_VLLM_DEPS else ()
 LINUX_MARKER_ENV = {
     "implementation_name": "cpython",
     "implementation_version": "3.12.0",
@@ -102,9 +131,11 @@ def _pip_download(
     output: Path,
     platforms: list[str],
     python_version: str,
-    abi: str,
+    abi: list[str],
     no_deps: bool = False,
 ) -> None:
+    if not packages:
+        return
     command = [
         sys.executable,
         "-m",
@@ -117,11 +148,11 @@ def _pip_download(
         python_version,
         "--implementation",
         "cp",
-        "--abi",
-        abi,
     ]
     for platform in platforms:
         command.extend(["--platform", platform])
+    for abi_tag in abi:
+        command.extend(["--abi", abi_tag])
     if no_deps:
         command.append("--no-deps")
     subprocess.check_call(command + list(packages))
@@ -136,27 +167,32 @@ def _wheel_for(output: Path, distribution: str, version: str | None = None) -> P
     return matches[-1]
 
 
-def _vllm_dependency_requirements(output: Path) -> list[str]:
-    skipped = KAGGLE_TORCH_STACK | NO_DEPS_STACK_NAMES
+def _vllm_dependency_requirements(output: Path) -> tuple[list[str], list[str]]:
+    skipped = (set() if FULL_VLLM_DEPS else KAGGLE_TORCH_STACK) | NO_DEPS_STACK_NAMES
     with zipfile.ZipFile(_wheel_for(output, "vllm", VLLM_VERSION)) as wheel:
         metadata_name = next(
             name for name in wheel.namelist() if name.endswith(".dist-info/METADATA")
         )
         metadata = wheel.read(metadata_name).decode("utf-8")
 
-    requirements = []
+    deps_requirements = []
+    no_deps_requirements = []
     for line in metadata.splitlines():
         if not line.startswith("Requires-Dist: "):
             continue
         requirement = Requirement(line.removeprefix("Requires-Dist: "))
-        if canonicalize_name(requirement.name) in skipped:
+        normalized_name = canonicalize_name(requirement.name)
+        if normalized_name in skipped:
             continue
         if requirement.marker is not None and not requirement.marker.evaluate(
             LINUX_MARKER_ENV
         ):
             continue
-        requirements.append(str(requirement))
-    return requirements
+        if normalized_name in VLLM_NO_DEPS_DEPENDENCY_NAMES:
+            no_deps_requirements.append(str(requirement))
+        else:
+            deps_requirements.append(str(requirement))
+    return deps_requirements, no_deps_requirements
 
 
 def build_wheelhouse(args: argparse.Namespace) -> None:
@@ -180,16 +216,33 @@ def build_wheelhouse(args: argparse.Namespace) -> None:
         abi=args.abi,
         no_deps=True,
     )
+    deps_requirements, no_deps_requirements = _vllm_dependency_requirements(output)
     _pip_download(
-        list(VLLM_TORCH_DEPENDENCY_PACKAGES) + _vllm_dependency_requirements(output),
+        list(VLLM_TORCH_DEPENDENCY_PACKAGES) + deps_requirements,
         output=output,
         platforms=args.platform,
         python_version=args.python_version,
         abi=args.abi,
     )
+    _pip_download(
+        no_deps_requirements,
+        output=output,
+        platforms=args.platform,
+        python_version=args.python_version,
+        abi=args.abi,
+        no_deps=True,
+    )
+    _pip_download(
+        FULL_VLLM_EXTRA_PACKAGES,
+        output=output,
+        platforms=["manylinux_2_25_x86_64"],
+        python_version=args.python_version,
+        abi=args.abi,
+        no_deps=True,
+    )
     write_json_if_changed(
         output / "dataset-metadata.json",
-        read_json_with_kaggle_dataset_id(args.metadata, WHEELHOUSE_DATASET_SLUG),
+        read_json_with_kaggle_dataset_id(args.metadata, args.dataset_slug),
     )
 
 
@@ -197,11 +250,15 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--platform", action="append", required=True)
     parser.add_argument("--python-version", default="312")
-    parser.add_argument("--abi", default="cp312")
+    parser.add_argument("--abi", action="append", default=[])
     parser.add_argument("--requirements", type=Path, required=True)
     parser.add_argument("--metadata", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    return parser.parse_args()
+    parser.add_argument("--dataset-slug", default=WHEELHOUSE_DATASET_SLUG)
+    args = parser.parse_args()
+    if not args.abi:
+        args.abi = ["cp312"]
+    return args
 
 
 if __name__ == "__main__":

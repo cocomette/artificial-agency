@@ -1,13 +1,15 @@
 """Shared frame and image helpers.
 
 The runtime stores visual observations by reference. These helpers keep that
-storage path small and provider-neutral while still allowing refs to rehydrate.
+storage path small and provider-neutral while still allowing refs to rehydrate
+to real images for later model calls.
 """
 
 from __future__ import annotations
 
 import base64
 from dataclasses import fields, is_dataclass
+import hashlib
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -16,12 +18,13 @@ from face_of_agi.contracts import Observation
 
 FRAME_PAYLOAD_TYPE = "face_of_agi.frame.png_base64.v1"
 DEFAULT_MEMORY_IMAGE_SIZE = (64, 64)
+FRAME_HASH_VERSION = "face_of_agi.arc_grid_frame.sha256.v1"
 
 
 def observation_to_pil_image(
     observation: Observation,
     *,
-    grid_scale: int = 4,
+    frame_scale: int = 4,
 ) -> Any:
     """Return the visible observation frame as a PIL RGB image."""
 
@@ -33,16 +36,42 @@ def observation_to_pil_image(
     return frame_to_pil_image(
         frame,
         step=observation.step,
-        grid_scale=grid_scale,
+        frame_scale=frame_scale,
         label=observation.id,
     )
+
+
+def observation_frame_hash(
+    observation: Observation,
+    *,
+    crop_edges: Any = None,
+) -> str:
+    """Return a stable SHA-256 hash for an observation's visible frame."""
+
+    image = observation_to_pil_image(observation).convert("RGB")
+    image = resize_image_if_needed(
+        image,
+        size=DEFAULT_MEMORY_IMAGE_SIZE,
+        resample="nearest",
+    )
+    normalized_crop_edges = _normalize_arc_grid_crop_edges(crop_edges)
+    image = _crop_image_arc_grid_edges(image, normalized_crop_edges)
+    header = (
+        f"{FRAME_HASH_VERSION}:{image.width}x{image.height}:RGB:"
+        f"crop={normalized_crop_edges}"
+    ).encode("ascii")
+    digest = hashlib.sha256()
+    digest.update(header)
+    digest.update(b"\0")
+    digest.update(image.tobytes())
+    return digest.hexdigest()
 
 
 def frame_to_pil_image(
     frame: Any,
     *,
     step: int = 0,
-    grid_scale: int = 4,
+    frame_scale: int = 4,
     label: str = "frame",
 ) -> Any:
     """Normalize a PIL/numpy/grid frame into a PIL RGB image."""
@@ -60,7 +89,7 @@ def frame_to_pil_image(
         rgb_array = frame_to_rgb_array(
             steps=step,
             frame=array,
-            scale=grid_scale,
+            scale=frame_scale,
         )
         return Image.fromarray(rgb_array).convert("RGB")
 
@@ -90,7 +119,7 @@ def image_to_data_url(
     size: str | tuple[int, int] | None = None,
     resample: str = "nearest",
 ) -> str:
-    """Encode an image as a PNG data URL for debug/memory tools."""
+    """Encode an image as a PNG data URL for provider APIs."""
 
     encoded = image_to_base64_png(image, size=size, resample=resample)
     return f"data:image/png;base64,{encoded}"
@@ -110,12 +139,12 @@ def normalize_frame_for_memory(
     frame: Any,
     *,
     size: tuple[int, int] = DEFAULT_MEMORY_IMAGE_SIZE,
-    grid_scale: int = 4,
+    frame_scale: int = 4,
 ) -> Any:
     """Return the 64x64 image that memory will persist, or the value unchanged."""
 
     try:
-        image = frame_to_pil_image(frame, grid_scale=grid_scale)
+        image = frame_to_pil_image(frame, frame_scale=frame_scale)
     except Exception:
         return frame
     return resize_image_if_needed(image, size=size, resample="nearest")
@@ -142,6 +171,7 @@ def to_memory_jsonable(value: Any) -> Any:
         return {
             field.name: to_memory_jsonable(getattr(value, field.name))
             for field in fields(value)
+            if field.metadata.get("memory", True)
         }
 
     if isinstance(value, dict):
@@ -154,6 +184,50 @@ def to_memory_jsonable(value: Any) -> Any:
         return str(value)
 
     return _json_fallback(value)
+
+
+def observation_arc_cell_value(
+    observation: Observation,
+    *,
+    x: int,
+    y: int,
+) -> int:
+    """Return the full ARC-grid symbol value at one 0..63 coordinate."""
+
+    if (
+        not 0 <= x < DEFAULT_MEMORY_IMAGE_SIZE[0]
+        or not 0 <= y < DEFAULT_MEMORY_IMAGE_SIZE[1]
+    ):
+        raise ValueError(f"ARC grid coordinate out of range: ({x},{y})")
+    frame = observation.frame
+    if frame is None and observation.frames:
+        frame = observation.frames[-1]
+    if frame is None:
+        raise ValueError(f"observation '{observation.id}' does not contain a frame")
+
+    native_grid = _native_arc_symbol_grid(frame)
+    if native_grid is not None:
+        if (
+            len(native_grid) != DEFAULT_MEMORY_IMAGE_SIZE[1]
+            or len(native_grid[0]) != DEFAULT_MEMORY_IMAGE_SIZE[0]
+        ):
+            raise ValueError("ACTION6 target value requires a 64x64 ARC grid")
+        return native_grid[y][x]
+
+    image = observation_to_pil_image(observation).convert("RGB")
+    pixel_x = _scaled_arc_grid_coordinate(x, image.width)
+    pixel_y = _scaled_arc_grid_coordinate(y, image.height)
+    color = image.getpixel((pixel_x, pixel_y))
+    reverse_palette = {
+        color: symbol for symbol, color in _arc_rendered_color_map().items()
+    }
+    try:
+        return reverse_palette[color]
+    except KeyError as exc:
+        raise ValueError(
+            "ACTION6 target value requires a native ARC grid or unmodified "
+            f"ARC-rendered image; pixel ({pixel_x},{pixel_y}) has color {color!r}"
+        ) from exc
 
 
 def from_memory_jsonable(value: Any) -> Any:
@@ -191,10 +265,60 @@ def _try_serialize_frame(value: Any) -> dict[str, Any] | None:
     }
 
 
+def _native_arc_symbol_grid(frame: Any) -> tuple[tuple[int, ...], ...] | None:
+    try:
+        import numpy as np
+
+        array = np.asarray(frame)
+    except Exception:
+        return None
+
+    if array.ndim != 2:
+        return None
+    rows = array.tolist()
+    normalized: list[tuple[int, ...]] = []
+    for y, row in enumerate(rows):
+        if not isinstance(row, list):
+            return None
+        normalized_row: list[int] = []
+        for x, value in enumerate(row):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"frame cell ({x},{y}) must be an ARC symbol")
+            if not 0 <= value <= 15:
+                raise ValueError(
+                    f"frame cell ({x},{y}) has ARC symbol {value}; expected 0..15"
+                )
+            normalized_row.append(value)
+        normalized.append(tuple(normalized_row))
+    return tuple(normalized)
+
+
+def _arc_rendered_color_map() -> dict[int, tuple[int, int, int]]:
+    import numpy as np
+    from arc_agi.rendering import frame_to_rgb_array
+
+    symbols = np.arange(16, dtype="uint8").reshape(4, 4)
+    rendered = frame_to_rgb_array(steps=0, frame=symbols, scale=1)
+    return {
+        int(symbols[y, x]): tuple(int(channel) for channel in rendered[y, x])
+        for y in range(symbols.shape[0])
+        for x in range(symbols.shape[1])
+    }
+
+
+def _scaled_arc_grid_coordinate(coordinate: int, image_axis_size: int) -> int:
+    if image_axis_size <= 0:
+        raise ValueError("image axis size must be positive")
+    return min(
+        image_axis_size - 1,
+        int((coordinate + 0.5) * image_axis_size / DEFAULT_MEMORY_IMAGE_SIZE[0]),
+    )
+
+
 def parse_image_size(
     size: str | tuple[int, int] | None,
     *,
-    field_name: str = "image_size",
+    field_name: str = "input_image_size",
 ) -> tuple[int, int] | None:
     """Return a PIL image size from a config value."""
 
@@ -250,6 +374,59 @@ def _resize_image_if_needed(
     """Compatibility wrapper for older internal callers."""
 
     return resize_image_if_needed(image, size=size, resample=resample)
+
+
+def _normalize_arc_grid_crop_edges(value: Any) -> tuple[int, int, int, int]:
+    """Return left/top/right/bottom crop edges in 64x64 ARC-grid cells."""
+
+    if value is None:
+        return (0, 0, 0, 0)
+    if isinstance(value, bool):
+        raise ValueError("crop_edges must be an int or four ints")
+    if isinstance(value, int):
+        edges = (value, value, value, value)
+    elif isinstance(value, (list, tuple)):
+        if len(value) != 4:
+            raise ValueError("crop_edges must have four values")
+        edges = tuple(_crop_edge(item) for item in value)
+    else:
+        raise ValueError("crop_edges must be an int or four ints")
+
+    left, top, right, bottom = edges
+    if left + right >= 64 or top + bottom >= 64:
+        raise ValueError("crop_edges leave no visible frame")
+    return edges
+
+
+def _crop_edge(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("crop_edges values must be ints")
+    if value < 0:
+        raise ValueError("crop_edges values must be non-negative")
+    return value
+
+
+def _crop_image_arc_grid_edges(
+    image: Any,
+    crop_edges: tuple[int, int, int, int],
+) -> Any:
+    left, top, right, bottom = crop_edges
+    width, height = image.size
+    box = (
+        _scaled_arc_grid_edge(left, width),
+        _scaled_arc_grid_edge(top, height),
+        width - _scaled_arc_grid_edge(right, width),
+        height - _scaled_arc_grid_edge(bottom, height),
+    )
+    if box == (0, 0, width, height):
+        return image
+    if box[0] >= box[2] or box[1] >= box[3]:
+        raise ValueError("crop_edges resolve to an empty crop")
+    return image.crop(box)
+
+
+def _scaled_arc_grid_edge(edge: int, image_axis_size: int) -> int:
+    return int(edge * image_axis_size / 64 + 0.5)
 
 
 def _json_fallback(value: Any) -> Any:

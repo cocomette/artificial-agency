@@ -1,0 +1,57 @@
+# Modal H100 full game-loop run: X, S, G, and all P updater slots share one
+# Ollama-hosted Qwen model.
+game_index: 3
+operation_mode: offline
+game_catalog_path: src/face_of_agi/environment/local_games.json
+environments_dir: environment_files
+recordings_dir: recordings
+seed: 0
+save_recording: false
+use_learned_contexts: false
+experimental_memory_turn_buffer: 1
+debug_keep_all_m_states: true
+
+enable_visualization: false
+render_mode: null
+debug_trace: null
+debug_color: never
+
+agent_action_history_window: 10  # experiment
+agent_updater_action_history_window: 50  # experiment
+agent_context_history_window: 8
+max_actions_per_level: 100
+
+models:
+  shared_vlm:
+    backend: ollama
+    model: gemma4:26b
+    keep_alive: 30m
+    think: false  # very verbose, try with vllm
+    temperature: 0.1  # try lower and higher
+    num_ctx: 8192
+  agent:
+    backend: ollama
+    input_image_size: 1000x1000
+    include_output_schema_in_instructions: true
+    max_tool_calls: 0
+    repair_attempts: 2
+  change:
+    backend: ollama
+    input_image_size: 1000x1000
+    think: false
+    include_output_schema_in_instructions: false
+    options:
+      temperature: 0
+  historizer:
+    backend: ollama
+    include_output_schema_in_instructions: false
+  updater:
+    general:
+      backend: ollama
+      input_image_size: 1000x1000
+      include_output_schema_in_instructions: false
+    agent:
+      backend: ollama
+      input_image_size: 1000x1000
+      include_output_schema_in_instructions: false
+    

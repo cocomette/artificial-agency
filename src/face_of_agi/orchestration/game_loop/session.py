@@ -20,6 +20,7 @@ from face_of_agi.contracts import (
 )
 from face_of_agi.environment.adapter import EnvironmentAdapter
 from face_of_agi.environment.config import EnvironmentConfig
+from face_of_agi.models.memory import GameMemoryDocument
 from face_of_agi.models.orchestrator_agent import AgentToolRuntime
 
 
@@ -99,6 +100,10 @@ class GameLoopSession:
     previous_observation_ref: ObservationRef | None = None
     last_decision: DecisionResult | None = None
     action_history: list[ActionHistoryItem] = field(default_factory=list)
+    game_memory: GameMemoryDocument = field(
+        default_factory=GameMemoryDocument.not_available
+    )
+    game_memory_updated_this_turn: bool = False
     state_record_ids: list[int] = field(default_factory=list)
     running: bool = True
     process_turn: bool = True

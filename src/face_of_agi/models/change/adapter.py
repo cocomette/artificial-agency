@@ -8,41 +8,41 @@ import logging
 import math
 import re
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Iterable, Sequence
 
-from face_of_agi.contracts import ActionSpec, Observation
+from face_of_agi.contracts import ActionSpec, ChangeSummaryElement, Observation
+from face_of_agi.frames import observation_to_pil_image
 from face_of_agi.models.action_glossary import append_action_glossary
-from face_of_agi.models.color_glossary import append_arc_color_glossary
-from face_of_agi.models.change.config import VLLMChangeSummaryConfig
+from face_of_agi.models.action_coordinates import action6_data_to_normalized_1000
+from face_of_agi.models.change.components import (
+    component_instruction_text,
+    frame_components_prompt_text,
+)
+from face_of_agi.models.change.config import OllamaChangeSummaryConfig
 from face_of_agi.models.change.contracts import (
     ChangeSummaryProvider,
     ChangeSummaryResult,
+    DEFAULT_CHANGE_SUMMARY_MAX_ELEMENTS,
     DEFAULT_CHANGE_SUMMARY_MAX_CHARS,
     change_summary_json_schema,
 )
-from face_of_agi.models.observation_text import (
-    ObservationTextConfig,
-    cropped_changed_cell_count,
-    serialize_observation,
-    serialize_observations,
+from face_of_agi.models.image_inputs import (
+    crop_image_normalized,
+    frame_bundle_image_size,
+    resize_image,
 )
-from face_of_agi.models.image_inputs import observations_to_cropped_images
 from face_of_agi.models.structured_output import (
     append_output_schema_to_instructions,
     provider_repair_callback,
     validate_with_repair,
 )
 
-DEFAULT_INSTRUCTION_PATH = (
-    Path(__file__).parent / "instructions" / "instruction_prompt.md"
+DEFAULT_INSTRUCTION_PATH = Path(__file__).parent / "instructions" / "instruction_prompt.md"
+DEFAULT_COMPONENT_INSTRUCTION_PATH = (
+    Path(__file__).parent / "instructions" / "component_instruction_prompt.md"
 )
-DEFAULT_REDUCER_INSTRUCTION_PATH = (
-    Path(__file__).parent / "instructions" / "reducer_instruction_prompt.md"
-)
-CHANGE_SUMMARY_PROMPT = "Compare the serialized observation frames from oldest to newest."
-CHANGE_SUMMARY_REDUCER_PROMPT = (
-    "Reconcile the ordered partial transition summaries into one final summary."
-)
+CHANGE_SUMMARY_PROMPT = "Compare the attached observation frames from oldest to newest."
+CHANGE_SUMMARY_IMAGE_BUDGET_FRAME_COUNT = 4
 LOGGER = logging.getLogger(__name__)
 
 
@@ -54,7 +54,7 @@ class ChangeSummaryOutputError(RuntimeError):
 class ParsedChangeSummary:
     """Validated structured change-summary payload."""
 
-    summary: str
+    elements: tuple[ChangeSummaryElement, ...]
     change_detected: bool
     model_change_detected: bool | None = None
     autocorrected_change_detected: bool = False
@@ -71,7 +71,7 @@ class ChangeSummaryAdapter:
         provider: ChangeSummaryProvider | None = None,
         client: Any | None = None,
     ) -> None:
-        self.config = config or VLLMChangeSummaryConfig()
+        self.config = config or OllamaChangeSummaryConfig()
         self.provider = provider or self._default_provider(client=client)
         self.last_instructions: str | None = None
         self.last_prompt: str | None = None
@@ -85,6 +85,7 @@ class ChangeSummaryAdapter:
         *,
         glossary_actions: Sequence[ActionSpec],
         frame_observations: Sequence[Observation] | None = None,
+        previous_change_elements: Sequence[ChangeSummaryElement] = (),
     ) -> ChangeSummaryResult:
         """Return a compact description of visible change between observations."""
 
@@ -98,38 +99,40 @@ class ChangeSummaryAdapter:
         )
         if len(evidence_observations) < 2:
             raise ValueError("change summary requires at least two evidence frames")
-        source_frame_count = len(evidence_observations)
-        changed_pixel_count = cropped_changed_cell_count(
-            evidence_observations[0].frame,
-            evidence_observations[-1].frame,
-            config=self.config.observation_text,
+        crop_box_normalized = getattr(
+            self.config,
+            "input_image_crop_box_normalized",
+            None,
         )
-        changed_cell_percent = cropped_changed_cell_percent(
-            evidence_observations[0].frame,
-            evidence_observations[-1].frame,
-            changed_cell_count=changed_pixel_count,
-            config=self.config.observation_text,
-        )
-        deterministic_change_detected = any_cropped_change_detected(
+        whole_images = change_summary_observation_images(
             evidence_observations,
-            config=self.config.observation_text,
+            frame_scale=getattr(self.config, "frame_scale", 4),
+            size=getattr(self.config, "input_image_size", None),
+            resample=getattr(self.config, "input_image_resample", "nearest"),
+            crop_box_normalized=crop_box_normalized,
         )
-        if not deterministic_change_detected:
+        changed_pixel_count = model_visible_changed_pixel_count(
+            whole_images[0],
+            whole_images[-1],
+        )
+        changed_pixel_percent = model_visible_changed_pixel_percent(
+            whole_images[0],
+            whole_images[-1],
+            changed_pixel_count=changed_pixel_count,
+        )
+        any_adjacent_frame_changed = model_visible_any_change_detected(whole_images)
+        if changed_pixel_count == 0 and len(whole_images) <= 2:
             return ChangeSummaryResult(
-                summary="no changes",
+                elements=(),
                 changed_pixel_count=0,
                 change_detected=False,
                 metadata={
                     "skipped": True,
-                    "skip_reason": "zero_changed_cells",
-                    "frame_count": len(evidence_observations),
-                    "serialized_frame_count": len(evidence_observations),
-                    "source_frame_count": source_frame_count,
-                    "chunk_count": 0,
-                    "deterministic_change_detected": False,
+                    "skip_reason": "zero_changed_pixels",
+                    "frame_count": len(whole_images),
                     "any_adjacent_frame_changed": False,
                 },
-                changed_cell_percent=0.0,
+                changed_pixel_percent=0.0,
             )
 
         summary_max_chars = getattr(
@@ -137,17 +140,24 @@ class ChangeSummaryAdapter:
             "summary_max_chars",
             DEFAULT_CHANGE_SUMMARY_MAX_CHARS,
         )
+        summary_max_elements = getattr(
+            self.config,
+            "summary_max_elements",
+            DEFAULT_CHANGE_SUMMARY_MAX_ELEMENTS,
+        )
         output_schema = change_summary_json_schema(
             summary_max_chars=summary_max_chars,
+            summary_max_elements=summary_max_elements,
         )
         instructions = append_output_schema_to_instructions(
-            append_arc_color_glossary(
-                append_action_glossary(
-                    load_change_summary_instructions(),
-                    glossary_actions,
-                    mode="committed_action",
-                    observation_text_config=self.config.observation_text,
-                )
+            append_action_glossary(
+                load_change_summary_instructions(
+                    include_components=bool(
+                        getattr(self.config, "activate_components", False)
+                    )
+                ),
+                glossary_actions,
+                mode="committed_action",
             ),
             output_schema,
             include=bool(
@@ -157,58 +167,56 @@ class ChangeSummaryAdapter:
         self.last_instructions = instructions
         chunks = _overlapping_observation_chunks(
             evidence_observations,
-            max_frames_per_call=getattr(self.config, "max_frames_per_call", None),
+            max_frames_per_call=getattr(self.config, "max_frames_per_call", 10),
         )
-        chunk_results = tuple(
-            self._summarize_observation_chunk(
+        chunk_results: list[ChangeSummaryResult] = []
+        persist_changed_elements_only = bool(
+            getattr(self.config, "persist_changed_elements_only", False)
+        )
+        prompt_change_elements = _prompt_change_elements(
+            _renamed_duplicate_change_elements(previous_change_elements),
+            persist_changed_elements_only=persist_changed_elements_only,
+        )
+        for chunk in chunks:
+            result = self._summarize_observation_chunk(
                 observations=chunk,
                 action=action,
                 output_schema=output_schema,
                 instructions=instructions,
-                chunk_index=index,
-                chunk_count=len(chunks),
-                source_frame_count=source_frame_count,
+                crop_box_normalized=crop_box_normalized,
+                previous_change_elements=prompt_change_elements,
             )
-            for index, chunk in enumerate(chunks)
-        )
-        if len(chunk_results) == 1:
-            result = chunk_results[0]
-            return ChangeSummaryResult(
-                summary=result.summary,
-                changed_pixel_count=changed_pixel_count,
-                change_detected=deterministic_change_detected,
-                metadata={
-                    **result.metadata,
-                    "frame_count": len(evidence_observations),
-                    "serialized_frame_count": len(evidence_observations),
-                    "source_frame_count": source_frame_count,
-                    "chunk_count": 1,
-                    "deterministic_change_detected": deterministic_change_detected,
-                },
-                changed_cell_percent=changed_cell_percent,
+            chunk_results.append(result)
+            prompt_change_elements = _prompt_change_elements(
+                _merged_change_summary_elements(chunk_results),
+                persist_changed_elements_only=persist_changed_elements_only,
             )
-        merged_result = _merged_change_summary_result(
-            chunk_results,
-            changed_pixel_count=changed_pixel_count,
-            changed_cell_percent=changed_cell_percent,
-            change_detected=deterministic_change_detected,
-            frame_count=len(evidence_observations),
-            source_frame_count=source_frame_count,
+
+        unfiltered_elements = _merged_change_summary_elements(chunk_results)
+        elements = _prompt_change_elements(
+            unfiltered_elements,
+            persist_changed_elements_only=persist_changed_elements_only,
         )
-        if not getattr(self.config, "reduce_chunk_summaries", True):
-            return merged_result
-        return self._reduce_chunk_summaries(
-            chunk_results=chunk_results,
-            chunks=chunks,
-            evidence_observations=evidence_observations,
-            action=action,
-            glossary_actions=glossary_actions,
-            output_schema=output_schema,
+        response_metadata = chunk_results[-1].metadata if chunk_results else {}
+        return ChangeSummaryResult(
+            elements=elements,
             changed_pixel_count=changed_pixel_count,
-            changed_cell_percent=changed_cell_percent,
-            deterministic_change_detected=deterministic_change_detected,
-            source_frame_count=source_frame_count,
-            fallback_result=merged_result,
+            change_detected=any_adjacent_frame_changed,
+            metadata={
+                **response_metadata,
+                "frame_count": len(whole_images),
+                "any_adjacent_frame_changed": any_adjacent_frame_changed,
+                "chunk_count": len(chunk_results),
+                "chunk_repair_attempts": tuple(
+                    result.metadata.get("repair_attempts", 0)
+                    for result in chunk_results
+                ),
+                **_merged_change_summary_autocorrect_metadata(chunk_results),
+                "persist_changed_elements_only": persist_changed_elements_only,
+                "element_count_before_persist_filter": len(unfiltered_elements),
+                "element_count_after_persist_filter": len(elements),
+            },
+            changed_pixel_percent=changed_pixel_percent,
         )
 
     def _summarize_observation_chunk(
@@ -218,53 +226,60 @@ class ChangeSummaryAdapter:
         action: ActionSpec,
         output_schema: dict[str, Any],
         instructions: str,
-        chunk_index: int,
-        chunk_count: int,
-        source_frame_count: int,
+        crop_box_normalized: Any | None,
+        previous_change_elements: Sequence[ChangeSummaryElement],
     ) -> ChangeSummaryResult:
-        """Return a change summary for one overlapping text-observation chunk."""
-
-        observation_text = serialize_observations(
+        images = change_summary_observation_images(
             observations,
-            config=self.config.observation_text,
-            label="change_evidence_observations",
-            include_header_metadata=False,
+            frame_scale=getattr(self.config, "frame_scale", 4),
+            size=getattr(self.config, "input_image_size", None),
+            resample=getattr(self.config, "input_image_resample", "nearest"),
+            crop_box_normalized=crop_box_normalized,
         )
-        changed_pixel_count = cropped_changed_cell_count(
-            observations[0].frame,
-            observations[-1].frame,
-            config=self.config.observation_text,
+        previous_image = images[0]
+        current_image = images[-1]
+        changed_pixel_count = model_visible_changed_pixel_count(
+            previous_image,
+            current_image,
         )
-        changed_cell_percent = cropped_changed_cell_percent(
-            observations[0].frame,
-            observations[-1].frame,
-            changed_cell_count=changed_pixel_count,
-            config=self.config.observation_text,
+        changed_pixel_percent = model_visible_changed_pixel_percent(
+            previous_image,
+            current_image,
+            changed_pixel_count=changed_pixel_count,
         )
-        deterministic_change_detected = any_cropped_change_detected(
-            observations,
-            config=self.config.observation_text,
+        any_adjacent_frame_changed = model_visible_any_change_detected(images)
+        frame_components_text = (
+            frame_components_prompt_text(
+                observations,
+                crop_box_normalized=crop_box_normalized,
+                max_nb_components=getattr(self.config, "max_nb_components", 50),
+            )
+            if bool(getattr(self.config, "activate_components", False))
+            else None
         )
         prompt = build_change_summary_prompt(
             action,
-            observation_text=observation_text.text,
             changed_pixel_count=changed_pixel_count,
-            frame_count=len(observations),
-            change_detected=deterministic_change_detected,
-        )
-        images = observations_to_cropped_images(
-            observations,
-            observation_text_config=self.config.observation_text,
-            frame_scale=self.config.frame_scale,
-            size=self.config.input_image_size,
-            resample=self.config.input_image_resample,
+            frame_count=len(images),
+            crop_box_normalized=crop_box_normalized,
+            previous_change_elements=previous_change_elements,
+            frame_components_text=frame_components_text,
+            any_adjacent_frame_changed=any_adjacent_frame_changed,
+            summary_max_elements=getattr(
+                self.config,
+                "summary_max_elements",
+                DEFAULT_CHANGE_SUMMARY_MAX_ELEMENTS,
+            ),
         )
         self.last_prompt = prompt
+        provider_images = images if len(images) > 2 else None
         response = self.provider.complete(
             instructions_text=instructions,
             prompt_text=prompt,
-            images=images,
+            previous_image=previous_image,
+            current_image=current_image,
             output_schema=output_schema,
+            images=provider_images,
         )
         self.last_request = response.request
         try:
@@ -274,11 +289,16 @@ class ChangeSummaryAdapter:
                 text_of=lambda item: item.text,
                 validate=lambda text: validate_change_summary_output(
                     text,
-                    deterministic_change_detected=deterministic_change_detected,
+                    any_adjacent_frame_changed=any_adjacent_frame_changed,
                     summary_max_chars=getattr(
                         self.config,
                         "summary_max_chars",
                         DEFAULT_CHANGE_SUMMARY_MAX_CHARS,
+                    ),
+                    summary_max_elements=getattr(
+                        self.config,
+                        "summary_max_elements",
+                        DEFAULT_CHANGE_SUMMARY_MAX_ELEMENTS,
                     ),
                 ),
                 repair=provider_repair_callback(
@@ -287,8 +307,10 @@ class ChangeSummaryAdapter:
                     kwargs={
                         "instructions_text": instructions,
                         "prompt_text": prompt,
-                        "images": images,
+                        "previous_image": previous_image,
+                        "current_image": current_image,
                         "output_schema": output_schema,
+                        "images": provider_images,
                     },
                 ),
                 max_repair_attempts=getattr(self.config, "repair_attempts", 0),
@@ -297,198 +319,49 @@ class ChangeSummaryAdapter:
         except ChangeSummaryOutputError as exc:
             LOGGER.warning("falling back after change-summary repair failure: %s", exc)
             return ChangeSummaryResult(
-                summary=_fallback_summary(deterministic_change_detected),
+                elements=(),
                 changed_pixel_count=changed_pixel_count,
-                change_detected=deterministic_change_detected,
+                change_detected=any_adjacent_frame_changed,
                 metadata={
                     **response.metadata,
                     "repair_attempts": getattr(self.config, "repair_attempts", 0),
-                    "frame_count": len(observations),
-                    "serialized_frame_count": len(observations),
-                    "source_frame_count": source_frame_count,
-                    "chunk_index": chunk_index,
-                    "chunk_count": chunk_count,
-                    "deterministic_change_detected": deterministic_change_detected,
-                    "any_adjacent_frame_changed": deterministic_change_detected,
+                    "frame_count": len(images),
+                    "any_adjacent_frame_changed": any_adjacent_frame_changed,
                     "fallback": "repair_exhausted",
                     "fallback_reason": str(exc),
                 },
-                changed_cell_percent=changed_cell_percent,
+                changed_pixel_percent=changed_pixel_percent,
             )
         response = validated.response
         self.last_request = response.request
         return ChangeSummaryResult(
-            summary=validated.value.summary,
+            elements=validated.value.elements,
             changed_pixel_count=changed_pixel_count,
             change_detected=validated.value.change_detected,
             metadata={
                 **response.metadata,
                 "repair_attempts": validated.repair_attempts,
-                "frame_count": len(observations),
-                "serialized_frame_count": len(observations),
-                "source_frame_count": source_frame_count,
-                "chunk_index": chunk_index,
-                "chunk_count": chunk_count,
-                "deterministic_change_detected": deterministic_change_detected,
-                "any_adjacent_frame_changed": deterministic_change_detected,
+                "frame_count": len(images),
+                "any_adjacent_frame_changed": any_adjacent_frame_changed,
                 **_change_summary_autocorrect_metadata(validated.value),
             },
-            changed_cell_percent=changed_cell_percent,
-        )
-
-    def _reduce_chunk_summaries(
-        self,
-        *,
-        chunk_results: tuple[ChangeSummaryResult, ...],
-        chunks: tuple[tuple[Observation, ...], ...],
-        evidence_observations: tuple[Observation, ...],
-        action: ActionSpec,
-        glossary_actions: Sequence[ActionSpec],
-        output_schema: dict[str, Any],
-        changed_pixel_count: int,
-        changed_cell_percent: float,
-        deterministic_change_detected: bool,
-        source_frame_count: int,
-        fallback_result: ChangeSummaryResult,
-    ) -> ChangeSummaryResult:
-        """Reduce multiple chunk summaries into one final transition summary."""
-
-        keyframe_indices = _reducer_keyframe_indices(
-            evidence_observations,
-            chunks=chunks,
-            limit=getattr(self.config, "reducer_keyframe_limit", 6),
-        )
-        keyframe_text = _reducer_keyframe_text(
-            evidence_observations,
-            indices=keyframe_indices,
-            config=self.config.observation_text,
-        )
-        keyframe_images = observations_to_cropped_images(
-            tuple(evidence_observations[index] for index in keyframe_indices),
-            observation_text_config=self.config.observation_text,
-            frame_scale=self.config.frame_scale,
-            size=self.config.input_image_size,
-            resample=self.config.input_image_resample,
-        )
-        instructions = append_output_schema_to_instructions(
-            append_arc_color_glossary(
-                append_action_glossary(
-                    load_change_summary_reducer_instructions(),
-                    glossary_actions,
-                    mode="committed_action",
-                    observation_text_config=self.config.observation_text,
-                )
-            ),
-            output_schema,
-            include=bool(
-                getattr(self.config, "include_output_schema_in_instructions", False)
-            ),
-        )
-        prompt = build_change_summary_reducer_prompt(
-            action,
-            chunk_results=chunk_results,
-            keyframe_text=keyframe_text,
-            keyframe_indices=keyframe_indices,
-            changed_pixel_count=changed_pixel_count,
-            changed_cell_percent=changed_cell_percent,
-            frame_count=len(evidence_observations),
-            change_detected=deterministic_change_detected,
-        )
-        self.last_instructions = instructions
-        self.last_prompt = prompt
-        response = self.provider.reduce_complete(
-            instructions_text=instructions,
-            prompt_text=prompt,
-            images=keyframe_images,
-            output_schema=output_schema,
-        )
-        self.last_request = response.request
-        try:
-            validated = validate_with_repair(
-                label=f"{self.provider.backend} reduced change summary",
-                response=response,
-                text_of=lambda item: item.text,
-                validate=lambda text: validate_change_summary_output(
-                    text,
-                    deterministic_change_detected=deterministic_change_detected,
-                    summary_max_chars=getattr(
-                        self.config,
-                        "summary_max_chars",
-                        DEFAULT_CHANGE_SUMMARY_MAX_CHARS,
-                    ),
-                ),
-                repair=provider_repair_callback(
-                    self.provider,
-                    "repair_reduce_complete",
-                    kwargs={
-                        "instructions_text": instructions,
-                        "prompt_text": prompt,
-                        "images": keyframe_images,
-                        "output_schema": output_schema,
-                    },
-                ),
-                max_repair_attempts=getattr(self.config, "repair_attempts", 0),
-                error_factory=ChangeSummaryOutputError,
-            )
-        except ChangeSummaryOutputError as exc:
-            LOGGER.warning(
-                "falling back after change-summary reducer repair failure: %s", exc
-            )
-            return ChangeSummaryResult(
-                summary=fallback_result.summary,
-                changed_pixel_count=fallback_result.changed_pixel_count,
-                change_detected=fallback_result.change_detected,
-                metadata={
-                    **fallback_result.metadata,
-                    **response.metadata,
-                    "frame_count": len(evidence_observations),
-                    "serialized_frame_count": len(evidence_observations),
-                    "source_frame_count": source_frame_count,
-                    "chunk_count": len(chunk_results),
-                    "deterministic_change_detected": deterministic_change_detected,
-                    "any_adjacent_frame_changed": deterministic_change_detected,
-                    "reducer": True,
-                    "reducer_keyframe_indices": keyframe_indices,
-                    "reducer_repair_attempts": getattr(
-                        self.config, "repair_attempts", 0
-                    ),
-                    "reducer_fallback": "repair_exhausted",
-                    "reducer_fallback_reason": str(exc),
-                },
-                changed_cell_percent=fallback_result.changed_cell_percent,
-            )
-
-        response = validated.response
-        self.last_request = response.request
-        return ChangeSummaryResult(
-            summary=validated.value.summary,
-            changed_pixel_count=changed_pixel_count,
-            change_detected=validated.value.change_detected,
-            metadata={
-                **response.metadata,
-                "reducer": True,
-                "reducer_repair_attempts": validated.repair_attempts,
-                "reducer_keyframe_indices": keyframe_indices,
-                "frame_count": len(evidence_observations),
-                "serialized_frame_count": len(evidence_observations),
-                "source_frame_count": source_frame_count,
-                "chunk_count": len(chunk_results),
-                "chunk_repair_attempts": tuple(
-                    result.metadata.get("repair_attempts", 0)
-                    for result in chunk_results
-                ),
-                "chunk_fallbacks": tuple(
-                    result.metadata.get("fallback") for result in chunk_results
-                ),
-                "deterministic_change_detected": deterministic_change_detected,
-                "any_adjacent_frame_changed": deterministic_change_detected,
-                **_change_summary_autocorrect_metadata(validated.value),
-            },
-            changed_cell_percent=changed_cell_percent,
+            changed_pixel_percent=changed_pixel_percent,
         )
 
     def _default_provider(self, *, client: Any | None) -> ChangeSummaryProvider:
         backend = (getattr(self.config, "backend", None) or "").lower()
+        if backend == "openai":
+            from face_of_agi.models.change.providers.openai import (
+                OpenAIChangeSummaryProvider,
+            )
+
+            return OpenAIChangeSummaryProvider(self.config, client=client)
+        if backend == "ollama":
+            from face_of_agi.models.change.providers.ollama import (
+                OllamaChangeSummaryProvider,
+            )
+
+            return OllamaChangeSummaryProvider(self.config, client=client)
         if backend == "vllm":
             from face_of_agi.models.change.providers.vllm import (
                 VLLMChangeSummaryProvider,
@@ -498,169 +371,16 @@ class ChangeSummaryAdapter:
         raise ValueError(f"unknown change summary backend: {self.config.backend}")
 
 
-def load_change_summary_instructions(
-    path: str | Path | None = None,
-) -> str:
-    """Load the human-editable change summary instruction prompt."""
-
-    instruction_path = Path(path) if path is not None else DEFAULT_INSTRUCTION_PATH
-    return instruction_path.read_text(encoding="utf-8").strip()
-
-
-def load_change_summary_reducer_instructions(
-    path: str | Path | None = None,
-) -> str:
-    """Load the human-editable change summary reducer instruction prompt."""
-
-    instruction_path = (
-        Path(path) if path is not None else DEFAULT_REDUCER_INSTRUCTION_PATH
-    )
-    return instruction_path.read_text(encoding="utf-8").strip()
-
-
-def build_change_summary_prompt(
-    action: ActionSpec,
-    *,
-    observation_text: str,
-    changed_pixel_count: int,
-    frame_count: int = 2,
-    change_detected: bool | None = None,
-) -> str:
-    """Return the change-summary user prompt with action context."""
-
-    if changed_pixel_count < 0:
-        raise ValueError("changed_pixel_count must be non-negative")
-    if frame_count < 2:
-        raise ValueError("frame_count must be at least 2")
-    transition_lines = [
-        "TRANSITION:",
-        f"serialized_frame_count: {frame_count}",
-        f"changed_cell_count: {changed_pixel_count}",
-    ]
-    if change_detected is not None:
-        transition_lines.append(
-            f"any_adjacent_frame_changed: {str(change_detected).lower()}"
-        )
-    return "\n\n".join(
-        [
-            CHANGE_SUMMARY_PROMPT,
-            "\n".join(transition_lines),
-            "OBSERVATIONS:\n" + observation_text,
-            "ACTION:\n"
-            f"action_id: {action.name}\n"
-            f"data: {_action_data_text(action)}"
-            + _action_target_text(action),
-        ]
-    )
-
-
-def build_change_summary_reducer_prompt(
-    action: ActionSpec,
-    *,
-    chunk_results: Sequence[ChangeSummaryResult],
-    keyframe_text: str,
-    keyframe_indices: Sequence[int],
-    changed_pixel_count: int,
-    changed_cell_percent: float,
-    frame_count: int,
-    change_detected: bool,
-) -> str:
-    """Return the final reducer user prompt for multiple chunk summaries."""
-
-    if changed_pixel_count < 0:
-        raise ValueError("changed_pixel_count must be non-negative")
-    if frame_count < 2:
-        raise ValueError("frame_count must be at least 2")
-    if not chunk_results:
-        raise ValueError("chunk_results must not be empty")
-    transition_lines = [
-        "TRANSITION:",
-        f"serialized_frame_count: {frame_count}",
-        f"changed_cell_count: {changed_pixel_count}",
-        f"changed_cell_percent: {_percent_text(changed_cell_percent)}",
-        f"any_adjacent_frame_changed: {str(change_detected).lower()}",
-    ]
-    partial_lines: list[str] = []
-    for index, result in enumerate(chunk_results, start=1):
-        partial_lines.extend(
-            [
-                f"{index}. summary: {json.dumps(result.summary)}",
-                f"   change_detected: {str(result.change_detected).lower()}",
-            ]
-        )
-    selected_indices = ", ".join(str(index) for index in keyframe_indices)
-    return "\n\n".join(
-        [
-            CHANGE_SUMMARY_REDUCER_PROMPT,
-            "\n".join(transition_lines),
-            "ORDERED_PARTIAL_SUMMARIES:\n" + "\n".join(partial_lines),
-            "SELECTED_KEYFRAMES:\n"
-            f"selected_frame_indices: {selected_indices}\n\n"
-            + keyframe_text,
-            "ACTION:\n"
-            f"action_id: {action.name}\n"
-            f"data: {_action_data_text(action)}"
-            + _action_target_text(action),
-        ]
-    )
-
-
-def cropped_changed_cell_percent(
-    left: Any,
-    right: Any,
-    *,
-    changed_cell_count: int | None = None,
-    config: Any | None = None,
-) -> float:
-    """Return first-to-final changed percentage over the visible ARC crop."""
-
-    from face_of_agi.models.observation_text import ObservationTextConfig
-
-    resolved_config = (
-        config
-        if isinstance(config, ObservationTextConfig)
-        else ObservationTextConfig(**config)
-        if isinstance(config, dict)
-        else ObservationTextConfig()
-    )
-    visible_axis = 64 - (2 * resolved_config.crop_cells)
-    if visible_axis <= 0:
-        raise ValueError("observation_text.crop_cells leaves an empty crop")
-    count = (
-        cropped_changed_cell_count(left, right, config=resolved_config)
-        if changed_cell_count is None
-        else changed_cell_count
-    )
-    return min(
-        100.0,
-        max(0.0, float(count) * 100.0 / float(visible_axis * visible_axis)),
-    )
-
-
-def any_cropped_change_detected(
-    observations: Sequence[Observation],
-    *,
-    config: Any | None = None,
-) -> bool:
-    """Return whether any adjacent retained observations differ in the crop."""
-
-    return any(
-        cropped_changed_cell_count(left.frame, right.frame, config=config) > 0
-        for left, right in zip(observations, observations[1:], strict=False)
-    )
-
-
 def _overlapping_observation_chunks(
     observations: Sequence[Observation],
     *,
-    max_frames_per_call: int | None,
+    max_frames_per_call: int,
 ) -> tuple[tuple[Observation, ...], ...]:
-    evidence = tuple(observations)
-    if max_frames_per_call is None or len(evidence) <= max_frames_per_call:
-        return (evidence,)
     limit = _normalized_max_frames_per_call(max_frames_per_call)
-    chunk_count = math.ceil((len(evidence) - 1) / (limit - 1))
-    total_chunk_frames = len(evidence) + chunk_count - 1
+    if len(observations) <= limit:
+        return (tuple(observations),)
+    chunk_count = math.ceil((len(observations) - 1) / (limit - 1))
+    total_chunk_frames = len(observations) + chunk_count - 1
     base_chunk_size = total_chunk_frames // chunk_count
     extra_frames = total_chunk_frames % chunk_count
     chunk_sizes = tuple(
@@ -671,166 +391,308 @@ def _overlapping_observation_chunks(
     start = 0
     for size in chunk_sizes:
         end = start + size
-        chunks.append(tuple(evidence[start:end]))
+        chunks.append(tuple(observations[start:end]))
         start = end - 1
     return tuple(chunks)
 
 
 def _normalized_max_frames_per_call(value: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 2:
-        raise ValueError("max_frames_per_call must be an integer at least 2 or null")
+        raise ValueError("max_frames_per_call must be an int greater than 1")
     return value
 
 
-def _reducer_keyframe_indices(
-    observations: Sequence[Observation],
-    *,
-    chunks: Sequence[Sequence[Observation]],
-    limit: int,
-) -> tuple[int, ...]:
-    evidence = tuple(observations)
-    if len(evidence) < 2:
-        raise ValueError("reducer keyframes require at least two evidence frames")
-    normalized_limit = _normalized_reducer_keyframe_limit(limit)
-    first_index = 0
-    final_index = len(evidence) - 1
-    index_by_identity = {
-        id(observation): index for index, observation in enumerate(evidence)
-    }
-    boundary_indices: list[int] = []
-    for chunk in chunks[:-1]:
-        if not chunk:
-            continue
-        boundary_index = index_by_identity.get(id(chunk[-1]))
-        if boundary_index is None or boundary_index in {first_index, final_index}:
-            continue
-        if boundary_index not in boundary_indices:
-            boundary_indices.append(boundary_index)
-    allowed_boundary_count = max(0, normalized_limit - 2)
-    selected_boundaries = _evenly_sample_indices(
-        tuple(sorted(boundary_indices)),
-        count=allowed_boundary_count,
-    )
-    return tuple(sorted({first_index, *selected_boundaries, final_index}))
-
-
-def _normalized_reducer_keyframe_limit(value: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 2:
-        raise ValueError("reducer_keyframe_limit must be an integer at least 2")
-    return value
-
-
-def _evenly_sample_indices(values: tuple[int, ...], *, count: int) -> tuple[int, ...]:
-    if count <= 0 or not values:
-        return ()
-    if count >= len(values):
-        return values
-    if count == 1:
-        return (values[len(values) // 2],)
-    sampled_positions = [
-        round(index * (len(values) - 1) / (count - 1)) for index in range(count)
-    ]
-    sampled: list[int] = []
-    for position in sampled_positions:
-        value = values[position]
-        if value not in sampled:
-            sampled.append(value)
-    for value in values:
-        if len(sampled) >= count:
-            break
-        if value not in sampled:
-            sampled.append(value)
-    return tuple(sorted(sampled[:count]))
-
-
-def _reducer_keyframe_text(
-    observations: Sequence[Observation],
-    *,
-    indices: Sequence[int],
-    config: ObservationTextConfig | dict[str, Any],
-) -> str:
-    base_config = (
-        config
-        if isinstance(config, ObservationTextConfig)
-        else ObservationTextConfig(**config)
-    )
-    rows_config = ObservationTextConfig(
-        crop_cells=base_config.crop_cells,
-        overflow_chars_per_frame=base_config.overflow_chars_per_frame,
-        include_rows=True,
-        include_components=False,
-        include_component_runs=False,
-        compact_components=False,
-    )
-    frames: list[str] = []
-    for index in indices:
-        serialized = serialize_observation(
-            observations[index],
-            config=rows_config,
-            label=f"reducer_keyframe original_frame_index={index}",
-            include_header_metadata=False,
-        )
-        frames.append(serialized.text)
-    return "\n\n".join(frames)
-
-
-def _merged_change_summary_result(
+def _merged_change_summary_elements(
     results: Sequence[ChangeSummaryResult],
+) -> tuple[ChangeSummaryElement, ...]:
+    return _merged_change_summary_element_sequence(
+        element for result in results for element in result.elements
+    )
+
+
+def _merged_change_summary_element_sequence(
+    elements: Iterable[ChangeSummaryElement],
+) -> tuple[ChangeSummaryElement, ...]:
+    order: list[str] = []
+    descriptions: dict[str, str] = {}
+    mutations: dict[str, list[str]] = {}
+    seen_mutations: dict[str, set[str]] = {}
+    for element in elements:
+        name = element.element_name.strip()
+        if not name:
+            continue
+        if name not in descriptions:
+            order.append(name)
+            descriptions[name] = ""
+            mutations[name] = []
+            seen_mutations[name] = set()
+        if element.element_description.strip():
+            descriptions[name] = element.element_description.strip()
+        mutation = element.element_mutation.strip()
+        if mutation and mutation not in seen_mutations[name]:
+            mutations[name].append(mutation)
+            seen_mutations[name].add(mutation)
+    return tuple(
+        ChangeSummaryElement(
+            element_name=name,
+            element_description=descriptions[name],
+            element_mutation="; ".join(mutations[name]),
+        )
+        for name in order
+    )
+
+
+def _prompt_change_elements(
+    elements: Sequence[ChangeSummaryElement],
+    *,
+    persist_changed_elements_only: bool,
+) -> tuple[ChangeSummaryElement, ...]:
+    if not persist_changed_elements_only:
+        return tuple(elements)
+    return tuple(element for element in elements if _element_has_visible_change(element))
+
+
+def _elements_have_visible_change(
+    elements: Sequence[ChangeSummaryElement],
+) -> bool:
+    return any(_element_has_visible_change(element) for element in elements)
+
+
+def _element_has_visible_change(element: ChangeSummaryElement) -> bool:
+    mutation = _normalized_no_change_text(element.element_mutation)
+    if not mutation:
+        return False
+    return not any(
+        re.fullmatch(pattern, mutation)
+        for pattern in _NO_CHANGE_MUTATION_PATTERNS
+    )
+
+
+_NO_CHANGE_MUTATION_PATTERNS = (
+    r"none",
+    r"no (?:visible |detected )?changes?(?: for this element)?"
+    r"(?: across (?:the )?(?:attached )?frames?)?",
+    r"nothing changed",
+    r"did not change",
+    r"unchanged",
+    r"(?:stayed|remained|remains|was|is) "
+    r"(?:still|static|stationary|unchanged|the same)",
+)
+
+
+def _normalized_no_change_text(value: str) -> str:
+    return re.sub(r"[\s.;:,-]+", " ", value.strip().lower()).strip()
+
+
+def _renamed_duplicate_change_elements(
+    elements: Sequence[ChangeSummaryElement],
+) -> tuple[ChangeSummaryElement, ...]:
+    name_counts: dict[str, int] = {}
+    for element in elements:
+        name = element.element_name.strip()
+        name_counts[name] = name_counts.get(name, 0) + 1
+    seen_names: dict[str, int] = {}
+    renamed: list[ChangeSummaryElement] = []
+    for element in elements:
+        name = element.element_name.strip()
+        if name_counts.get(name, 0) == 1:
+            renamed.append(element)
+            continue
+        occurrence = seen_names.get(name, 0)
+        seen_names[name] = occurrence + 1
+        renamed.append(
+            ChangeSummaryElement(
+                element_name=f"{name}_{occurrence}",
+                element_description=element.element_description,
+                element_mutation=element.element_mutation,
+            )
+        )
+    return tuple(renamed)
+
+
+def load_change_summary_instructions(
+    path: str | Path | None = None,
+    *,
+    include_components: bool = False,
+    component_path: str | Path | None = None,
+) -> str:
+    """Load the human-editable change summary instruction prompt."""
+
+    instruction_path = Path(path) if path is not None else DEFAULT_INSTRUCTION_PATH
+    instructions = instruction_path.read_text(encoding="utf-8").strip()
+    if include_components:
+        component_instruction_path = (
+            Path(component_path)
+            if component_path is not None
+            else DEFAULT_COMPONENT_INSTRUCTION_PATH
+        )
+        instructions += "\n\n" + component_instruction_text(
+            component_instruction_path.read_text(encoding="utf-8")
+        )
+    return instructions
+
+
+def build_change_summary_prompt(
+    action: ActionSpec,
     *,
     changed_pixel_count: int,
-    changed_cell_percent: float,
-    change_detected: bool,
-    frame_count: int,
-    source_frame_count: int,
-) -> ChangeSummaryResult:
-    return ChangeSummaryResult(
-        summary=_merged_summary_text(results, change_detected=change_detected),
-        changed_pixel_count=changed_pixel_count,
-        change_detected=change_detected,
-        metadata={
-            **(results[-1].metadata if results else {}),
-            "frame_count": frame_count,
-            "serialized_frame_count": frame_count,
-            "source_frame_count": source_frame_count,
-            "chunk_count": len(results),
-            "chunk_repair_attempts": tuple(
-                result.metadata.get("repair_attempts", 0) for result in results
-            ),
-            "chunk_fallbacks": tuple(
-                result.metadata.get("fallback") for result in results
-            ),
-            "deterministic_change_detected": change_detected,
-            "any_adjacent_frame_changed": change_detected,
-        },
-        changed_cell_percent=changed_cell_percent,
+    frame_count: int = 2,
+    crop_box_normalized: Any | None = None,
+    previous_change_elements: Sequence[ChangeSummaryElement] = (),
+    frame_components_text: str | None = None,
+    any_adjacent_frame_changed: bool | None = None,
+    summary_max_elements: int | None = DEFAULT_CHANGE_SUMMARY_MAX_ELEMENTS,
+) -> str:
+    """Return the change-summary user prompt with action context."""
+
+    if changed_pixel_count < 0:
+        raise ValueError("changed_pixel_count must be non-negative")
+    if frame_count < 2:
+        raise ValueError("frame_count must be at least 2")
+    blocks = [
+        CHANGE_SUMMARY_PROMPT,
+        _change_summary_output_limit_text(summary_max_elements),
+        "## Previous change elements\n\n"
+        + _change_elements_json(previous_change_elements),
+        "TRANSITION:\n"
+        f"attached_frame_count: {frame_count}\n"
+        f"changed_pixel_count: {changed_pixel_count}",
+    ]
+    if any_adjacent_frame_changed is not None:
+        blocks[-1] += (
+            "\nany_adjacent_frame_changed: "
+            f"{str(any_adjacent_frame_changed).lower()}"
+        )
+    if frame_components_text:
+        blocks.append(frame_components_text)
+    blocks.append(
+        "ACTION:\n"
+        + "\n".join(
+            _action_context_lines(action, crop_box_normalized=crop_box_normalized)
+        )
+    )
+    return "\n\n".join(blocks)
+
+
+def _change_summary_output_limit_text(summary_max_elements: int | None) -> str:
+    if summary_max_elements is None:
+        return "Output only the most important visible elements."
+    return (
+        "Output at most "
+        f"{summary_max_elements} visible elements in the `elements` array."
     )
 
 
-def _merged_summary_text(
-    results: Sequence[ChangeSummaryResult],
+def resized_change_summary_images(
+    *images: Any,
+    size: str | tuple[int, int] | None,
+    resample: str = "nearest",
+) -> tuple[Any, ...]:
+    """Return model-visible images after configured resizing."""
+
+    return tuple(
+        resize_image(image, size=size, resample=resample)
+        for image in images
+    )
+
+
+def cropped_change_summary_images(
+    *images: Any,
+    crop_box_normalized: Any | None,
+) -> tuple[Any, ...]:
+    """Return images after an optional normalized crop."""
+
+    return tuple(
+        crop_image_normalized(image, crop_box_normalized)
+        for image in images
+    )
+
+
+def change_summary_observation_images(
+    observations: Sequence[Observation],
     *,
-    change_detected: bool,
-) -> str:
-    summaries: list[str] = []
-    seen: set[str] = set()
-    for result in results:
-        summary = result.summary.strip()
-        if not summary or _generic_zero_change_summary(summary):
-            continue
-        normalized = summary.lower()
-        if normalized in seen:
-            continue
-        summaries.append(summary)
-        seen.add(normalized)
-    if not summaries:
-        return _fallback_summary(change_detected)
-    return " ".join(_sentence_text(summary) for summary in summaries)
+    frame_scale: int,
+    size: str | tuple[int, int] | None,
+    resample: str,
+    crop_box_normalized: Any | None,
+) -> tuple[Any, ...]:
+    """Return model-visible images for a change-summary frame bundle."""
+
+    bundle_size = frame_bundle_image_size(
+        size,
+        frame_count=len(observations),
+        budget_frame_count=CHANGE_SUMMARY_IMAGE_BUDGET_FRAME_COUNT,
+    )
+    return tuple(
+        crop_image_normalized(
+            resize_image(
+                observation_to_pil_image(observation, frame_scale=frame_scale),
+                size=bundle_size,
+                resample=resample,
+            ),
+            crop_box_normalized,
+        )
+        for observation in observations
+    )
+
+
+def model_visible_changed_pixel_count(previous_image: Any, current_image: Any) -> int:
+    """Return changed pixels between the exact model-visible RGB images."""
+
+    import numpy as np
+
+    previous_array = np.asarray(previous_image.convert("RGB"))
+    current_array = np.asarray(current_image.convert("RGB"))
+    if previous_array.shape != current_array.shape:
+        return max(
+            _image_surface_size(previous_array),
+            _image_surface_size(current_array),
+        )
+    changed = previous_array != current_array
+    if changed.ndim == 3:
+        changed = np.any(changed, axis=-1)
+    return int(np.count_nonzero(changed))
+
+
+def model_visible_changed_pixel_percent(
+    previous_image: Any,
+    current_image: Any,
+    *,
+    changed_pixel_count: int | None = None,
+) -> float:
+    """Return first-to-final changed area percentage for model-visible images."""
+
+    import numpy as np
+
+    previous_array = np.asarray(previous_image.convert("RGB"))
+    current_array = np.asarray(current_image.convert("RGB"))
+    denominator = max(
+        1,
+        _image_surface_size(previous_array),
+        _image_surface_size(current_array),
+    )
+    count = (
+        model_visible_changed_pixel_count(previous_image, current_image)
+        if changed_pixel_count is None
+        else changed_pixel_count
+    )
+    return min(100.0, max(0.0, float(count) * 100.0 / denominator))
+
+
+def model_visible_any_change_detected(images: Sequence[Any]) -> bool:
+    """Return whether any adjacent model-visible frame pair differs."""
+
+    return any(
+        model_visible_changed_pixel_count(left, right) > 0
+        for left, right in zip(images, images[1:], strict=False)
+    )
 
 
 def parse_change_summary_output(
     text: str,
     *,
     summary_max_chars: int | None = DEFAULT_CHANGE_SUMMARY_MAX_CHARS,
+    summary_max_elements: int | None = DEFAULT_CHANGE_SUMMARY_MAX_ELEMENTS,
 ) -> ParsedChangeSummary:
     """Parse the required JSON change summary output contract."""
 
@@ -839,69 +701,148 @@ def parse_change_summary_output(
     except json.JSONDecodeError as exc:
         preview = text.strip().replace("\n", "\\n")[:300]
         raise ChangeSummaryOutputError(
-            "change summary response must be JSON with non-empty 'summary' "
-            "and boolean 'change_detected' fields; raw response preview: "
-            f"{preview!r}"
+            "change summary response must be JSON with 'elements' and boolean "
+            f"'change_detected' fields; raw response preview: {preview!r}"
         ) from exc
     if not isinstance(loaded, dict):
         raise ChangeSummaryOutputError("change summary response must be a JSON object")
-    if set(loaded) != {"summary", "change_detected"}:
+    if set(loaded) != {"elements", "change_detected"}:
         raise ChangeSummaryOutputError(
-            "change summary response must contain only 'summary' and "
+            "change summary response must contain only 'elements' and "
             "'change_detected' fields"
         )
-    summary = loaded.get("summary")
-    if not isinstance(summary, str) or not summary.strip():
-        raise ChangeSummaryOutputError(
-            "change summary response is missing non-empty string field 'summary'"
-        )
-    summary = summary.strip()
-    if summary_max_chars is not None and len(summary) > int(summary_max_chars):
-        raise ChangeSummaryOutputError(
-            "change summary response field 'summary' is too long: "
-            f"{len(summary)} characters exceeds the "
-            f"{int(summary_max_chars)} character cap"
-        )
+    elements = _parse_change_elements(
+        loaded.get("elements"),
+        summary_max_chars=summary_max_chars,
+        summary_max_elements=summary_max_elements,
+    )
     change_detected = loaded.get("change_detected")
     if not isinstance(change_detected, bool):
         raise ChangeSummaryOutputError(
             "change summary response is missing boolean field 'change_detected'"
         )
     return ParsedChangeSummary(
-        summary=summary,
+        elements=elements,
         change_detected=change_detected,
     )
+
+
+def change_summary_elements_text(
+    elements: Sequence[ChangeSummaryElement],
+) -> str:
+    """Return prompt-facing change text reconstructed from structured elements."""
+
+    return "\n".join(_change_summary_element_line(element) for element in elements)
+
+
+def _change_summary_element_line(element: ChangeSummaryElement) -> str:
+    name = element.element_name.strip()
+    description = element.element_description.strip()
+    mutation = element.element_mutation.strip()
+    if not mutation:
+        mutation = "no detected changes for this element"
+    return f"- {name}: {description}; mutations: {mutation}"
+
+
+def _parse_change_elements(
+    value: Any,
+    *,
+    summary_max_chars: int | None,
+    summary_max_elements: int | None,
+) -> tuple[ChangeSummaryElement, ...]:
+    if not isinstance(value, list):
+        raise ChangeSummaryOutputError(
+            "change summary response is missing array field 'elements'"
+        )
+    if summary_max_elements is not None and len(value) > summary_max_elements:
+        raise ChangeSummaryOutputError(
+            "change summary response has too many elements: "
+            f"{len(value)} exceeds the {summary_max_elements} element cap"
+        )
+    elements: list[ChangeSummaryElement] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise ChangeSummaryOutputError(
+                f"change summary element {index} must be an object"
+            )
+        unexpected = set(item) - {
+            "element_name",
+            "element_description",
+            "element_mutation",
+        }
+        if unexpected:
+            raise ChangeSummaryOutputError(
+                "change summary element has unexpected keys: "
+                + ", ".join(sorted(unexpected))
+            )
+        element_name = item.get("element_name")
+        element_description = item.get("element_description")
+        element_mutation = item.get("element_mutation")
+        if not isinstance(element_name, str) or not element_name.strip():
+            raise ChangeSummaryOutputError(
+                f"change summary element {index} is missing element_name"
+            )
+        if not isinstance(element_description, str) or not element_description.strip():
+            raise ChangeSummaryOutputError(
+                f"change summary element {index} is missing element_description"
+            )
+        if not isinstance(element_mutation, str):
+            raise ChangeSummaryOutputError(
+                f"change summary element {index} is missing element_mutation"
+            )
+        for field_name, field_value in (
+            ("element_name", element_name),
+            ("element_description", element_description),
+            ("element_mutation", element_mutation),
+        ):
+            _validate_change_summary_field_length(
+                field_name,
+                field_value,
+                index=index,
+                summary_max_chars=summary_max_chars,
+            )
+        elements.append(
+            ChangeSummaryElement(
+                element_name=element_name.strip(),
+                element_description=element_description.strip(),
+                element_mutation=element_mutation.strip(),
+            )
+        )
+    return _renamed_duplicate_change_elements(elements)
 
 
 def validate_change_summary_output(
     text: str,
     *,
-    deterministic_change_detected: bool,
+    any_adjacent_frame_changed: bool,
     summary_max_chars: int | None = DEFAULT_CHANGE_SUMMARY_MAX_CHARS,
+    summary_max_elements: int | None = DEFAULT_CHANGE_SUMMARY_MAX_ELEMENTS,
 ) -> ParsedChangeSummary:
     """Parse output and enforce deterministic visible-change evidence."""
 
     parsed = parse_change_summary_output(
         text,
         summary_max_chars=summary_max_chars,
+        summary_max_elements=summary_max_elements,
     )
-    if parsed.change_detected != deterministic_change_detected:
+    if parsed.change_detected != any_adjacent_frame_changed:
         if _safe_change_detected_autocorrect(
             parsed,
-            deterministic_change_detected=deterministic_change_detected,
+            any_adjacent_frame_changed=any_adjacent_frame_changed,
         ):
             return ParsedChangeSummary(
-                summary=parsed.summary,
-                change_detected=deterministic_change_detected,
+                elements=parsed.elements,
+                change_detected=any_adjacent_frame_changed,
                 model_change_detected=parsed.change_detected,
                 autocorrected_change_detected=True,
-                autocorrect_reason="boolean_mismatch_summary_consistent_with_change",
+                autocorrect_reason="boolean_mismatch_elements_consistent_with_change",
             )
-        expected = str(deterministic_change_detected).lower()
+        expected = str(any_adjacent_frame_changed).lower()
         actual = str(parsed.change_detected).lower()
         raise ChangeSummaryOutputError(
             "change summary response field 'change_detected' conflicts with "
-            f"deterministic visible change evidence: expected {expected}, got {actual}"
+            f"adjacent-frame visible change evidence: expected {expected}, "
+            f"got {actual}"
         )
     return parsed
 
@@ -909,14 +850,14 @@ def validate_change_summary_output(
 def _safe_change_detected_autocorrect(
     parsed: ParsedChangeSummary,
     *,
-    deterministic_change_detected: bool,
+    any_adjacent_frame_changed: bool,
 ) -> bool:
-    """Return whether a wrong model boolean can be corrected without repair."""
+    """Return whether a false model boolean can be corrected without repair."""
 
     return (
-        deterministic_change_detected is True
+        any_adjacent_frame_changed is True
         and parsed.change_detected is False
-        and not _obvious_no_change_summary(parsed.summary)
+        and _elements_have_visible_change(parsed.elements)
     )
 
 
@@ -934,79 +875,98 @@ def _change_summary_autocorrect_metadata(
     }
 
 
-def _action_data_text(action: ActionSpec) -> str:
-    if action.data is None:
-        return "{}"
-    return json.dumps(action.data, sort_keys=True)
-
-
-def _action_target_text(action: ActionSpec) -> str:
-    if action.name != "ACTION6" or action.target is None or not action.target.strip():
-        return ""
-    return f"\ntarget: {json.dumps(action.target.strip())}"
-
-
-def _fallback_summary(change_detected: bool) -> str:
-    if change_detected:
-        return "Visible changes occurred, but summary unavailable."
-    return "no changes"
-
-
-def _percent_text(value: float) -> str:
-    return f"{value:.4f}".rstrip("0").rstrip(".")
-
-
-def _sentence_text(summary: str) -> str:
-    stripped = summary.strip()
-    if not stripped:
-        return stripped
-    if stripped[-1] in ".!?":
-        return stripped
-    return stripped + "."
-
-
-def _generic_zero_change_summary(summary: str) -> bool:
-    normalized = summary.strip().lower().rstrip(".!")
-    return normalized in {
-        "no change",
-        "no changes",
-        "nothing changed",
-        "no visible change",
-        "no visible changes",
-        "no visible playfield change",
-        "no visible playfield changes",
-        "no visible playfield change occurred",
-        "first and final frames are identical",
+def _merged_change_summary_autocorrect_metadata(
+    results: Sequence[ChangeSummaryResult],
+) -> dict[str, Any]:
+    if not any(
+        result.metadata.get("autocorrected_change_detected") for result in results
+    ):
+        return {}
+    return {
+        "autocorrected_change_detected": True,
+        "model_change_detected": False,
+        "autocorrect_reason": "boolean_mismatch_elements_consistent_with_change",
     }
 
 
-def _obvious_no_change_summary(summary: str) -> bool:
-    normalized = re.sub(r"\s+", " ", summary.strip().lower()).strip(" .!")
-    no_change_starts = (
-        "no changes",
-        "no change",
-        "no visible change",
-        "no visible changes",
-        "no visible playfield change",
-        "no visible playfield changes",
-        "no meaningful visible change",
-        "nothing changed",
-        "no visual change occurred",
-        "no visual change occurs",
+def _validate_change_summary_field_length(
+    field_name: str,
+    value: str,
+    *,
+    index: int,
+    summary_max_chars: int | None,
+) -> None:
+    if summary_max_chars is None or len(value) <= summary_max_chars:
+        return
+    raise ChangeSummaryOutputError(
+        f"change summary element {index} field {field_name!r} is too long: "
+        f"{len(value)} characters exceeds the {summary_max_chars} character cap"
     )
-    no_change_contains = (
-        " no visible change occurred",
-        " no visible changes occurred",
-        " no visible playfield change occurred",
-        " no meaningful visible change occurred",
-        " no visual change occurred",
-        " no visual change occurs",
-        " remains static across all frames",
-        " remain static across all frames",
+
+
+def _image_surface_size(array: Any) -> int:
+    if array.shape == ():
+        return 1
+    if array.ndim >= 2:
+        return int(array.shape[0] * array.shape[1])
+    return int(array.size)
+
+
+def _change_elements_json(elements: Sequence[ChangeSummaryElement]) -> str:
+    return json.dumps(
+        [
+            {
+                "element_name": element.element_name,
+                "element_description": element.element_description,
+                "element_mutation": element.element_mutation,
+            }
+            for element in elements
+        ],
+        ensure_ascii=True,
+        indent=2,
+        sort_keys=True,
     )
-    return normalized.startswith(no_change_starts) or any(
-        phrase in f" {normalized}" for phrase in no_change_contains
-    )
+
+
+def _action_context_lines(
+    action: ActionSpec,
+    *,
+    crop_box_normalized: Any | None,
+) -> list[str]:
+    lines = [
+        f"action_id: {action.name}",
+        "data: "
+        + _action_data_text(action, crop_box_normalized=crop_box_normalized),
+    ]
+    if action.name == "ACTION6" and action.data is not None:
+        target = _action_target_text(action)
+        lines.append(f"target: {json.dumps(target)}")
+        lines.append("coordinate_space: normalized_0_1000")
+    return lines
+
+
+def _action_data_text(
+    action: ActionSpec,
+    *,
+    crop_box_normalized: Any | None,
+) -> str:
+    if action.data is None:
+        return "{}"
+    data = action.data
+    if action.name == "ACTION6":
+        data = action6_data_to_normalized_1000(
+            action.data,
+            crop_box_normalized=crop_box_normalized,
+        )
+    return json.dumps(data, sort_keys=True)
+
+
+def _action_target_text(action: ActionSpec) -> str:
+    if action.target is None or not action.target.strip():
+        raise ValueError("ACTION6 change-summary prompt requires non-empty target")
+    return action.target.strip()
+
+
 
 
 def _strip_json_fence(text: str) -> str:

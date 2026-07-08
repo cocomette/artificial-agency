@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from time import perf_counter
 from typing import Any, Sequence
 
@@ -13,6 +14,7 @@ from face_of_agi.contracts import (
     ActionOutcomeEvidence,
     ActionSpec,
     AgentTrace,
+    ChangeSummaryElement,
     ContextDocuments,
     DecisionResult,
     FrameControlMode,
@@ -20,8 +22,8 @@ from face_of_agi.contracts import (
     Observation,
 )
 from face_of_agi.models.action_history import model_facing_action_text
-from face_of_agi.models.observation_text import cropped_changed_cell_count
 from face_of_agi.models.adapters import OrchestratorAgentModel
+from face_of_agi.models.memory import GameMemoryDocument
 from face_of_agi.models.orchestrator_agent import AgentToolRuntime
 from face_of_agi.debug.bus import DebugBus
 from face_of_agi.debug.events import (
@@ -31,11 +33,13 @@ from face_of_agi.debug.events import (
 )
 from face_of_agi.orchestration.game_loop.fallbacks import (
     fallback_decision_result,
-    model_observation_text_config,
+    is_agent_model_failure,
 )
+from face_of_agi.models.providers.scheduler import model_call_context
 from face_of_agi.runtime import timing as runtime_timing
 
 _NO_ANCHOR = object()
+_AGENT_REPAIR_ATTEMPTS_PATTERN = re.compile(r"after (\d+) repair attempt")
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,64 +77,86 @@ def decide_frame_turn(
     tool_runtime: AgentToolRuntime | None,
     turn_id: int,
     action_suppression_zero_changed_pixel_turns: int,
+    game_memory: GameMemoryDocument,
 ) -> tuple[DecisionResult, float]:
     """Return the frame decision, skipping Agent X for animation frames."""
 
     if not frame_context.control_mode.controllable:
         return synthetic_animation_decision(frame_context), 0.0
 
+    prompt_actions = prompt_action_outcome(
+        action_space=frame_context.control_mode.allowed_actions,
+        action_history=frame_context.recent_action_history,
+        action_suppression_zero_changed_pixel_turns=(
+            action_suppression_zero_changed_pixel_turns
+        ),
+        updater_stagnation_warning_zero_changed_pixel_turns=0,
+        crop_box_normalized=model_input_crop_box_normalized(agent),
+    )
+    debug.emit(
+        AgentFrameworkInputCaptured(
+            context=contexts.agent,
+            current_observation=frame_context.current_observation,
+            action_space=prompt_actions.allowed_actions,
+            recent_action_history=frame_context.recent_action_history,
+            tool_runtime=tool_runtime,
+        )
+    )
     decision_started_at = perf_counter()
-    fallback_action_space = frame_context.control_mode.allowed_actions
-    try:
-        prompt_actions = prompt_action_outcome(
-            action_space=frame_context.control_mode.allowed_actions,
-            action_history=frame_context.recent_action_history,
-            action_suppression_zero_changed_pixel_turns=(
-                action_suppression_zero_changed_pixel_turns
-            ),
-            updater_stagnation_warning_zero_changed_pixel_turns=0,
-        )
-        fallback_action_space = prompt_actions.allowed_actions
-        debug.emit(
-            AgentFrameworkInputCaptured(
-                context=contexts.agent,
-                current_observation=frame_context.current_observation,
-                action_space=prompt_actions.allowed_actions,
-                recent_action_history=frame_context.recent_action_history,
-                tool_runtime=tool_runtime,
+    decision: DecisionResult | None = None
+    repair_attempts = 0
+    with runtime_timing.span(
+        "game_loop.agent_decide",
+        step=frame_context.current_observation.step,
+    ):
+        try:
+            try:
+                with model_call_context(
+                    run_id=frame_context.run_id,
+                    game_id=frame_context.game_id,
+                    turn_id=turn_id,
+                    role="agent",
+                    emit_event=debug.record_model_call_event,
+                ):
+                    decision = agent.decide(
+                        context=contexts.agent,
+                        current_observation=frame_context.current_observation,
+                        action_space=prompt_actions.allowed_actions,
+                        tool_runtime=tool_runtime,
+                        recent_action_history=frame_context.recent_action_history,
+                        glossary_actions=frame_context.control_mode.allowed_actions,
+                        first_observation_ref=frame_context.first_observation_ref,
+                        recent_action_history_available=recent_action_history_available,
+                        action_outcome_evidence=prompt_actions.evidence,
+                        game_memory=game_memory,
+                    )
+            except Exception as exc:
+                if not is_agent_model_failure(exc):
+                    raise
+                repair_attempts = agent_repair_attempts_from_error(exc)
+                decision = fallback_decision_result(
+                    frame_context=frame_context,
+                    turn_id=turn_id,
+                    action_space=prompt_actions.allowed_actions,
+                    error=exc,
+                )
+                if repair_attempts:
+                    decision.trace.metadata["repair_count"] = repair_attempts
+        finally:
+            repair_attempts = repair_attempts_from_metadata(
+                decision.trace if decision is not None else None,
+                default=repair_attempts,
             )
-        )
-        with runtime_timing.span(
-            "game_loop.agent_decide",
-            step=frame_context.current_observation.step,
-        ):
-            decision = agent.decide(
-                context=contexts.agent,
-                current_observation=frame_context.current_observation,
-                action_space=prompt_actions.allowed_actions,
-                tool_runtime=tool_runtime,
-                recent_action_history=frame_context.recent_action_history,
-                glossary_actions=frame_context.control_mode.allowed_actions,
-                first_observation_ref=frame_context.first_observation_ref,
-                recent_action_history_available=recent_action_history_available,
-                action_outcome_evidence=prompt_actions.evidence,
+            decision_duration_seconds = perf_counter() - decision_started_at
+            debug.emit(
+                ModelCallCompleted(
+                    role="agent",
+                    duration_seconds=decision_duration_seconds,
+                    repair_attempts=repair_attempts,
+                    game_id=frame_context.game_id,
+                    turn_id=turn_id,
+                )
             )
-    except Exception as exc:
-        decision = fallback_decision_result(
-            frame_context=frame_context,
-            turn_id=turn_id,
-            action_space=fallback_action_space,
-            error=exc,
-            observation_text_config=model_observation_text_config(agent),
-        )
-    finally:
-        decision_duration_seconds = perf_counter() - decision_started_at
-        debug.emit(
-            ModelCallCompleted(
-                role="agent",
-                duration_seconds=decision_duration_seconds,
-            )
-        )
     debug.capture_model_inputs(frame_context, turn_id, agent)
     debug.emit(
         AgentProviderRequestsCaptured(
@@ -138,6 +164,46 @@ def decide_frame_turn(
         )
     )
     return decision, decision_duration_seconds
+
+
+def repair_attempts_from_metadata(
+    value: Any,
+    *,
+    default: int = 0,
+) -> int:
+    """Return a non-negative repair count from result or trace metadata."""
+
+    metadata = getattr(value, "metadata", value)
+    fallback = _non_negative_int(default)
+    if not isinstance(metadata, dict):
+        return fallback
+    for key in ("repair_attempts", "repair_count"):
+        if key not in metadata:
+            continue
+        try:
+            return max(0, int(metadata[key]))
+        except (TypeError, ValueError):
+            return fallback
+    return fallback
+
+
+def agent_repair_attempts_from_error(error: Exception) -> int:
+    """Extract Agent X repair exhaustion count from adapter error text."""
+
+    match = _AGENT_REPAIR_ATTEMPTS_PATTERN.search(str(error))
+    if match is None:
+        return 0
+    try:
+        return max(0, int(match.group(1)))
+    except ValueError:
+        return 0
+
+
+def _non_negative_int(value: object) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
 
 
 def synthetic_animation_decision(frame_context: FrameTurnContext) -> DecisionResult:
@@ -173,36 +239,17 @@ def validate_decision(
     if action.is_none():
         raise RuntimeError("final controllable frame cannot submit synthetic NONE")
 
-    matched = next(
-        (
-            candidate
-            for candidate in control_mode.allowed_actions
-            if candidate.action_id == action.action_id
-        ),
-        None,
+    is_allowed = any(
+        candidate.action_id == action.action_id
+        for candidate in control_mode.allowed_actions
     )
-    if matched is None:
+    if not is_allowed:
         raise RuntimeError(f"X returned invalid action for current frame: {action.name}")
-    if _requires_action_data(matched):
-        _validate_action6_payload(action)
-    else:
-        if action.data is not None:
-            raise RuntimeError("simple final action must not include action data")
-        if action.target is not None:
-            raise RuntimeError("simple final action must not include target text")
-
-
-def _requires_action_data(action: ActionSpec) -> bool:
-    return action.is_complex() or action.name == "ACTION6"
-
-
-def _validate_action6_payload(action: ActionSpec) -> None:
-    if action.data is None:
-        raise RuntimeError("ACTION6 final action requires action data")
-    _action6_arc_grid_coordinate(action, "x")
-    _action6_arc_grid_coordinate(action, "y")
-    if action.target is None or not action.target.strip():
-        raise RuntimeError("ACTION6 final action requires non-empty target text")
+    if action.name == "ACTION6":
+        _action6_arc_grid_coordinate(action, "x")
+        _action6_arc_grid_coordinate(action, "y")
+        if action.target is None or not action.target.strip():
+            raise RuntimeError("ACTION6 requires a non-empty target")
 
 
 def bounded_agent_action_history(
@@ -247,6 +294,7 @@ def prompt_action_outcome(
     action_history: Sequence[ActionHistoryItem],
     action_suppression_zero_changed_pixel_turns: int,
     updater_stagnation_warning_zero_changed_pixel_turns: int,
+    crop_box_normalized: Any | None = None,
 ) -> PromptActionOutcome:
     """Return prompt-facing allowed actions plus low-information evidence."""
 
@@ -266,13 +314,21 @@ def prompt_action_outcome(
     disabled_reason = ""
     repeated_action = ""
     repeated_count = 0
+    suppress_action6_as_class = _suppress_action6_as_class(actions)
 
-    latest_streak = _latest_same_action_streak(controllable_history)
+    latest_streak = _latest_same_action_streak(
+        controllable_history,
+        suppress_action6_as_class=suppress_action6_as_class,
+    )
     latest_same_action_zero_changed_pixel_count = (
         _latest_same_action_zero_changed_pixel_count(latest_streak)
     )
     if latest_streak:
-        repeated_action = _action_suppression_label(latest_streak[0].action)
+        repeated_action = _action_suppression_label(
+            latest_streak[0].action,
+            suppress_action6_as_class=suppress_action6_as_class,
+            crop_box_normalized=crop_box_normalized,
+        )
         repeated_count = len(latest_streak)
 
     if (
@@ -289,14 +345,18 @@ def prompt_action_outcome(
             and _is_suppressible_prompt_action(latest_action)
             and all(entry.changed_pixel_count == 0 for entry in latest_window)
         ):
-            suppression_label = _action_suppression_label(latest_action)
-            if latest_action.name == "ACTION6":
+            suppression_label = _action_suppression_label(
+                latest_action,
+                suppress_action6_as_class=suppress_action6_as_class,
+                crop_box_normalized=crop_box_normalized,
+            )
+            if latest_action.name == "ACTION6" and not suppress_action6_as_class:
                 suppressed_actions = (suppression_label,)
                 suppression_reason = (
                     f"{suppression_label} was prompt-suppressed because the "
                     f"latest {action_suppression_zero_changed_pixel_turns} "
                     "controllable uses of that coordinate had "
-                    "changed_cells=0. ACTION6 remains available; choose a "
+                    "changed_pixels=0. ACTION6 remains available; choose a "
                     "different coordinate."
                 )
             else:
@@ -311,7 +371,7 @@ def prompt_action_outcome(
                     suppression_reason = (
                         f"{suppression_label} was omitted because the latest "
                         f"{action_suppression_zero_changed_pixel_turns} controllable "
-                        "uses of that action had changed_cells=0."
+                        "uses of that action had changed_pixels=0."
                     )
                 else:
                     disabled_reason = (
@@ -346,13 +406,24 @@ def prompt_action_outcome(
 
 def _latest_same_action_streak(
     history: Sequence[ActionHistoryEntry],
+    *,
+    suppress_action6_as_class: bool,
 ) -> tuple[ActionHistoryEntry, ...]:
     if not history:
         return ()
-    latest_identity = _action_suppression_identity(history[-1].action)
+    latest_identity = _action_suppression_identity(
+        history[-1].action,
+        suppress_action6_as_class=suppress_action6_as_class,
+    )
     streak: list[ActionHistoryEntry] = []
     for entry in reversed(history):
-        if _action_suppression_identity(entry.action) != latest_identity:
+        if (
+            _action_suppression_identity(
+                entry.action,
+                suppress_action6_as_class=suppress_action6_as_class,
+            )
+            != latest_identity
+        ):
             break
         streak.append(entry)
     return tuple(streak)
@@ -394,8 +465,20 @@ def _is_suppressible_prompt_action(action: ActionSpec) -> bool:
     )
 
 
-def _action_suppression_identity(action: ActionSpec) -> tuple[Any, ...]:
+def _suppress_action6_as_class(actions: Sequence[ActionSpec]) -> bool:
+    has_action6 = any(action.name == "ACTION6" for action in actions)
+    has_non_action6 = any(action.name != "ACTION6" for action in actions)
+    return has_action6 and has_non_action6
+
+
+def _action_suppression_identity(
+    action: ActionSpec,
+    *,
+    suppress_action6_as_class: bool,
+) -> tuple[Any, ...]:
     if action.name == "ACTION6":
+        if suppress_action6_as_class:
+            return ("ACTION6",)
         return (
             "ACTION6",
             _action6_arc_grid_coordinate(action, "x"),
@@ -406,10 +489,30 @@ def _action_suppression_identity(action: ActionSpec) -> tuple[Any, ...]:
     return (action.name,)
 
 
-def _action_suppression_label(action: ActionSpec) -> str:
-    if action.name == "ACTION6":
-        return model_facing_action_text(action)
+def _action_suppression_label(
+    action: ActionSpec,
+    *,
+    suppress_action6_as_class: bool,
+    crop_box_normalized: Any | None = None,
+) -> str:
+    if action.name == "ACTION6" and not suppress_action6_as_class:
+        return model_facing_action_text(
+            action,
+            crop_box_normalized=crop_box_normalized,
+        )
     return action.name
+
+
+def model_input_crop_box_normalized(model: Any) -> Any | None:
+    """Return the prompt image crop box exposed by a model adapter, if any."""
+
+    crop_box = getattr(model, "input_image_crop_box_normalized", None)
+    if crop_box is not None:
+        return crop_box
+    config = getattr(model, "config", None)
+    if config is None:
+        return None
+    return getattr(config, "input_image_crop_box_normalized", None)
 
 
 def _action6_arc_grid_coordinate(action: ActionSpec, key: str) -> int:
@@ -433,7 +536,8 @@ def build_action_history_entry(
     next_observation: Observation,
     changed_pixel_count: int,
     change_summary: str,
-    changed_cell_percent: float | None = None,
+    change_elements: tuple[ChangeSummaryElement, ...] = (),
+    changed_pixel_percent: float | None = None,
     completed_levels: int | None = None,
     action_count: int | None = None,
 ) -> ActionHistoryEntry:
@@ -446,7 +550,8 @@ def build_action_history_entry(
         controllable=frame_context.control_mode.controllable,
         changed_pixel_count=changed_pixel_count,
         change_summary=change_summary,
-        changed_cell_percent=changed_cell_percent,
+        change_elements=change_elements,
+        changed_pixel_percent=changed_pixel_percent,
         completed_levels=completed_levels,
         action_count=action_count,
         skipped_intermediate_animation_frame_count=(
@@ -459,9 +564,25 @@ def build_action_history_entry(
 
 
 def changed_pixel_count(left: Any, right: Any) -> int:
-    """Return changed ARC cells in the model-visible cropped frame."""
+    """Return the raw frame cell/pixel count changed between two frames."""
 
-    return cropped_changed_cell_count(left, right)
+    import numpy as np
+
+    left_array = np.asarray(left)
+    right_array = np.asarray(right)
+    if left_array.shape != right_array.shape:
+        return max(_frame_surface_size(left_array), _frame_surface_size(right_array))
+    if left_array.shape == ():
+        return 0 if _structurally_equal(left, right) else 1
+    if _numeric_array(left_array) and _numeric_array(right_array):
+        changed = left_array != right_array
+        if _rgb_like_array(left_array):
+            changed = np.any(changed, axis=-1)
+        return int(np.count_nonzero(changed))
+    changed = left_array != right_array
+    if _rgb_like_array(left_array):
+        changed = np.any(changed, axis=-1)
+    return int(np.count_nonzero(changed))
 
 
 def unroll_observation(

@@ -1,4 +1,4 @@
-# H100 parallel game-loop run: selected games run concurrently against
+# Modal H100 parallel game-loop run: selected games run concurrently against
 # one vLLM-served Qwen3.6 FP8 model. Keep vLLM server concurrency enabled;
 # do not add server args that force a single sequence, such as --max-num-seqs 1.
 operation_mode: offline
@@ -27,15 +27,11 @@ action_suppression_zero_changed_pixel_turns: 3
 updater_stagnation_warning_zero_changed_pixel_turns: 3
 
 models:
-  observation_text:
-    crop_cells: 3
-    overflow_chars_per_frame: 12000
-    include_rows: true
-    include_component_runs: true
   shared_vlm:
     backend: vllm
     model: Qwen/Qwen3.6-35B-A3B-FP8
     input_image_size: 2048x2048
+    input_image_resample: nearest
     temperature: 0.1
     server:
       host: 127.0.0.1
@@ -49,6 +45,9 @@ models:
         - '{"enable_thinking": false}'
   agent:
     backend: vllm
+    input_image_size: 2048x2048
+    input_image_crop_box_normalized: [0.0625, 0.0625, 0.9375, 0.9375]
+    action6_targeting_mode: coordinates
     include_output_schema_in_instructions: false
     max_tool_calls: 0
     repair_attempts: 1
@@ -59,16 +58,29 @@ models:
         enable_thinking: true
   change:
     backend: vllm
+    input_image_size: 2048x2048
+    input_image_crop_box_normalized: [0.0625, 0.0625, 0.9375, 0.9375]
+    activate_components: true
+    persist_changed_elements_only: true
+    max_nb_components: 50
+    max_frames_per_call: 10
     include_output_schema_in_instructions: false
   historizer:
     backend: vllm
     include_output_schema_in_instructions: false
+  memory:
+    backend: vllm
+    input_image_size: 2048x2048
+    input_image_crop_box_normalized: [0.0625, 0.0625, 0.9375, 0.9375]
   updater:
     general:
       backend: vllm
+      input_image_size: 2048x2048
       include_output_schema_in_instructions: false
     agent:
       backend: vllm
+      input_image_size: 2048x2048
+      input_image_crop_box_normalized: [0.0625, 0.0625, 0.9375, 0.9375]
       include_output_schema_in_instructions: false
       options:
         temperature: 0.2

@@ -29,8 +29,6 @@ from face_of_agi.runtime.source_metadata import (
 
 RUNTIME_DEADLINE_REACHED = "runtime_deadline_reached"
 LEVEL_LIMIT_REACHED = "level_limit_reached"
-STARTUP_ERROR_FALLBACK = "startup_error_fallback"
-FRAMEWORK_ERROR_FALLBACK = "framework_error_fallback"
 
 
 def start_run(
@@ -49,24 +47,18 @@ def start_run(
 
     selected_game_id = environment.select_game_by_id(environment_config.game_id)
     if state_memory is not None:
-        try:
-            state_memory.write_run_metadata(
-                run_id=config.run_id,
-                game_id=selected_game_id,
-                kind=RUNTIME_STARTUP_METADATA_KIND,
-                metadata=build_runtime_source_metadata(),
-            )
-        except Exception:
-            pass
+        state_memory.write_run_metadata(
+            run_id=config.run_id,
+            game_id=selected_game_id,
+            kind=RUNTIME_STARTUP_METADATA_KIND,
+            metadata=build_runtime_source_metadata(),
+        )
     if environment_config.use_learned_contexts and state_memory is not None:
-        try:
-            hydrated = state_memory.hydrate_contexts_for_game(
-                game_id=selected_game_id,
-                defaults=contexts,
-            )
-            contexts.agent = hydrated.agent
-        except Exception:
-            pass
+        hydrated = state_memory.hydrate_contexts_for_game(
+            game_id=selected_game_id,
+            defaults=contexts,
+        )
+        contexts.agent = hydrated.agent
     observation = environment.reset()
     debug.emit(
         RunStarted(
@@ -165,50 +157,12 @@ def stop_for_runtime_deadline(session: GameLoopSession) -> None:
     )
 
 
-def startup_error_result(
-    *,
-    config: RuntimeConfig,
-    environment_config: EnvironmentConfig,
-    error: Exception,
-) -> GameRunResult:
-    """Return a terminal result when startup cannot enter the game loop."""
-
-    return GameRunResult(
-        run_id=config.run_id,
-        game_id=environment_config.game_id or "unknown",
-        stop_reason=STARTUP_ERROR_FALLBACK,
-        metadata=_exception_metadata(error),
-    )
-
-
-def stop_for_framework_error(
-    session: GameLoopSession,
-    *,
-    error: Exception,
-) -> None:
-    """Record a clean terminal result for an otherwise fatal loop error."""
-
-    completed_levels = session.completed_levels
-    last_state = None
-    if session.current_info is not None:
-        completed_levels = max(completed_levels, session.current_info.levels_completed)
-        last_state = session.current_info.state
-    stop_session(
-        session,
-        stop_reason=FRAMEWORK_ERROR_FALLBACK,
-        completed_levels=completed_levels,
-        last_state=last_state,
-        metadata=_exception_metadata(error),
-    )
-
-
 def stop_session(
     session: GameLoopSession,
     *,
     stop_reason: str,
     completed_levels: int,
     last_state: GameState | None,
-    metadata: dict[str, object] | None = None,
 ) -> None:
     """Set the single terminal result consumed by the run exit path."""
 
@@ -222,7 +176,6 @@ def stop_session(
         step_count=session.real_step_count,
         completed_levels=completed_levels,
         last_state=last_state,
-        metadata=metadata or {},
     )
     session.running = False
     session.process_turn = False
@@ -267,36 +220,24 @@ def finish_run(
 
     result = session.terminal_result
     if result.stop_reason == "game_end":
-        try:
-            apply_general_context_updates(
+        apply_general_context_updates(
+            contexts=contexts,
+            updater_tasks=updater_tasks,
+            debug=debug,
+            run_id=result.run_id,
+            game_id=result.game_id,
+            stop_reason=result.stop_reason or "unknown",
+            step_count=result.step_count,
+            completed_levels=result.completed_levels,
+            last_state_name=(
+                result.last_state.name if result.last_state is not None else None
+            ),
+            state_record_ids=result.state_record_ids,
+        )
+        if state_memory is not None and result.state_record_ids:
+            state_memory.update_state_contexts(
+                state_id=result.state_record_ids[-1],
                 contexts=contexts,
-                updater_tasks=updater_tasks,
-                debug=debug,
-                run_id=result.run_id,
-                game_id=result.game_id,
-                stop_reason=result.stop_reason or "unknown",
-                step_count=result.step_count,
-                completed_levels=result.completed_levels,
-                last_state_name=(
-                    result.last_state.name if result.last_state is not None else None
-                ),
-                state_record_ids=result.state_record_ids,
-            )
-            if state_memory is not None and result.state_record_ids:
-                state_memory.update_state_contexts(
-                    state_id=result.state_record_ids[-1],
-                    contexts=contexts,
-                )
-        except Exception as exc:
-            result.metadata["general_context_update_fallback"] = _exception_metadata(
-                exc
             )
     debug.emit(RunStopped(result))
     return result
-
-
-def _exception_metadata(error: Exception) -> dict[str, object]:
-    return {
-        "fallback_error_type": type(error).__name__,
-        "fallback_error": str(error),
-    }

@@ -1,0 +1,50 @@
+# Modal H100 full game-loop run: X, change summary, historizer, and active P
+# updater slots share one Ollama-hosted Qwen model.
+game_index: 3
+operation_mode: offline
+game_catalog_path: src/face_of_agi/environment/local_games.json
+environments_dir: environment_files
+recordings_dir: recordings
+seed: 0
+save_recording: false
+use_learned_contexts: false
+experimental_memory_turn_buffer: 1
+debug_keep_all_m_states: true
+
+enable_visualization: false
+render_mode: null
+debug_trace: model_inputs
+debug_color: always
+
+agent_action_history_window: 5
+agent_updater_action_history_window: 5
+agent_context_history_window: 8
+max_actions_per_level: 50
+
+models:
+  shared_vlm:
+    backend: ollama
+    model: qwen3.5:122b
+    keep_alive: 30m
+    think: false
+    temperature: 0
+    num_ctx: 8192
+  agent:
+    backend: ollama
+    input_image_size: 64x64
+    max_tool_calls: 0
+    repair_attempts: 1
+    options:
+      temperature: 0.2
+  change:
+    backend: ollama
+    input_image_size: 64x64
+  historizer:
+    backend: ollama
+  updater:
+    agent:
+      backend: ollama
+      input_image_size: 64x64
+    general:
+      backend: ollama
+      input_image_size: 64x64

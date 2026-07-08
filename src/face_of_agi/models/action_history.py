@@ -13,8 +13,8 @@ from face_of_agi.contracts import (
     ActionHistoryResetMarker,
     ActionHistoryScoreAdvanceMarker,
     ActionSpec,
+    ChangeSummaryElement,
 )
-from face_of_agi.models.action_coordinates import action6_coordinate_range_text
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,21 +35,30 @@ ActionHistoryRow = (
 def model_facing_action_text(
     action: ActionSpec,
     *,
-    observation_text_config: Any = None,
+    crop_box_normalized: Any | None = None,
 ) -> str:
-    """Render one action for prompts that use ARC-grid ACTION6 data."""
+    """Render one action for prompts, using target-only ACTION6 history."""
 
     if action.name == "ACTION6":
         if action.data is None:
-            action6_range = action6_coordinate_range_text(observation_text_config)
-            return f"{action.name}(x,y {action6_range},target)"
-        text = f"{action.name} " + json.dumps(action.data, sort_keys=True)
-        if action.target is not None and action.target.strip():
-            text += f" target={json.dumps(action.target.strip())}"
-        return text
+            return f"{action.name}(x,y normalized_0_1000,target)"
+        if action.target is None or not action.target.strip():
+            raise ValueError("ACTION6 action history entries require a target")
+        return f"{action.name} target={json.dumps(action.target.strip())}"
     if action.data:
         return f"{action.name} {json.dumps(action.data, sort_keys=True)}"
     return action.name
+
+
+def model_facing_action_text_for_crop(
+    crop_box_normalized: Any | None,
+) -> Callable[[ActionSpec], str]:
+    """Return an action renderer for one model-visible crop configuration."""
+
+    return lambda action: model_facing_action_text(
+        action,
+        crop_box_normalized=crop_box_normalized,
+    )
 
 
 def group_action_history(
@@ -244,11 +253,10 @@ def action_history_entry_text(
         text += f" [skipped_intermediate_animation_frames={skipped_count}]"
     if latest:
         text += " [latest]"
-    text += f" [changed_cells={entry.changed_pixel_count}]"
-    if entry.changed_cell_percent is not None:
+    text += f" [changed_pixels={entry.changed_pixel_count}]"
+    if entry.changed_pixel_percent is not None:
         text += (
-            f" [changed_cells_pct="
-            f"{_changed_cell_percent_text(entry.changed_cell_percent)}]"
+            f" [changed_area={_changed_pixel_percent_text(entry.changed_pixel_percent)}]"
         )
     if entry.completed_levels is not None:
         text += f" [completed_levels={entry.completed_levels}]"
@@ -256,7 +264,10 @@ def action_history_entry_text(
         text += f" [action_count={entry.action_count}]"
     summary = _change_summary_text(entry)
     if summary:
-        text += f" change: {summary}"
+        if entry.change_elements:
+            text += f" Elements and associated changes:\n{summary}"
+        else:
+            text += f" change: {summary}"
     return text
 
 
@@ -296,7 +307,7 @@ def _nullable_metric_text(value: float | None) -> str:
     return str(value)
 
 
-def _changed_cell_percent_text(value: float) -> str:
+def _changed_pixel_percent_text(value: float) -> str:
     if value == 0:
         return "0%"
     text = f"{value:.4f}".rstrip("0").rstrip(".")
@@ -304,6 +315,9 @@ def _changed_cell_percent_text(value: float) -> str:
 
 
 def _change_summary_text(entry: ActionHistoryEntry) -> str:
+    if entry.change_elements:
+        return _change_elements_text(entry.change_elements)
+
     summary = entry.change_summary.strip()
     if entry.changed_pixel_count != 0:
         return summary
@@ -328,3 +342,16 @@ def _generic_zero_change_summary(summary: str) -> bool:
         "no visible playfield changes",
         "no visible playfield change occurred",
     }
+
+
+def _change_elements_text(elements: Sequence[ChangeSummaryElement]) -> str:
+    return "\n".join(_change_element_line(element) for element in elements)
+
+
+def _change_element_line(element: ChangeSummaryElement) -> str:
+    name = element.element_name.strip()
+    description = element.element_description.strip()
+    mutation = element.element_mutation.strip()
+    if not mutation:
+        mutation = "no detected changes for this element"
+    return f"- {name}: {description}; mutations: {mutation}"

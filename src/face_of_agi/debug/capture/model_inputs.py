@@ -42,6 +42,85 @@ def capture_model_input(
     )
 
 
+def capture_openai_model_input(
+    target: object,
+    *,
+    call_slot: str,
+    provider: str,
+    model: str | None,
+    phase: str,
+    request: dict[str, Any],
+    response: Any | None,
+    metadata: dict[str, Any] | None = None,
+    attempt: int | None = None,
+) -> None:
+    """Capture a raw OpenAI Responses request plus provider usage metadata."""
+
+    from face_of_agi.models.providers.openai import (
+        openai_response_metadata,
+        response_output_text,
+    )
+
+    response_metadata = openai_response_metadata(response)
+    response_text = response_output_text(response) if response is not None else None
+    capture_model_input(
+        target,
+        call_slot=call_slot,
+        provider=provider,
+        model=model,
+        phase=phase,
+        attempt=attempt,
+        request=request,
+        usage=response_metadata.get("usage"),
+        metadata={
+            "backend": provider,
+            "model": model,
+            **response_metadata,
+            "response_output_text": response_text,
+            "response_metadata": response_metadata,
+            "response_payload": _jsonable(response),
+            **(metadata or {}),
+        },
+    )
+
+
+def capture_ollama_model_input(
+    target: object,
+    *,
+    call_slot: str,
+    provider: str,
+    model: str | None,
+    phase: str,
+    request: dict[str, Any],
+    response: Any | None,
+    metadata: dict[str, Any] | None = None,
+    attempt: int | None = None,
+) -> None:
+    """Capture a raw Ollama chat request plus provider usage metadata."""
+
+    from face_of_agi.models.providers.ollama import response_usage
+
+    usage = response_usage(response) if response is not None else None
+    capture_model_input(
+        target,
+        call_slot=call_slot,
+        provider=provider,
+        model=model,
+        phase=phase,
+        attempt=attempt,
+        request=request,
+        usage=usage,
+        metadata={
+            "backend": provider,
+            "model": model,
+            "response_output_text": _ollama_response_output_text(response),
+            "response_metadata": usage or {},
+            "response_payload": _jsonable(response),
+            **(metadata or {}),
+        },
+    )
+
+
 def capture_vllm_model_input(
     target: object,
     *,
@@ -159,3 +238,16 @@ def _jsonable(value: Any) -> Any:
             if not str(key).startswith("_")
         }
     return repr(value)
+
+
+def _ollama_response_output_text(response: Any | None) -> str | None:
+    if response is None:
+        return None
+
+    from face_of_agi.models.providers.ollama import object_get
+
+    message = object_get(response, "message") or {}
+    content = object_get(message, "content")
+    if isinstance(content, str):
+        return content
+    return None

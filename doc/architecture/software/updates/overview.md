@@ -1,8 +1,9 @@
 # Updates Overview
 
-The updates module owns the post-step update boundary for the updater role
-`P`. Updates happen after a real environment step, not after every simulated
-tool call.
+The updates module owns the post-transition update boundary for the updater
+role `P`. Updates happen after observed frame transitions and after
+known-state simulation replay rows; they do not run after temporary tool-call
+experiments.
 
 In the frame-unrolled orchestration loop, the updater boundary also runs after
 each real observed frame turn. During frame unrolling it compares the current
@@ -27,9 +28,12 @@ it calls the appropriate role-specific game updater with the trace,
 transition, predictions, and update quantities. In the frame-unrolled loop,
 the same game-update boundary also runs between observed animation frames. At
 terminal run completion, orchestration calls the shared general updater with
-run summary data once per role. The updater returns revised context documents
-for later model calls; orchestration applies those documents to its working
-`ContextDocuments` and persists the resulting authoritative state into `M`.
+run summary data once per role. Known-state simulation rows reuse the same
+game-update boundary with replayed successor-frame and action-history evidence;
+the updater input contract is unchanged. The updater returns revised context
+documents for later model calls; orchestration applies those documents to its
+working `ContextDocuments` and persists the resulting authoritative state into
+`M`.
 
 At the start of a later run, orchestration hydrates contexts by combining the
 latest persisted game-agnostic `K` across all games with the latest

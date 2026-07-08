@@ -18,27 +18,36 @@ debug_keep_all_m_states: false
 debug_trace: minimal
 debug_color: auto
 models:
-  observation_text:
-    crop_cells: 3
-    overflow_chars_per_frame: 12000
-    include_rows: true
-    include_component_runs: true
-  shared_vlm:
-    backend: vllm
-    model: Qwen/Qwen3.6-35B-A3B-FP8
-    input_image_size: 2048x2048
-    base_url: http://127.0.0.1:8000/v1
-    api_key: EMPTY
   agent:
-    backend: vllm
+    backend: openai
+    model: gpt-5-nano
+    input_image_size: 1024x1024
+    input_image_resample: nearest
     max_tool_calls: 0
     repair_attempts: 1
+    reasoning:
+      effort: low
+      summary: auto
   change:
-    backend: vllm
+    backend: openai
+    model: gpt-5-nano
+    input_image_size: 1024x1024
+    input_image_resample: nearest
+    reasoning:
+      effort: low
   historizer:
-    backend: vllm
+    backend: openai
+    model: gpt-5-nano
+    reasoning:
+      effort: low
   updater:
     agent:
-      backend: vllm
+      backend: openai
+      model: gpt-5-nano
+      reasoning:
+        effort: low
     general:
-      backend: vllm
+      backend: openai
+      model: gpt-5-nano
+      reasoning:
+        effort: low

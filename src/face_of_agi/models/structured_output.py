@@ -7,6 +7,8 @@ from dataclasses import dataclass
 import json
 from typing import Any, Generic, TypeVar
 
+from face_of_agi.models.providers.scheduler import current_model_call_context
+
 ResponseT = TypeVar("ResponseT")
 ValueT = TypeVar("ValueT")
 DEFAULT_INVALID_OUTPUT_PREVIEW_CHARS = 8000
@@ -99,6 +101,11 @@ def provider_repair_callback(
         validation_error: str,
         attempt: int,
     ) -> ResponseT:
+        emit_repair_attempt_event(
+            provider,
+            validation_error=validation_error,
+            attempt=attempt,
+        )
         return method(
             *args,
             **bound_kwargs,
@@ -108,6 +115,34 @@ def provider_repair_callback(
         )
 
     return repair
+
+
+def emit_repair_attempt_event(
+    provider: object,
+    *,
+    validation_error: str,
+    attempt: int,
+) -> None:
+    context = current_model_call_context()
+    if context is None or context.emit_event is None:
+        return
+    provider_name = str(getattr(provider, "backend", None) or type(provider).__name__)
+    model = getattr(provider, "model", None)
+    context.emit_event(
+        run_id=context.run_id,
+        game_id=context.game_id,
+        turn_id=context.turn_id,
+        role=context.role,
+        provider=provider_name,
+        model=str(model) if model is not None else None,
+        event="repair_attempt",
+        status="started",
+        metadata={
+            "attempt": attempt,
+            "validation_error_type": validation_error.split(":", 1)[0],
+            "validation_error_preview": _preview(validation_error, limit=500),
+        },
+    )
 
 
 def clipped_invalid_output_preview(

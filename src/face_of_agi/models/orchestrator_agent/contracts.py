@@ -16,6 +16,7 @@ from face_of_agi.contracts import (
     ToolCall,
     ToolName,
 )
+from face_of_agi.models.memory import GameMemoryDocument
 
 
 class AgentToolRuntime(Protocol):
@@ -60,6 +61,7 @@ class OrchestratorAgentModel(Protocol):
         first_observation_ref: ObservationRef | None = None,
         recent_action_history_available: bool = True,
         action_outcome_evidence: ActionOutcomeEvidence | None = None,
+        game_memory: GameMemoryDocument | None = None,
     ) -> DecisionResult:
         """Return one final action and its decision trace."""
         ...

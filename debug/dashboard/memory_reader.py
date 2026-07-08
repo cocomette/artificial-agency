@@ -59,6 +59,7 @@ def load_scoring_memory_rows(database_path: str | Path) -> list[dict[str, Any]]:
                 "run_id": str(row["run_id"]),
                 "turn_id": int(metadata.get("turn_id") or turn_counters[key]),
                 "turn_metrics": _load_optional_json(row["turn_metrics_json"]),
+                "metadata": metadata,
                 "created_at": str(row["created_at"]),
             }
         )
@@ -168,6 +169,7 @@ def turn_summary(state: dict[str, Any]) -> dict[str, Any]:
     metadata = _dict(state.get("metadata"))
     control_mode = _dict(metadata.get("control_mode"))
     trace = _dict(state.get("agent_trace"))
+    catchup = _simulation_catchup(metadata)
     return {
         "id": state["id"],
         "turn_id": state["turn_id"],
@@ -176,8 +178,12 @@ def turn_summary(state: dict[str, Any]) -> dict[str, Any]:
         "step": state["step"],
         "frame": f"{state['frame_index'] + 1}/{state['frame_count']}",
         "controllable": bool(control_mode.get("controllable", False)),
+        "simulated": bool(metadata.get("simulated", False)),
         "control_reason": control_mode.get("reason", ""),
         "chosen_action": action_label(state.get("chosen_action")),
+        "catchup": _catchup_status(catchup),
+        "catchup_actions": _action_sequence_label(catchup.get("catchup_actions")),
+        "exit_action": str(catchup.get("exit_action") or ""),
         "tool_call_count": len(trace.get("tool_calls") or []),
         "created_at": state["created_at"],
     }
@@ -393,6 +399,24 @@ def _dict(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
     return {}
+
+
+def _simulation_catchup(metadata: dict[str, Any]) -> dict[str, Any]:
+    return _dict(metadata.get("known_state_simulation_catchup"))
+
+
+def _catchup_status(catchup: dict[str, Any]) -> str:
+    if not catchup:
+        return ""
+    if bool(catchup.get("aborted", False)):
+        return "aborted"
+    return "matched" if bool(catchup.get("successful", False)) else "mismatch"
+
+
+def _action_sequence_label(value: Any) -> str:
+    if not isinstance(value, (list, tuple)):
+        return ""
+    return ", ".join(str(item) for item in value)
 
 
 def _redact_images(value: Any) -> Any:

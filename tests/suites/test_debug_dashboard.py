@@ -19,20 +19,21 @@ VALID_CONFIG = """
 game_index: 0
 max_actions_per_level: 1
 models:
-  shared_vlm:
-    backend: vllm
-    model: fake-vllm
   agent:
-    backend: vllm
-  change:
-    backend: vllm
-  historizer:
-    backend: vllm
+    backend: random
+  world:
+    backend: none
+  goal:
+    backend: none
   updater:
+    world:
+      backend: mock
+    goal:
+      backend: mock
     agent:
-      backend: vllm
+      backend: mock
     general:
-      backend: vllm
+      backend: mock
 """
 
 
@@ -53,8 +54,8 @@ def test_config_manager_lists_yaml_files_and_rejects_escape_paths(tmp_path: Path
 
     with pytest.raises(ValueError, match="stay within"):
         config_manager.safe_config_path("../escape.yaml", config_dir=config_dir)
-    with pytest.raises(ValueError, match="direct children"):
-        config_manager.safe_config_path("nested/config.yaml", config_dir=config_dir)
+    nested = config_manager.safe_config_path("nested/config.yaml", config_dir=config_dir)
+    assert nested == (config_dir / "nested" / "config.yaml").resolve()
     with pytest.raises(ValueError, match="\\.yaml"):
         config_manager.safe_config_path("config.txt", config_dir=config_dir)
 
@@ -147,45 +148,55 @@ def test_test_workshop_builds_e2e_commands_and_rejects_escape_paths(
     e2e_dir = tmp_path / "tests" / "e2e"
     e2e_dir.mkdir(parents=True)
     for filename in (
-        "vllm_full_game_loop_e2e.py",
-        "vllm_orchestrator_agent_e2e.py",
-        "provider_neutral_e2e.py",
+        "openai_full_game_loop_e2e.py",
+        "openai_goal_model_e2e.py",
+        "ollama_image_description_e2e.py",
+        "world_model_e2e.py",
     ):
         (e2e_dir / filename).write_text("print('ok')\n", encoding="utf-8")
     (e2e_dir / "notes.txt").write_text("ignore\n", encoding="utf-8")
 
     assert [path.name for path in test_workshop.list_e2e_tests(root=tmp_path)] == [
-        "provider_neutral_e2e.py",
-        "vllm_full_game_loop_e2e.py",
-        "vllm_orchestrator_agent_e2e.py",
+        "ollama_image_description_e2e.py",
+        "openai_full_game_loop_e2e.py",
+        "openai_goal_model_e2e.py",
+        "world_model_e2e.py",
     ]
     assert test_workshop.build_e2e_command(
-        "vllm_orchestrator_agent_e2e.py",
+        "openai_goal_model_e2e.py",
         root=tmp_path,
-        extra_args=["--model", "fake-vllm"],
+        extra_args=["--model", "gpt-5-nano"],
     ) == [
         "uv",
         "run",
-        "--group",
-        "dev",
+        "--env-file",
+        ".env",
+        "--locked",
+        "--extra",
+        "ml",
+        "--no-dev",
         "python",
-        "tests/e2e/vllm_orchestrator_agent_e2e.py",
+        "tests/e2e/openai_goal_model_e2e.py",
         "--model",
-        "fake-vllm",
+        "gpt-5-nano",
     ]
     assert test_workshop.build_e2e_command(
-        "vllm_full_game_loop_e2e.py",
+        "openai_full_game_loop_e2e.py",
         root=tmp_path,
     ) == [
         "uv",
         "run",
-        "--group",
-        "dev",
+        "--env-file",
+        ".env",
+        "--locked",
+        "--extra",
+        "ml",
+        "--no-dev",
         "python",
-        "tests/e2e/vllm_full_game_loop_e2e.py",
+        "tests/e2e/openai_full_game_loop_e2e.py",
     ]
     assert test_workshop.build_e2e_command(
-        "provider_neutral_e2e.py",
+        "ollama_image_description_e2e.py",
         root=tmp_path,
     ) == [
         "uv",
@@ -195,7 +206,7 @@ def test_test_workshop_builds_e2e_commands_and_rejects_escape_paths(
         "ml",
         "--no-dev",
         "python",
-        "tests/e2e/provider_neutral_e2e.py",
+        "tests/e2e/ollama_image_description_e2e.py",
     ]
 
     with pytest.raises(ValueError, match="stay within"):
@@ -213,7 +224,7 @@ def test_test_workshop_collects_generic_result_artifacts(tmp_path: Path) -> None
 {
   "json_title": "Run Summary",
   "artifacts": {
-    "first_frame": "images/first.png"
+    "input_image": "images/first.png"
   }
 }
 """.strip()
@@ -237,13 +248,13 @@ def test_test_workshop_collects_generic_result_artifacts(tmp_path: Path) -> None
     artifacts = test_workshop.collect_result_artifacts(result_dir, root=tmp_path)
 
     assert [(item.title, item.path.name) for item in artifacts.images] == [
-        ("first_frame", "first.png"),
+        ("input_image", "first.png"),
         ("loose_image", "loose.png"),
     ]
     assert [(item.title, item.path.name) for item in artifacts.json_files] == [
         ("Run Summary", "summary.json"),
         ("Metric Payload", "metrics.json"),
     ]
-    assert artifacts.json_files[0].data["artifacts"]["first_frame"] == (
+    assert artifacts.json_files[0].data["artifacts"]["input_image"] == (
         "images/first.png"
     )

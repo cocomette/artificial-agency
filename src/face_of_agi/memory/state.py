@@ -13,8 +13,10 @@ from face_of_agi.contracts import (
     AgentTrace,
     ActionSpec,
     ContextDocuments,
+    EnvironmentStepEventRecord,
     FrameControlMode,
     MStateRecord,
+    ModelCallEventRecord,
     Observation,
     ObservationRef,
     RoleContext,
@@ -22,7 +24,10 @@ from face_of_agi.contracts import (
     TurnMetrics,
 )
 from face_of_agi.debug.contracts import ModelInputDebugRecord
+from face_of_agi.frames import observation_frame_hash, to_memory_jsonable
 from face_of_agi.memory.sqlite import SQLiteDatabase
+
+DEFAULT_FRAME_HASH_CROP_EDGES = (0, 0, 0, 0)
 
 
 class StateMemory:
@@ -94,9 +99,16 @@ class StateMemory:
         frame_count: int,
         control_mode: FrameControlMode,
         contexts: ContextDocuments,
+        frame_hash_crop_edges: tuple[int, int, int, int] = (
+            DEFAULT_FRAME_HASH_CROP_EDGES
+        ),
     ) -> MStateRecord:
         """Create the M source row for one frame turn with standard metadata."""
 
+        frame_hash_metadata = _frame_hash_metadata(
+            current_observation,
+            crop_edges=frame_hash_crop_edges,
+        )
         return self.prewrite_state(
             run_id=run_id,
             game_id=game_id,
@@ -109,6 +121,7 @@ class StateMemory:
                 "turn_id": turn_id,
                 "control_mode": asdict(control_mode),
                 "prewritten": True,
+                **frame_hash_metadata,
             },
         )
 
@@ -124,9 +137,21 @@ class StateMemory:
         contexts: ContextDocuments,
         agent_trace: AgentTrace,
         turn_metrics: TurnMetrics | None = None,
+        game_memory: Any | None = None,
+        game_memory_updated_this_turn: bool = False,
+        action_history_entry: ActionHistoryItem | None = None,
+        action_history_score_advance_marker: (
+            ActionHistoryScoreAdvanceMarker | None
+        ) = None,
+        extra_metadata: dict[str, Any] | None = None,
     ) -> MStateRecord:
         """Complete a prewritten frame-turn M row with standard metadata."""
 
+        source = self.read_state_source(state_id)
+        if source is None:
+            raise RuntimeError(f"unknown M state row: {state_id}")
+        source_metadata = dict(source.metadata)
+        source_metadata.pop("prewritten", None)
         return self.complete_state(
             state_id=state_id,
             chosen_action=chosen_action,
@@ -134,6 +159,7 @@ class StateMemory:
             agent_trace=agent_trace,
             turn_metrics=turn_metrics,
             metadata={
+                **source_metadata,
                 "turn_id": turn_id,
                 "control_mode": asdict(control_mode),
                 "previous_observation_ref": (
@@ -144,6 +170,21 @@ class StateMemory:
                 "recent_action_history": [
                     _action_history_metadata(item) for item in recent_action_history
                 ],
+                "action_history_entry": (
+                    _action_history_metadata(action_history_entry)
+                    if action_history_entry is not None
+                    else None
+                ),
+                "action_history_score_advance_marker": (
+                    _action_history_metadata(action_history_score_advance_marker)
+                    if action_history_score_advance_marker is not None
+                    else None
+                ),
+                "game_memory": _game_memory_metadata(
+                    game_memory,
+                    updated_this_turn=game_memory_updated_this_turn,
+                ),
+                **(extra_metadata or {}),
             },
         )
 
@@ -276,6 +317,22 @@ class StateMemory:
             agent_context=contexts.agent,
         )
 
+    def merge_state_metadata(
+        self,
+        *,
+        state_id: int,
+        metadata: dict[str, Any],
+    ) -> MStateRecord:
+        """Merge metadata into an existing M state row."""
+
+        current = self.read_state_source(state_id)
+        if current is None:
+            raise RuntimeError(f"unknown M state row: {state_id}")
+        return self.database.update_m_state_metadata(
+            state_id=state_id,
+            metadata={**current.metadata, **metadata},
+        )
+
     def list_states(self, *, game_id: str | None = None) -> list[MStateRecord]:
         """List complete M state rows, optionally scoped to one game."""
 
@@ -401,6 +458,98 @@ class StateMemory:
             turn_id=turn_id,
         )
 
+    def write_model_call_event(
+        self,
+        *,
+        run_id: str,
+        game_id: str,
+        turn_id: int | None,
+        role: str,
+        provider: str,
+        model: str | None,
+        event: str,
+        status: str,
+        queue_wait_seconds: float | None = None,
+        duration_seconds: float | None = None,
+        timeout_seconds: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> ModelCallEventRecord:
+        """Store one model-call lifecycle event."""
+
+        return self.database.write_model_call_event(
+            run_id=run_id,
+            game_id=game_id,
+            turn_id=turn_id,
+            role=role,
+            provider=provider,
+            model=model,
+            event=event,
+            status=status,
+            queue_wait_seconds=queue_wait_seconds,
+            duration_seconds=duration_seconds,
+            timeout_seconds=timeout_seconds,
+            metadata=metadata,
+        )
+
+    def list_model_call_events(
+        self,
+        *,
+        run_id: str | None = None,
+        game_id: str | None = None,
+        turn_id: int | None = None,
+        role: str | None = None,
+    ) -> list[ModelCallEventRecord]:
+        """List stored model-call lifecycle events."""
+
+        return self.database.list_model_call_events(
+            run_id=run_id,
+            game_id=game_id,
+            turn_id=turn_id,
+            role=role,
+        )
+
+    def write_environment_step_event(
+        self,
+        *,
+        run_id: str,
+        game_id: str,
+        turn_id: int | None,
+        step: int | None,
+        action: dict[str, Any],
+        status: str,
+        duration_seconds: float,
+        remaining_actions: int | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> EnvironmentStepEventRecord:
+        """Store one environment-step timing event."""
+
+        return self.database.write_environment_step_event(
+            run_id=run_id,
+            game_id=game_id,
+            turn_id=turn_id,
+            step=step,
+            action=action,
+            status=status,
+            duration_seconds=duration_seconds,
+            remaining_actions=remaining_actions,
+            metadata=metadata,
+        )
+
+    def list_environment_step_events(
+        self,
+        *,
+        run_id: str | None = None,
+        game_id: str | None = None,
+        turn_id: int | None = None,
+    ) -> list[EnvironmentStepEventRecord]:
+        """List stored environment-step timing events."""
+
+        return self.database.list_environment_step_events(
+            run_id=run_id,
+            game_id=game_id,
+            turn_id=turn_id,
+        )
+
     def cleanup_keep_latest_per_game(self) -> None:
         """Prune complete M state rows to the newest row for each game."""
 
@@ -442,6 +591,47 @@ def _dict(value: Any) -> dict[str, Any]:
     return {}
 
 
+def _frame_hash_metadata(
+    observation: Observation,
+    *,
+    crop_edges: tuple[int, int, int, int],
+) -> dict[str, Any]:
+    try:
+        return {
+            "current_frame_hash": observation_frame_hash(
+                observation,
+                crop_edges=crop_edges,
+            ),
+            "current_frame_hash_crop_edges": crop_edges,
+        }
+    except Exception as exc:
+        return {
+            "current_frame_hash_unavailable": {
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            },
+            "current_frame_hash_crop_edges": crop_edges,
+        }
+
+
+def _game_memory_metadata(
+    game_memory: Any | None,
+    *,
+    updated_this_turn: bool,
+) -> dict[str, Any]:
+    markdown = getattr(game_memory, "markdown", None)
+    metadata = getattr(game_memory, "metadata", None)
+    available = bool(
+        getattr(game_memory, "is_available", lambda: bool(markdown))()
+    )
+    return {
+        "document": markdown if isinstance(markdown, str) else "not available",
+        "available": available,
+        "updated_this_turn": updated_this_turn,
+        "metadata": _dict(metadata),
+    }
+
+
 def _action_history_metadata(item: ActionHistoryItem) -> dict[str, Any]:
     if isinstance(item, ActionHistoryResetMarker):
         return {
@@ -456,4 +646,4 @@ def _action_history_metadata(item: ActionHistoryItem) -> dict[str, Any]:
             "new_score": item.new_score,
             "delta": item.delta,
         }
-    return asdict(item)
+    return to_memory_jsonable(item)

@@ -12,6 +12,7 @@ from face_of_agi.contracts import (
     RoleContext,
 )
 from face_of_agi.models.historizer import AgentContextHistorySummary
+from face_of_agi.models.memory import GameMemoryDocument
 
 UpdaterRole = Literal["agent"]
 ContextSegment = Literal["general", "game"]
@@ -23,9 +24,9 @@ AGENT_GAME_CONTEXT_KEYS = (
     "history",
     "extras",
 )
-GENERAL_CONTEXT_MAX_CHARS = 20000
 AGENT_GAME_CONTEXT_MAX_CHARS = 12000
-AGENT_GAME_CONTEXT_FIELD_MAX_CHARS = 6000
+GENERAL_CONTEXT_MAX_CHARS = 20_000
+AGENT_GAME_CONTEXT_FIELD_MAX_CHARS = 6_000
 
 
 def updated_context_json_schema(
@@ -134,7 +135,7 @@ class UpdaterContextTarget:
 
 @dataclass(slots=True)
 class PromptImage:
-    """Provider-neutral image attached to one prompt update request."""
+    """Provider-neutral image attached to a prompt updater request."""
 
     label: str
     image: Any
@@ -203,6 +204,9 @@ class AgentGameContextUpdateInput:
     allowed_actions: tuple[ActionSpec, ...]
     glossary_actions: tuple[ActionSpec, ...]
     action_history_window: int
+    game_memory: GameMemoryDocument = field(
+        default_factory=GameMemoryDocument.not_available
+    )
     context_history: AgentContextHistorySummary = field(
         default_factory=AgentContextHistorySummary.not_available
     )

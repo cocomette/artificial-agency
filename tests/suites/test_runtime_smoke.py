@@ -1,245 +1,137 @@
-"""Smoke tests for vLLM-only runtime wiring."""
+"""Smoke tests for current runtime/config boundaries."""
 
-from io import StringIO
 from pathlib import Path
 
 import pytest
 
-from face_of_agi.environment.config import (
-    EnvironmentConfig,
-    ModelRuntimeConfig,
-    ModelRoleConfig,
-    UpdaterRuntimeConfig,
-    load_environment_config,
-)
-from face_of_agi.models.orchestrator_agent.providers.vllm import (
-    VLLMOrchestratorAgentAdapter,
-)
-from face_of_agi.models.updater.providers.vllm import VLLMUpdaterAdapter
-import face_of_agi.runtime.kaggle as kaggle
+from face_of_agi.environment.config import ModelRoleConfig, load_environment_config
+from face_of_agi.models import DisabledGameMemoryAdapter
 from face_of_agi.runtime import shell
-from face_of_agi.runtime.parallel import ParallelGameRunSpec
 
 
-def _vllm_role(**options: object) -> ModelRoleConfig:
-    return ModelRoleConfig(
-        backend="vllm",
-        model="fake-vllm",
-        options=dict(options),
+def test_rtx6000_parallel_config_preserves_run063_retry_and_memory_values() -> None:
+    config = load_environment_config(
+        "src/face_of_agi/runtime/configs/vllm/"
+        "vllm_rtx6000_qwen36_35b_fp8_parallel.yaml"
     )
 
+    assert config.max_parallel_games == 25
+    assert config.max_game_retries == 0
+    assert config.models.memory.backend == "vllm"
+    assert config.models.memory.options["memory_max_chars"] == 10000
+    assert config.models.change.options["summary_max_chars"] == 2000
+    assert config.models.updater.agent.options["agent_game_context_max_chars"] == 12000
 
-def _updater_config() -> UpdaterRuntimeConfig:
-    return UpdaterRuntimeConfig(agent=_vllm_role(), general=_vllm_role())
 
-
-def test_shell_model_registry_wires_vllm_roles_and_observation_text() -> None:
-    registry = shell._build_model_registry(
-        agent_config=_vllm_role(),
-        change_config=_vllm_role(),
-        historizer_config=_vllm_role(),
-        updater_config=_updater_config(),
-        observation_text_config={
-            "crop_cells": 2,
-            "overflow_chars_per_frame": 99,
-            "include_rows": False,
-            "include_components": False,
-            "include_component_runs": False,
-            "compact_components": True,
-        },
+def test_rtx6000_debug_config_sets_repair_attempts_and_caps() -> None:
+    config = load_environment_config(
+        "src/face_of_agi/runtime/configs/vllm/"
+        "vllm_rtx6000_qwen36_35b_fp8_debug.yaml"
     )
 
-    assert isinstance(registry.orchestrator_agent, VLLMOrchestratorAgentAdapter)
-    assert registry.change_summary_model is not None
-    assert registry.agent_context_historizer_model is not None
-    assert registry.updater_tasks is not None
-    assert isinstance(registry.updater_tasks.agent_game_updater, VLLMUpdaterAdapter)
-    assert registry.orchestrator_agent.config.observation_text.crop_cells == 2
-    assert (
-        registry.orchestrator_agent.config.observation_text.include_components
-        is False
-    )
-    assert registry.orchestrator_agent.config.observation_text.include_rows is False
-    assert (
-        registry.orchestrator_agent.config.observation_text.include_component_runs
-        is False
-    )
-    assert registry.orchestrator_agent.config.observation_text.compact_components is True
-    assert registry.change_summary_model.config.observation_text.crop_cells == 2
-    assert registry.change_summary_model.config.observation_text.include_rows is False
-    assert (
-        registry.change_summary_model.config.observation_text.compact_components
-        is True
-    )
-    assert registry.updater_tasks.agent_game_updater.config.observation_text == (
-        registry.orchestrator_agent.config.observation_text
-    )
+    assert config.models.shared_vlm.repair_attempts == 3
+    assert config.models.memory.options["repair_invalid_output_preview_chars"] == 8000
+    assert config.models.historizer.options["field_max_chars"] == 2000
+    assert config.models.updater.general.options["general_context_max_chars"] == 20000
 
 
-def test_shared_vllm_server_max_model_len_becomes_role_context_limit() -> None:
-    shared = ModelRoleConfig(
-        backend="vllm",
-        model="fake-vllm",
-        options={
-            "server": {"max_model_len": 12345},
-            "temperature": 0.0,
-        },
-    )
-    role = ModelRoleConfig(backend="vllm")
-
-    merged = shell._with_shared_vlm_role_config(role, shared)
-
-    assert merged.options["max_context_tokens"] == 12345
-    assert merged.options["temperature"] == 0.0
-    assert "server" not in merged.options
-
-
-def test_shell_rejects_removed_change_frame_budget_key() -> None:
-    with pytest.raises(ValueError, match="max_evidence_frames.*max_frames_per_call"):
-        shell._build_model_registry(
-            agent_config=_vllm_role(),
-            change_config=_vllm_role(max_evidence_frames=5),
-            historizer_config=_vllm_role(),
-            updater_config=_updater_config(),
-        )
-
-
-@pytest.mark.parametrize("backend", ["openai", "ollama", "huggingface", "diffusers"])
-def test_shell_rejects_removed_real_backends(backend: str) -> None:
-    with pytest.raises(ValueError, match="use vllm"):
-        shell._build_model_registry(
-            agent_config=ModelRoleConfig(backend=backend, model="old"),
-            change_config=_vllm_role(),
-            historizer_config=_vllm_role(),
-            updater_config=_updater_config(),
-        )
-
-
-def test_environment_config_loads_shared_observation_text(tmp_path: Path) -> None:
+def test_removed_world_goal_model_config_keys_are_rejected(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         """
+max_actions_per_level: 10
 game_index: 0
-max_actions_per_level: 1
 models:
-  observation_text:
-    crop_cells: 2
-    overflow_chars_per_frame: 77
-    include_rows: false
-    include_components: false
-    include_component_runs: false
-    compact_components: true
+  world:
+    backend: openai
   shared_vlm:
     backend: vllm
-    model: fake-vllm
   agent:
-    backend: vllm
+    backend: random
   change:
     backend: vllm
-  historizer:
+    model: model
+  memory:
     backend: vllm
+    model: model
   updater:
     agent:
       backend: vllm
+      model: model
     general:
       backend: vllm
-""".lstrip(),
+      model: model
+""",
         encoding="utf-8",
     )
 
-    config = load_environment_config(config_path)
-
-    assert config.models.observation_text == {
-        "crop_cells": 2,
-        "overflow_chars_per_frame": 77,
-        "include_rows": False,
-        "include_components": False,
-        "include_component_runs": False,
-        "compact_components": True,
-    }
-    assert config.models.agent.backend == "vllm"
+    with pytest.raises(ValueError, match="models.world config has been removed"):
+        load_environment_config(config_path)
 
 
-def test_kaggle_worker_wires_shared_observation_text(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    observation_text = {
-        "crop_cells": 3,
-        "overflow_chars_per_frame": 123,
-        "include_rows": True,
-        "include_components": True,
-        "include_component_runs": True,
-        "compact_components": True,
-    }
-    captured: dict[str, object] = {}
+def test_memory_backend_none_builds_disabled_adapter() -> None:
+    model = shell._build_game_memory_model(ModelRoleConfig(backend="none"))
 
-    class StopAfterRegistry(Exception):
-        pass
+    assert isinstance(model, DisabledGameMemoryAdapter)
 
-    def fake_build_model_registry(**kwargs: object) -> object:
-        captured.update(kwargs)
-        raise StopAfterRegistry
 
-    monkeypatch.setattr(kaggle, "_build_model_registry", fake_build_model_registry)
-    environment_config = EnvironmentConfig(
-        game_id="fake-game",
-        max_actions_per_level=1,
-        models=ModelRuntimeConfig(
-            observation_text=observation_text,
-            shared_vlm=ModelRoleConfig(backend="vllm", model="fake-vllm"),
-            agent=ModelRoleConfig(backend="vllm"),
-            change=ModelRoleConfig(backend="vllm"),
-            historizer=ModelRoleConfig(backend="vllm"),
-            updater=UpdaterRuntimeConfig(
-                agent=ModelRoleConfig(backend="vllm"),
-                general=ModelRoleConfig(backend="vllm"),
-            ),
-        ),
+def test_shared_vlm_caps_expand_into_role_dataclasses() -> None:
+    config = load_environment_config(
+        "src/face_of_agi/runtime/configs/vllm/"
+        "vllm_rtx6000_qwen36_35b_fp8_debug.yaml"
     )
-    spec = ParallelGameRunSpec(
-        game_index=0,
-        game_id="fake-game",
-        run_id="run-1",
-        database_path=tmp_path / "memory.sqlite",
-        environment_config=environment_config,
-        arc_environment=object(),
+    registry = shell._build_model_registry(
+        agent_config=config.models.agent,
+        change_config=config.models.change,
+        historizer_config=config.models.historizer,
+        memory_config=config.models.memory,
+        shared_vlm_config=config.models.shared_vlm,
+        scheduler_config=config.models.scheduler,
+        updater_config=config.models.updater,
     )
 
-    with pytest.raises(StopAfterRegistry):
-        kaggle._run_kaggle_game(spec, StringIO())
-
-    assert captured["observation_text_config"] == observation_text
-
-
-def test_rtx6000_configs_load_multimodal_runtime_contract() -> None:
-    config_dir = Path("src/face_of_agi/runtime/configs/vllm")
-    debug_config = load_environment_config(
-        config_dir / "vllm_rtx6000_qwen36_35b_fp8_debug.yaml"
-    )
-    parallel_config = load_environment_config(
-        config_dir / "vllm_rtx6000_qwen36_35b_fp8_parallel.yaml"
+    assert registry.change_summary_model.config.summary_max_chars == 2000
+    assert registry.change_summary_model.config.summary_max_elements == 20
+    assert registry.agent_context_historizer_model.config.field_max_chars == 2000
+    assert registry.game_memory_model.config.memory_max_chars == 10000
+    assert (
+        registry.updater_tasks.agent_game_updater.config.agent_game_context_max_chars
+        == 12000
     )
 
-    assert debug_config.models.observation_text["crop_cells"] == 3
-    assert parallel_config.models.observation_text["crop_cells"] == 3
-    assert debug_config.models.observation_text["overflow_chars_per_frame"] > 0
-    assert parallel_config.models.observation_text["overflow_chars_per_frame"] > 0
-    assert debug_config.models.observation_text["include_rows"] is True
-    assert debug_config.models.observation_text["include_components"] is True
-    assert debug_config.models.observation_text["include_component_runs"] is True
-    assert debug_config.models.observation_text["compact_components"] is True
-    assert parallel_config.models.observation_text["include_rows"] is True
-    assert parallel_config.models.observation_text["include_components"] is True
-    assert parallel_config.models.observation_text["include_component_runs"] is True
-    assert parallel_config.models.observation_text["compact_components"] is True
-    assert debug_config.models.shared_vlm.options["server"]["max_model_len"] >= 65536
-    assert parallel_config.models.shared_vlm.options["server"]["max_model_len"] == 65536
-    assert debug_config.models.shared_vlm.options["input_image_size"] == "1024x1024"
-    assert parallel_config.models.shared_vlm.options["input_image_size"] == "1024x1024"
-    assert debug_config.models.change.options["max_frames_per_call"] >= 2
-    assert parallel_config.models.change.options["max_frames_per_call"] >= 2
-    assert debug_config.models.change.options["reduce_chunk_summaries"] is True
-    assert parallel_config.models.change.options["reduce_chunk_summaries"] is True
-    assert debug_config.models.change.options["reducer_keyframe_limit"] == 8
-    assert parallel_config.models.change.options["reducer_keyframe_limit"] == 8
+
+def test_tuned_rtx6000_config_enables_scheduler_and_computed_timeouts() -> None:
+    config = load_environment_config(
+        "src/face_of_agi/runtime/configs/vllm/"
+        "vllm_rtx6000_qwen36_35b_fp8_tuned.yaml"
+    )
+
+    assert config.max_parallel_games == 25
+    assert config.models.scheduler.enabled is True
+    assert config.models.scheduler.max_concurrent_calls == 8
+    assert config.models.scheduler.max_concurrent_calls_per_game == 1
+    assert config.models.change.options["summary_max_elements"] == 20
+
+    registry = shell._build_model_registry(
+        agent_config=config.models.agent,
+        change_config=config.models.change,
+        historizer_config=config.models.historizer,
+        memory_config=config.models.memory,
+        shared_vlm_config=config.models.shared_vlm,
+        scheduler_config=config.models.scheduler,
+        updater_config=config.models.updater,
+    )
+
+    assert registry.orchestrator_agent.config.timeout == 92.0
+    assert registry.change_summary_model.config.timeout == 124.0
+    assert registry.game_memory_model.config.timeout == 124.0
+    assert registry.agent_context_historizer_model.config.timeout == 90.0
+    assert registry.updater_tasks.agent_game_updater.config.timeout == 188.0
+    assert registry.updater_tasks.general_updater.config.timeout == 90.0
+    assert registry.orchestrator_agent.config.scheduler is not None
+    assert "scheduler" not in registry.orchestrator_agent.config.options
+    assert (
+        "scheduler_queue_timeout_seconds"
+        not in registry.orchestrator_agent.config.options
+    )
+    assert registry.change_summary_model.config.scheduler is not None

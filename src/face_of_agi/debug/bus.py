@@ -6,7 +6,11 @@ from typing import TYPE_CHECKING
 from typing import Any
 
 from face_of_agi.contracts import FrameTurnContext
-from face_of_agi.debug.events import DebugEvent
+from face_of_agi.debug.events import (
+    DebugEvent,
+    EnvironmentStepEventRecorded,
+    ModelCallEventRecorded,
+)
 from face_of_agi.debug.capture.model_inputs import drain_model_input_debug_records
 from face_of_agi.debug.sinks import DebugSink, NullDebugSink
 
@@ -37,10 +41,7 @@ class DebugBus:
     def emit(self, event: DebugEvent) -> None:
         """Emit one typed debug event."""
 
-        try:
-            self.sink.emit(event)
-        except Exception:
-            pass
+        self.sink.emit(event)
 
     def capture_model_inputs(
         self,
@@ -50,29 +51,107 @@ class DebugBus:
     ) -> None:
         """Persist and clear provider request captures for one model call slot."""
 
-        try:
-            if adapter is None:
-                return
+        if adapter is None:
+            return
 
-            records = drain_model_input_debug_records(adapter)
-            if not records:
-                return
+        records = drain_model_input_debug_records(adapter)
+        if not records:
+            return
 
-            if not self.persist_model_input_debug_records:
-                return
+        if not self.persist_model_input_debug_records:
+            return
 
-            if (
-                self.state_memory is None
-                or frame_context.current_source_state_id is None
-            ):
-                return
+        if self.state_memory is None or frame_context.current_source_state_id is None:
+            return
 
-            self.state_memory.write_model_input_debug_records(
-                m_state_id=frame_context.current_source_state_id,
-                run_id=frame_context.run_id,
-                game_id=frame_context.game_id,
+        self.state_memory.write_model_input_debug_records(
+            m_state_id=frame_context.current_source_state_id,
+            run_id=frame_context.run_id,
+            game_id=frame_context.game_id,
+            turn_id=turn_id,
+            records=records,
+        )
+
+    def record_model_call_event(
+        self,
+        *,
+        run_id: str,
+        game_id: str,
+        turn_id: int | None,
+        role: str,
+        provider: str,
+        model: str | None,
+        event: str,
+        status: str,
+        queue_wait_seconds: float | None = None,
+        duration_seconds: float | None = None,
+        timeout_seconds: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Persist and emit one model-call lifecycle event."""
+
+        if self.state_memory is not None:
+            self.state_memory.write_model_call_event(
+                run_id=run_id,
+                game_id=game_id,
                 turn_id=turn_id,
-                records=records,
+                role=role,
+                provider=provider,
+                model=model,
+                event=event,
+                status=status,
+                queue_wait_seconds=queue_wait_seconds,
+                duration_seconds=duration_seconds,
+                timeout_seconds=timeout_seconds,
+                metadata=metadata,
             )
-        except Exception:
-            pass
+        self.emit(
+            ModelCallEventRecorded(
+                role=role,
+                provider=provider,
+                model=model,
+                event=event,
+                status=status,
+                game_id=game_id,
+                turn_id=turn_id,
+                duration_seconds=duration_seconds,
+                queue_wait_seconds=queue_wait_seconds,
+                timeout_seconds=timeout_seconds,
+                metadata=metadata,
+            )
+        )
+
+    def record_environment_step_event(
+        self,
+        *,
+        run_id: str,
+        game_id: str,
+        turn_id: int | None,
+        step: int | None,
+        action: dict[str, Any],
+        status: str,
+        duration_seconds: float,
+        remaining_actions: int | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Persist and emit one environment-step timing event."""
+
+        if self.state_memory is not None:
+            self.state_memory.write_environment_step_event(
+                run_id=run_id,
+                game_id=game_id,
+                turn_id=turn_id,
+                step=step,
+                action=action,
+                status=status,
+                duration_seconds=duration_seconds,
+                remaining_actions=remaining_actions,
+                metadata=metadata,
+            )
+        self.emit(
+            EnvironmentStepEventRecorded(
+                status=status,
+                duration_seconds=duration_seconds,
+                remaining_actions=remaining_actions,
+            )
+        )

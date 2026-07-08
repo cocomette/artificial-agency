@@ -5,9 +5,14 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
+from PIL import Image
+
 from face_of_agi.contracts import (
+    ActionHistoryEntry,
+    ActionHistoryScoreAdvanceMarker,
     ActionSpec,
     AgentTrace,
+    ChangeSummaryElement,
     DecisionResult,
     EnvironmentInfo,
     FrameControlMode,
@@ -28,7 +33,7 @@ from face_of_agi.debug.bus import DebugBus
 class BundleStepEnvironment:
     """Fake environment that returns retained animation frames after one action."""
 
-    def __init__(self, frames: tuple[list[list[int]], ...]) -> None:
+    def __init__(self, frames: tuple[Image.Image, ...]) -> None:
         self.frames = frames
         self.step_actions: list[ActionSpec] = []
 
@@ -60,6 +65,7 @@ class RecordingChangeModel:
         *,
         glossary_actions: Sequence[ActionSpec],
         frame_observations: Sequence[Observation] | None = None,
+        previous_change_elements: Sequence[ChangeSummaryElement] = (),
     ) -> ChangeSummaryResult:
         self.calls.append(
             {
@@ -68,25 +74,32 @@ class RecordingChangeModel:
                 "action": action,
                 "glossary_actions": tuple(glossary_actions),
                 "frame_observations": tuple(frame_observations or ()),
+                "previous_change_elements": tuple(previous_change_elements),
             }
         )
         return ChangeSummaryResult(
-            summary="summarized bundle",
+            elements=(
+                ChangeSummaryElement(
+                    element_name="bundle",
+                    element_description="transition bundle",
+                    element_mutation="summarized bundle",
+                ),
+            ),
             changed_pixel_count=1,
             change_detected=True,
             metadata={},
-            changed_cell_percent=0.1,
+            changed_pixel_percent=25.0,
         )
 
 
-def _grid(symbol: int) -> list[list[int]]:
-    return [[symbol for _x in range(64)] for _y in range(64)]
+def _image(color: tuple[int, int, int]) -> Image.Image:
+    return Image.new("RGB", (2, 2), color=color)
 
 
 def _session_for_controllable_step(
     *,
     current_observation: Observation,
-    next_frames: tuple[list[list[int]], ...],
+    next_frames: tuple[Image.Image, ...],
 ) -> GameLoopSession:
     action = ActionSpec("ACTION1")
     current_ref = ObservationRef(memory="state", id=current_observation.id)
@@ -129,9 +142,9 @@ def _session_for_controllable_step(
 
 
 def test_controllable_step_summarizes_bundle_and_advances_to_final_frame() -> None:
-    current = Observation(id="current", step=0, frame=_grid(0))
-    middle_frame = _grid(1)
-    final_frame = _grid(2)
+    current = Observation(id="current", step=0, frame=_image((0, 0, 0)))
+    middle_frame = _image((127, 127, 127))
+    final_frame = _image((255, 255, 255))
     session = _session_for_controllable_step(
         current_observation=current,
         next_frames=(middle_frame, final_frame),
@@ -155,9 +168,57 @@ def test_controllable_step_summarizes_bundle_and_advances_to_final_frame() -> No
         debug=DebugBus.disabled(),
     )
 
-    assert result.summary == "summarized bundle"
+    assert result.elements[0].element_mutation == "summarized bundle"
     assert len(change_model.calls) == 1
     call = change_model.calls[0]
     assert call["previous_observation"] is session.transition_frame_observations[0]
     assert call["current_observation"] is session.transition_frame_observations[-1]
     assert call["frame_observations"] == session.transition_frame_observations
+
+
+def test_change_summary_previous_elements_clear_after_score_advance() -> None:
+    current = Observation(id="current", step=0, frame=_image((0, 0, 0)))
+    final_frame = _image((255, 255, 255))
+    session = _session_for_controllable_step(
+        current_observation=current,
+        next_frames=(final_frame,),
+    )
+    steps.resolve_next_snapshot(session, debug=DebugBus.disabled())
+    element = ChangeSummaryElement(
+        element_name="cursor",
+        element_description="small white square",
+        element_mutation="moved right",
+    )
+    session.action_history.append(
+        ActionHistoryEntry(
+            action=ActionSpec("ACTION1"),
+            controllable=True,
+            changed_pixel_count=1,
+            change_summary="cursor moved",
+            change_elements=(element,),
+        )
+    )
+    change_model = RecordingChangeModel()
+
+    steps.summarize_change_model(
+        session,
+        change_model=change_model,
+        debug=DebugBus.disabled(),
+    )
+
+    assert change_model.calls[-1]["previous_change_elements"] == (element,)
+
+    session.action_history.append(
+        ActionHistoryScoreAdvanceMarker(
+            previous_score=0,
+            new_score=1,
+            delta=1,
+        )
+    )
+    steps.summarize_change_model(
+        session,
+        change_model=change_model,
+        debug=DebugBus.disabled(),
+    )
+
+    assert change_model.calls[-1]["previous_change_elements"] == ()

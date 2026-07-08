@@ -17,10 +17,7 @@ from face_of_agi.models.providers.vllm import (
     chat_response_metadata,
     json_schema_response_format,
 )
-from face_of_agi.models.structured_output import (
-    DEFAULT_INVALID_OUTPUT_PREVIEW_CHARS,
-    clipped_invalid_output_preview,
-)
+from face_of_agi.models.structured_output import clipped_invalid_output_preview
 
 
 class VLLMHistorizerAdapter(AgentContextHistorizerAdapter):
@@ -132,14 +129,10 @@ class VLLMHistorizerProvider:
             [
                 f"Repair attempt {attempt}: the previous historizer output was invalid.",
                 "Validation error:\n" + validation_error,
-                "Invalid output preview:\n"
+                "Invalid output:\n"
                 + clipped_invalid_output_preview(
                     invalid_text,
-                    max_chars=getattr(
-                        self.config,
-                        "repair_invalid_output_preview_chars",
-                        DEFAULT_INVALID_OUTPUT_PREVIEW_CHARS,
-                    ),
+                    max_chars=self.config.repair_invalid_output_preview_chars,
                 ),
                 "Original historizer input:\n" + request.text,
                 _repair_output_instruction(),

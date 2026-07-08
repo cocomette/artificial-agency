@@ -5,7 +5,11 @@ from __future__ import annotations
 from io import StringIO
 
 from face_of_agi.contracts import ActionSpec
-from face_of_agi.debug.events import FrameTurnCompleted, ModelCallCompleted
+from face_of_agi.debug.events import (
+    FrameTurnCompleted,
+    ModelCallCompleted,
+    ModelCallEventRecorded,
+)
 from face_of_agi.debug.sinks.live_turn_monitor import LiveTurnMonitor
 
 
@@ -65,5 +69,44 @@ def test_live_turn_monitor_reports_model_call_averages() -> None:
     assert "avg_model_sec_agent=3.000" in line
     assert "avg_model_sec_change=8.000" in line
     assert "avg_model_sec_historizer=0.000" in line
+    assert "avg_model_sec_memory=0.000" in line
     assert "avg_controllable_turns_per_game=0.50" in line
     assert "total_completed_levels=3" in line
+
+
+def test_live_turn_monitor_reports_model_repair_attempts() -> None:
+    output = StringIO()
+    monitor = LiveTurnMonitor(selected_game_count=1, output=output)
+
+    monitor.emit(
+        ModelCallEventRecorded(
+            role="agent",
+            provider="vllm",
+            model="qwen",
+            event="repair_attempt",
+            status="started",
+            game_id="abc123",
+            turn_id=7,
+            metadata={
+                "attempt": 2,
+                "validation_error_type": "AgentOutputError",
+            },
+        )
+    )
+    monitor.emit(
+        ModelCallEventRecorded(
+            role="change",
+            provider="vllm",
+            model="qwen",
+            event="provider_end",
+            status="success",
+            game_id="abc123",
+            turn_id=7,
+        )
+    )
+
+    lines = output.getvalue().splitlines()
+    assert lines == [
+        "model_repair_attempt: role=agent game_id=abc123 turn=7 provider=vllm "
+        "model=qwen attempt=2 error_type=AgentOutputError"
+    ]

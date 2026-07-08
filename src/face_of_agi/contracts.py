@@ -17,6 +17,12 @@ MemoryDomain = Literal["state", "experimental"]
 ToolName = str
 ActionId: TypeAlias = GameAction | str
 FrameControlReason = Literal["animation_unroll", "real_environment_turn"]
+VisualCoordinateSpace = Literal["pixel", "normalized_1000"]
+VisualBBoxOrder = Literal["xyxy", "yxyx"]
+VisualAxisFrame = Literal["top_left_x_right_y_down"]
+CANONICAL_VISUAL_BBOX_ORDER: VisualBBoxOrder = "xyxy"
+CANONICAL_VISUAL_AXIS_FRAME: VisualAxisFrame = "top_left_x_right_y_down"
+
 NONE_ACTION_ID = "NONE"
 
 
@@ -31,6 +37,12 @@ class ActionSpec:
     action_id: ActionId
     data: dict[str, Any] | None = None
     target: str | None = None
+    target_value: int | None = None
+    target_bbox: tuple[int, int, int, int] | None = field(
+        default=None,
+        metadata={"memory": False},
+        repr=False,
+    )
 
     @classmethod
     def none(cls) -> "ActionSpec":
@@ -183,6 +195,15 @@ class ObservationRef:
 
 
 @dataclass(slots=True)
+class ChangeSummaryElement:
+    """One visual element tracked by the change-summary role."""
+
+    element_name: str
+    element_description: str
+    element_mutation: str = ""
+
+
+@dataclass(slots=True)
 class ActionHistoryEntry:
     """Persisted raw frame-turn action and compact outcome signal."""
 
@@ -190,7 +211,8 @@ class ActionHistoryEntry:
     controllable: bool
     changed_pixel_count: int
     change_summary: str
-    changed_cell_percent: float | None = None
+    change_elements: tuple[ChangeSummaryElement, ...] = ()
+    changed_pixel_percent: float | None = None
     completed_levels: int | None = None
     action_count: int | None = None
     skipped_intermediate_animation_frame_count: int = 0
@@ -358,6 +380,43 @@ class RunMetadataRecord:
 
 
 @dataclass(slots=True)
+class ModelCallEventRecord:
+    """One durable model-call lifecycle timing event."""
+
+    id: int
+    run_id: str
+    game_id: str
+    turn_id: int | None
+    role: str
+    provider: str
+    model: str | None
+    event: str
+    status: str
+    queue_wait_seconds: float | None
+    duration_seconds: float | None
+    timeout_seconds: float | None
+    metadata: dict[str, Any]
+    created_at: str
+
+
+@dataclass(slots=True)
+class EnvironmentStepEventRecord:
+    """One durable environment-step timing event."""
+
+    id: int
+    run_id: str
+    game_id: str
+    turn_id: int | None
+    step: int | None
+    action: dict[str, Any]
+    status: str
+    duration_seconds: float
+    remaining_actions: int | None
+    metadata: dict[str, Any]
+    created_at: str
+
+
+@dataclass(slots=True)
 class EExperimentRecord:
     """One experimental tool output stored in rolling memory E."""
 
@@ -395,7 +454,6 @@ class GameRunResult:
     step_count: int = 0
     completed_levels: int = 0
     last_state: GameState | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

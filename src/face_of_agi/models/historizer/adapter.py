@@ -10,9 +10,9 @@ from typing import Any
 from face_of_agi.models.historizer.config import HistorizerConfig
 from face_of_agi.models.historizer.contracts import (
     AGENT_CONTEXT_HISTORY_KEYS,
+    AGENT_CONTEXT_HISTORY_FIELD_MAX_CHARS,
     AgentContextHistoryInput,
     AgentContextHistorySummary,
-    DEFAULT_FIELD_EVOLUTION_MAX_CHARS,
     PromptHistorizerProvider,
     PromptHistorizerProviderResponse,
     PromptHistorizerRequest,
@@ -48,13 +48,13 @@ class AgentContextHistorizerAdapter:
     ) -> AgentContextHistorySummary:
         """Summarize how prior agent context fields evolved."""
 
-        field_evolution_max_chars = getattr(
+        field_max_chars = getattr(
             self.config,
-            "field_evolution_max_chars",
-            DEFAULT_FIELD_EVOLUTION_MAX_CHARS,
+            "field_max_chars",
+            AGENT_CONTEXT_HISTORY_FIELD_MAX_CHARS,
         )
         output_schema = agent_context_history_json_schema(
-            field_evolution_max_chars=field_evolution_max_chars,
+            field_max_chars=field_max_chars,
         )
         instructions = append_output_schema_to_instructions(
             load_historizer_instructions(self.config.instruction_path),
@@ -80,7 +80,7 @@ class AgentContextHistorizerAdapter:
             text_of=lambda item: item.text,
             validate=lambda text: parse_agent_context_history_output(
                 text,
-                field_evolution_max_chars=field_evolution_max_chars,
+                field_max_chars=field_max_chars,
             ),
             repair=provider_repair_callback(
                 self.provider,
@@ -110,7 +110,7 @@ def load_historizer_instructions(path: str | Path | None = None) -> str:
 def parse_agent_context_history_output(
     text: str,
     *,
-    field_evolution_max_chars: int | None = DEFAULT_FIELD_EVOLUTION_MAX_CHARS,
+    field_max_chars: int | None = AGENT_CONTEXT_HISTORY_FIELD_MAX_CHARS,
 ) -> AgentContextHistorySummary:
     """Parse the required JSON historizer output contract."""
 
@@ -152,19 +152,24 @@ def parse_agent_context_history_output(
             "historizer field_evolution values must be strings: "
             + ", ".join(sorted(invalid))
         )
-    if field_evolution_max_chars is not None:
-        max_chars = int(field_evolution_max_chars)
-        oversized = [
-            key
-            for key, value in field_evolution.items()
-            if len(value.strip()) > max_chars
-        ]
-        if oversized:
-            raise HistorizerOutputError(
-                "historizer field_evolution values are too long: "
-                + ", ".join(sorted(oversized))
-                + f" exceed the {max_chars} character cap"
-            )
+    oversized = [
+        key
+        for key, value in field_evolution.items()
+        if (
+            field_max_chars is not None
+            and isinstance(value, str)
+            and len(value) > field_max_chars
+        )
+    ]
+    if oversized:
+        details = ", ".join(
+            f"{key}={len(field_evolution[key])}"
+            for key in sorted(oversized)
+        )
+        raise HistorizerOutputError(
+            "historizer field_evolution values exceed the "
+            f"{field_max_chars} character cap: {details}"
+        )
     ordered = {key: field_evolution[key] for key in AGENT_CONTEXT_HISTORY_KEYS}
     return AgentContextHistorySummary(field_evolution=ordered)
 

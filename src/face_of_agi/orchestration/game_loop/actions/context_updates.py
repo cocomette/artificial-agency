@@ -19,6 +19,8 @@ from face_of_agi.models.historizer import (
     AgentContextHistoryInput,
     AgentContextHistorySummary,
 )
+from face_of_agi.models.memory import GameMemoryDocument
+from face_of_agi.models.providers.scheduler import model_call_context
 from face_of_agi.models.updater import (
     AGENT_GAME_CONTEXT_KEYS,
     AgentContextRevisionFeedback,
@@ -35,7 +37,13 @@ from face_of_agi.debug.events import (
 )
 from face_of_agi.orchestration.game_loop.helpers import (
     bounded_action_history,
+    model_input_crop_box_normalized,
     prompt_action_outcome,
+    repair_attempts_from_metadata,
+)
+from face_of_agi.orchestration.game_loop.fallbacks import (
+    is_historizer_model_failure,
+    is_updater_model_failure,
 )
 from face_of_agi.runtime import timing as runtime_timing
 
@@ -51,55 +59,7 @@ def apply_context_updates(
     prior_action_history: Sequence[ActionHistoryItem],
     agent_updater_action_history_window: int,
     agent_context_history: AgentContextHistorySummary,
-    action_suppression_zero_changed_pixel_turns: int,
-    updater_stagnation_warning_zero_changed_pixel_turns: int,
-    game_last_started_turns_ago: int | None,
-    score_last_advanced_turns_ago: int | None,
-    game_start_reason: str | None,
-    game_restart_count: int,
-    turn_id: int,
-) -> None:
-    """Apply updater P, preserving live context if updater work fails."""
-
-    previous_agent_context = contexts.agent
-    try:
-        _apply_context_updates(
-            update_input,
-            contexts=contexts,
-            updater_tasks=updater_tasks,
-            debug=debug,
-            state_memory=state_memory,
-            frame_context=frame_context,
-            prior_action_history=prior_action_history,
-            agent_updater_action_history_window=agent_updater_action_history_window,
-            agent_context_history=agent_context_history,
-            action_suppression_zero_changed_pixel_turns=(
-                action_suppression_zero_changed_pixel_turns
-            ),
-            updater_stagnation_warning_zero_changed_pixel_turns=(
-                updater_stagnation_warning_zero_changed_pixel_turns
-            ),
-            game_last_started_turns_ago=game_last_started_turns_ago,
-            score_last_advanced_turns_ago=score_last_advanced_turns_ago,
-            game_start_reason=game_start_reason,
-            game_restart_count=game_restart_count,
-            turn_id=turn_id,
-        )
-    except Exception:
-        contexts.agent = previous_agent_context
-
-
-def _apply_context_updates(
-    update_input: UpdaterFrameTransitionInput,
-    *,
-    contexts: ContextDocuments,
-    updater_tasks: UpdaterTaskRegistry,
-    debug: DebugBus,
-    state_memory: StateMemory | None,
-    frame_context: FrameTurnContext,
-    prior_action_history: Sequence[ActionHistoryItem],
-    agent_updater_action_history_window: int,
-    agent_context_history: AgentContextHistorySummary,
+    game_memory: GameMemoryDocument,
     action_suppression_zero_changed_pixel_turns: int,
     updater_stagnation_warning_zero_changed_pixel_turns: int,
     game_last_started_turns_ago: int | None,
@@ -139,6 +99,7 @@ def _apply_context_updates(
         updater_stagnation_warning_zero_changed_pixel_turns=(
             stagnation_warning_threshold
         ),
+        crop_box_normalized=model_input_crop_box_normalized(agent_updater),
     )
     fresh_game_context_after_reset = _is_fresh_game_over_reset_update(
         game_start_reason=game_start_reason,
@@ -165,6 +126,7 @@ def _apply_context_updates(
         allowed_actions=agent_prompt_actions.allowed_actions,
         glossary_actions=frame_context.control_mode.allowed_actions,
         action_history_window=agent_updater_action_history_window,
+        game_memory=game_memory,
         context_history=agent_context_history,
         action_history=agent_action_history,
         turn_metrics=AgentProgressFeedback(
@@ -182,16 +144,28 @@ def _apply_context_updates(
     started_at = perf_counter()
     with runtime_timing.span("updater.agent_game"):
         try:
-            contexts.agent = agent_updater.update_agent_game_context(
-                agent_update_input
-            )
-        except Exception:
-            contexts.agent = previous_agent_context
+            try:
+                with model_call_context(
+                    run_id=frame_context.run_id,
+                    game_id=frame_context.game_id,
+                    turn_id=turn_id,
+                    role="updater.agent",
+                    emit_event=debug.record_model_call_event,
+                ):
+                    contexts.agent = agent_updater.update_agent_game_context(
+                        agent_update_input
+                    )
+            except Exception as exc:
+                if not is_updater_model_failure(exc):
+                    raise
+                contexts.agent = previous_agent_context
         finally:
             debug.emit(
                 ModelCallCompleted(
                     role="updater.agent",
                     duration_seconds=perf_counter() - started_at,
+                    game_id=frame_context.game_id,
+                    turn_id=turn_id,
                 )
             )
             debug.emit(
@@ -201,39 +175,6 @@ def _apply_context_updates(
 
 
 def apply_general_context_updates(
-    *,
-    contexts: ContextDocuments,
-    updater_tasks: UpdaterTaskRegistry,
-    debug: DebugBus,
-    run_id: str,
-    game_id: str,
-    stop_reason: str,
-    step_count: int,
-    completed_levels: int,
-    last_state_name: str | None,
-    state_record_ids: tuple[int, ...],
-) -> None:
-    """Apply end-of-run context updates, preserving context on any failure."""
-
-    previous_agent_context = contexts.agent
-    try:
-        _apply_general_context_updates(
-            contexts=contexts,
-            updater_tasks=updater_tasks,
-            debug=debug,
-            run_id=run_id,
-            game_id=game_id,
-            stop_reason=stop_reason,
-            step_count=step_count,
-            completed_levels=completed_levels,
-            last_state_name=last_state_name,
-            state_record_ids=state_record_ids,
-        )
-    except Exception:
-        contexts.agent = previous_agent_context
-
-
-def _apply_general_context_updates(
     *,
     contexts: ContextDocuments,
     updater_tasks: UpdaterTaskRegistry,
@@ -268,16 +209,26 @@ def _apply_general_context_updates(
     started_at = perf_counter()
     with runtime_timing.span("updater.general_agent"):
         try:
-            contexts.agent = general_updater.update_general_knowledge(
-                agent_update_input
-            )
-        except Exception:
-            contexts.agent = agent_update_input.previous_context
+            try:
+                with model_call_context(
+                    run_id=run_id,
+                    game_id=game_id,
+                    turn_id=None,
+                    role="updater.general",
+                    emit_event=debug.record_model_call_event,
+                ):
+                    contexts.agent = general_updater.update_general_knowledge(
+                        agent_update_input
+                    )
+            except Exception as exc:
+                if not is_updater_model_failure(exc):
+                    raise
         finally:
             debug.emit(
                 ModelCallCompleted(
                     role="updater.general",
                     duration_seconds=perf_counter() - started_at,
+                    game_id=game_id,
                 )
             )
             debug.emit(
@@ -361,74 +312,73 @@ def summarize_agent_context_history(
 ) -> AgentContextHistorySummary:
     """Summarize prior agent context history for updater context."""
 
-    try:
-        if context_window < 0:
-            raise ValueError("agent context history window must be non-negative")
-        if context_window == 0 or state_memory is None:
-            return AgentContextHistorySummary.not_available()
-        previous_contexts = state_memory.read_agent_game_context_history(
-            game_id=frame_context.game_id,
-            run_id=frame_context.run_id,
-            before_state_id=frame_context.current_source_state_id,
-            limit=context_window,
+    if context_window < 0:
+        raise ValueError("agent context history window must be non-negative")
+    if context_window == 0 or state_memory is None:
+        return AgentContextHistorySummary.not_available()
+    previous_contexts = state_memory.read_agent_game_context_history(
+        game_id=frame_context.game_id,
+        run_id=frame_context.run_id,
+        before_state_id=frame_context.current_source_state_id,
+        limit=context_window,
+    )
+    if len(previous_contexts) < 2:
+        return AgentContextHistorySummary.not_available()
+    if historizer is None:
+        raise RuntimeError(
+            "agent context history is available but historizer model is not registered"
         )
-        if len(previous_contexts) < 2:
-            return AgentContextHistorySummary.not_available()
-        if historizer is None:
-            raise RuntimeError(
-                "agent context history is available but historizer model is not "
-                "registered"
-            )
-        history_input = AgentContextHistoryInput(
-            game_id=frame_context.game_id,
-            context_window=context_window,
-            contexts=previous_contexts,
-            metadata={
-                "run_id": frame_context.run_id,
-                "before_state_id": frame_context.current_source_state_id,
-            },
-        )
-        with runtime_timing.span(
-            "historizer.agent_context_history",
-            turn_id=turn_id,
-            context_count=len(previous_contexts),
-        ):
-            started_at = perf_counter()
+    history_input = AgentContextHistoryInput(
+        game_id=frame_context.game_id,
+        context_window=context_window,
+        contexts=previous_contexts,
+        metadata={
+            "run_id": frame_context.run_id,
+            "before_state_id": frame_context.current_source_state_id,
+        },
+    )
+    with runtime_timing.span(
+        "historizer.agent_context_history",
+        turn_id=turn_id,
+        context_count=len(previous_contexts),
+    ):
+        started_at = perf_counter()
+        summary: AgentContextHistorySummary | None = None
+        try:
             try:
-                summary = historizer.summarize_agent_context_history(history_input)
-            finally:
-                if debug is not None:
-                    debug.emit(
-                        ModelCallCompleted(
-                            role="historizer",
-                            duration_seconds=perf_counter() - started_at,
-                        )
+                with model_call_context(
+                    run_id=frame_context.run_id,
+                    game_id=frame_context.game_id,
+                    turn_id=turn_id,
+                    role="historizer",
+                    emit_event=(
+                        debug.record_model_call_event
+                        if debug is not None
+                        else None
+                    ),
+                ):
+                    summary = historizer.summarize_agent_context_history(history_input)
+            except Exception as exc:
+                if not is_historizer_model_failure(exc):
+                    raise
+                summary = AgentContextHistorySummary.not_available()
+                summary.metadata = {
+                    **summary.metadata,
+                    "fallback": "historizer_error",
+                    "fallback_error_type": type(exc).__name__,
+                    "fallback_error": str(exc),
+                }
+        finally:
+            if debug is not None:
+                debug.emit(
+                    ModelCallCompleted(
+                        role="historizer",
+                        duration_seconds=perf_counter() - started_at,
+                        repair_attempts=repair_attempts_from_metadata(summary),
+                        game_id=frame_context.game_id,
+                        turn_id=turn_id,
                     )
-        return summary
-    except Exception as exc:
-        return _agent_context_history_not_available(
-            fallback="historizer_error",
-            error=exc,
-        )
-
-
-def _agent_context_history_not_available(
-    *,
-    fallback: str,
-    error: Exception | None = None,
-) -> AgentContextHistorySummary:
-    summary = AgentContextHistorySummary.not_available()
-    summary.metadata = {
-        **summary.metadata,
-        "fallback": fallback,
-    }
-    if error is not None:
-        summary.metadata.update(
-            {
-                "fallback_error_type": type(error).__name__,
-                "fallback_error": str(error),
-            }
-        )
+                )
     return summary
 
 

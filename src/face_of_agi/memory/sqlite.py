@@ -10,7 +10,9 @@ from typing import Any
 from face_of_agi.contracts import (
     ContextDocuments,
     EExperimentRecord,
+    EnvironmentStepEventRecord,
     MStateRecord,
+    ModelCallEventRecord,
     ObservationRef,
     RunMetadataRecord,
     TurnMetrics,
@@ -70,6 +72,35 @@ _CURRENT_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
         "game_id",
         "run_id",
         "kind",
+        "metadata_json",
+        "created_at",
+    ),
+    "model_call_events": (
+        "id",
+        "run_id",
+        "game_id",
+        "turn_id",
+        "role",
+        "provider",
+        "model",
+        "event",
+        "status",
+        "queue_wait_seconds",
+        "duration_seconds",
+        "timeout_seconds",
+        "metadata_json",
+        "created_at",
+    ),
+    "environment_step_events": (
+        "id",
+        "run_id",
+        "game_id",
+        "turn_id",
+        "step",
+        "action_json",
+        "status",
+        "duration_seconds",
+        "remaining_actions",
         "metadata_json",
         "created_at",
     ),
@@ -154,6 +185,43 @@ class SQLiteDatabase:
                     metadata_json TEXT NOT NULL,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
+
+                CREATE TABLE IF NOT EXISTS model_call_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
+                    game_id TEXT NOT NULL,
+                    turn_id INTEGER,
+                    role TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    model TEXT,
+                    event TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    queue_wait_seconds REAL,
+                    duration_seconds REAL,
+                    timeout_seconds REAL,
+                    metadata_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_model_call_events_run_game_turn
+                    ON model_call_events(run_id, game_id, turn_id, role);
+
+                CREATE TABLE IF NOT EXISTS environment_step_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
+                    game_id TEXT NOT NULL,
+                    turn_id INTEGER,
+                    step INTEGER,
+                    action_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    duration_seconds REAL NOT NULL,
+                    remaining_actions INTEGER,
+                    metadata_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_environment_step_events_run_game_turn
+                    ON environment_step_events(run_id, game_id, turn_id);
                 """
             )
             self._require_current_schema(connection)
@@ -437,6 +505,35 @@ class SQLiteDatabase:
                 """,
                 (
                     _to_json(agent_context),
+                    state_id,
+                ),
+            )
+            if cursor.rowcount == 0:
+                raise RuntimeError(f"unknown M state row: {state_id}")
+            row = connection.execute(
+                "SELECT * FROM m_states WHERE id = ?",
+                (state_id,),
+            ).fetchone()
+
+        return self._row_to_m_state(row)
+
+    def update_m_state_metadata(
+        self,
+        *,
+        state_id: int,
+        metadata: dict[str, Any],
+    ) -> MStateRecord:
+        """Update metadata on an existing M state row."""
+
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE m_states
+                SET metadata_json = ?
+                WHERE id = ?
+                """,
+                (
+                    _to_json(metadata),
                     state_id,
                 ),
             )
@@ -755,6 +852,177 @@ class SQLiteDatabase:
 
         return [self._row_to_model_input_debug_record(row) for row in rows]
 
+    def write_model_call_event(
+        self,
+        *,
+        run_id: str,
+        game_id: str,
+        turn_id: int | None,
+        role: str,
+        provider: str,
+        model: str | None,
+        event: str,
+        status: str,
+        queue_wait_seconds: float | None = None,
+        duration_seconds: float | None = None,
+        timeout_seconds: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> ModelCallEventRecord:
+        """Write one model-call lifecycle event."""
+
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO model_call_events (
+                    run_id,
+                    game_id,
+                    turn_id,
+                    role,
+                    provider,
+                    model,
+                    event,
+                    status,
+                    queue_wait_seconds,
+                    duration_seconds,
+                    timeout_seconds,
+                    metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    game_id,
+                    turn_id,
+                    role,
+                    provider,
+                    model,
+                    event,
+                    status,
+                    queue_wait_seconds,
+                    duration_seconds,
+                    timeout_seconds,
+                    _to_json(metadata or {}),
+                ),
+            )
+            record_id = int(cursor.lastrowid)
+            row = connection.execute(
+                "SELECT * FROM model_call_events WHERE id = ?",
+                (record_id,),
+            ).fetchone()
+        return self._row_to_model_call_event(row)
+
+    def list_model_call_events(
+        self,
+        *,
+        run_id: str | None = None,
+        game_id: str | None = None,
+        turn_id: int | None = None,
+        role: str | None = None,
+    ) -> list[ModelCallEventRecord]:
+        """List model-call lifecycle events."""
+
+        clauses: list[str] = []
+        values: list[Any] = []
+        if run_id is not None:
+            clauses.append("run_id = ?")
+            values.append(run_id)
+        if game_id is not None:
+            clauses.append("game_id = ?")
+            values.append(game_id)
+        if turn_id is not None:
+            clauses.append("turn_id = ?")
+            values.append(turn_id)
+        if role is not None:
+            clauses.append("role = ?")
+            values.append(role)
+
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM model_call_events {where} ORDER BY id",
+                values,
+            ).fetchall()
+        return [self._row_to_model_call_event(row) for row in rows]
+
+    def write_environment_step_event(
+        self,
+        *,
+        run_id: str,
+        game_id: str,
+        turn_id: int | None,
+        step: int | None,
+        action: dict[str, Any],
+        status: str,
+        duration_seconds: float,
+        remaining_actions: int | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> EnvironmentStepEventRecord:
+        """Write one environment-step timing event."""
+
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO environment_step_events (
+                    run_id,
+                    game_id,
+                    turn_id,
+                    step,
+                    action_json,
+                    status,
+                    duration_seconds,
+                    remaining_actions,
+                    metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    game_id,
+                    turn_id,
+                    step,
+                    _to_json(action),
+                    status,
+                    duration_seconds,
+                    remaining_actions,
+                    _to_json(metadata or {}),
+                ),
+            )
+            record_id = int(cursor.lastrowid)
+            row = connection.execute(
+                "SELECT * FROM environment_step_events WHERE id = ?",
+                (record_id,),
+            ).fetchone()
+        return self._row_to_environment_step_event(row)
+
+    def list_environment_step_events(
+        self,
+        *,
+        run_id: str | None = None,
+        game_id: str | None = None,
+        turn_id: int | None = None,
+    ) -> list[EnvironmentStepEventRecord]:
+        """List environment-step timing events."""
+
+        clauses: list[str] = []
+        values: list[Any] = []
+        if run_id is not None:
+            clauses.append("run_id = ?")
+            values.append(run_id)
+        if game_id is not None:
+            clauses.append("game_id = ?")
+            values.append(game_id)
+        if turn_id is not None:
+            clauses.append("turn_id = ?")
+            values.append(turn_id)
+
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM environment_step_events {where} ORDER BY id",
+                values,
+            ).fetchall()
+        return [self._row_to_environment_step_event(row) for row in rows]
+
     def cleanup_e_experiments_keep_latest_turns_per_game(
         self,
         *,
@@ -822,6 +1090,8 @@ class SQLiteDatabase:
             connection.executescript(
                 """
                 DELETE FROM model_input_debug_records;
+                DELETE FROM model_call_events;
+                DELETE FROM environment_step_events;
                 DELETE FROM m_states;
                 DELETE FROM e_experiments;
                 DELETE FROM run_metadata;
@@ -872,6 +1142,42 @@ class SQLiteDatabase:
                 json.loads(str(row["output_description_json"]))
             ),
             tool_result=from_memory_jsonable(json.loads(str(row["tool_result_json"]))),
+            metadata=from_memory_jsonable(json.loads(str(row["metadata_json"]))),
+            created_at=str(row["created_at"]),
+        )
+
+    def _row_to_model_call_event(self, row: sqlite3.Row) -> ModelCallEventRecord:
+        return ModelCallEventRecord(
+            id=int(row["id"]),
+            run_id=str(row["run_id"]),
+            game_id=str(row["game_id"]),
+            turn_id=_optional_int(row["turn_id"]),
+            role=str(row["role"]),
+            provider=str(row["provider"]),
+            model=str(row["model"]) if row["model"] is not None else None,
+            event=str(row["event"]),
+            status=str(row["status"]),
+            queue_wait_seconds=_optional_float(row["queue_wait_seconds"]),
+            duration_seconds=_optional_float(row["duration_seconds"]),
+            timeout_seconds=_optional_float(row["timeout_seconds"]),
+            metadata=from_memory_jsonable(json.loads(str(row["metadata_json"]))),
+            created_at=str(row["created_at"]),
+        )
+
+    def _row_to_environment_step_event(
+        self,
+        row: sqlite3.Row,
+    ) -> EnvironmentStepEventRecord:
+        return EnvironmentStepEventRecord(
+            id=int(row["id"]),
+            run_id=str(row["run_id"]),
+            game_id=str(row["game_id"]),
+            turn_id=_optional_int(row["turn_id"]),
+            step=_optional_int(row["step"]),
+            action=from_memory_jsonable(json.loads(str(row["action_json"]))),
+            status=str(row["status"]),
+            duration_seconds=float(row["duration_seconds"]),
+            remaining_actions=_optional_int(row["remaining_actions"]),
             metadata=from_memory_jsonable(json.loads(str(row["metadata_json"]))),
             created_at=str(row["created_at"]),
         )
@@ -962,6 +1268,18 @@ def _from_nullable_json(value: Any) -> dict[str, Any] | None:
     if value is None:
         return None
     return from_memory_jsonable(json.loads(str(value)))
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(value)
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    return float(value)
 
 
 def _role_context_from_json(value: Any) -> RoleContext:

@@ -58,6 +58,8 @@ def main(argv: list[str] | None = None) -> None:
     )
     _print_parallel_result(result)
     if result.failures:
+        if not result.successes:
+            raise SystemExit(1)
         print(
             "kaggle completed with failed games after retries; "
             "leaving notebook exit status at 0"
@@ -294,8 +296,9 @@ def _run_kaggle_game(
         agent_config=environment_config.models.agent,
         change_config=environment_config.models.change,
         historizer_config=environment_config.models.historizer,
+        memory_config=environment_config.models.memory,
         shared_vlm_config=environment_config.models.shared_vlm,
-        observation_text_config=environment_config.models.observation_text,
+        scheduler_config=environment_config.models.scheduler,
         updater_config=environment_config.models.updater,
     )
     runtime = RuntimeLoop(

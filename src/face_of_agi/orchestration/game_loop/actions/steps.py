@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Callable
+from dataclasses import asdict
 from time import perf_counter
 from typing import Any
 
 from face_of_agi.contracts import (
+    ActionHistoryEntry,
+    ActionHistoryItem,
+    ActionHistoryResetMarker,
     ActionHistoryScoreAdvanceMarker,
     ContextDocuments,
     DecisionResult,
@@ -20,8 +24,14 @@ from face_of_agi.models.adapters import (
     AgentContextHistorizerModel,
     OrchestratorAgentModel,
 )
-from face_of_agi.models.change import ChangeSummaryModel, ChangeSummaryResult
+from face_of_agi.models.change import (
+    ChangeSummaryModel,
+    ChangeSummaryResult,
+    change_summary_elements_text,
+)
 from face_of_agi.models.historizer import AgentContextHistorySummary
+from face_of_agi.models.memory import GameMemoryInput, GameMemoryModel
+from face_of_agi.models.providers.scheduler import model_call_context
 from face_of_agi.models.orchestrator_agent import AgentToolRuntime
 from face_of_agi.models.updater import UpdaterTaskRegistry
 from face_of_agi.debug.bus import DebugBus
@@ -43,13 +53,14 @@ from face_of_agi.orchestration.game_loop.helpers import (
     bounded_agent_action_history,
     decide_frame_turn,
     frame_control_mode,
+    repair_attempts_from_metadata,
     unroll_observation,
     validate_decision,
 )
 from face_of_agi.orchestration.game_loop.fallbacks import (
     fallback_change_summary_result,
-    fallback_decision_result,
-    model_observation_text_config,
+    is_change_model_failure,
+    is_memory_model_failure,
 )
 from face_of_agi.orchestration.game_loop.persistence import (
     persist_turn,
@@ -87,6 +98,7 @@ def enter_frame_turn(
     contexts: ContextDocuments,
     state_memory: StateMemory | None,
     tool_runtime_factory: AgentToolRuntimeFactory | None,
+    frame_hash_crop_edges: tuple[int, int, int, int],
     debug: DebugBus,
 ) -> None:
     """Create the immutable current-frame snapshot and emit turn trace."""
@@ -100,21 +112,21 @@ def enter_frame_turn(
     )
     current_ref = session.current_ref_for(current_observation)
     turn_id = session.frame_turn_count + 1
-    source_state = None
-    if state_memory is not None:
-        try:
-            source_state = state_memory.prewrite_frame_turn_source(
-                run_id=session.config.run_id,
-                game_id=session.game_id,
-                turn_id=turn_id,
-                current_observation=current_observation,
-                frame_index=session.frame_index,
-                frame_count=frame_count,
-                control_mode=control_mode,
-                contexts=contexts,
-            )
-        except Exception:
-            source_state = None
+    source_state = (
+        state_memory.prewrite_frame_turn_source(
+            run_id=session.config.run_id,
+            game_id=session.game_id,
+            turn_id=turn_id,
+            current_observation=current_observation,
+            frame_index=session.frame_index,
+            frame_count=frame_count,
+            control_mode=control_mode,
+            contexts=contexts,
+            frame_hash_crop_edges=frame_hash_crop_edges,
+        )
+        if state_memory is not None
+        else None
+    )
 
     if session.first_observation is None:
         session.first_observation = current_observation
@@ -197,6 +209,7 @@ def decide(
         action_suppression_zero_changed_pixel_turns=(
             session.environment_config.action_suppression_zero_changed_pixel_turns
         ),
+        game_memory=session.game_memory,
     )
     session.decision = decision
     session.decision_duration_seconds = decision_duration_seconds
@@ -209,23 +222,7 @@ def decide(
 
     if current.control_mode is None:
         raise RuntimeError("current frame snapshot is missing control mode")
-    try:
-        validate_decision(decision.final_action, control_mode=current.control_mode)
-    except Exception as exc:
-        decision = fallback_decision_result(
-            frame_context=frame_context,
-            turn_id=current.turn_id,
-            action_space=current.control_mode.allowed_actions,
-            error=exc,
-            observation_text_config=model_observation_text_config(agent),
-        )
-        session.decision = decision
-        session.trace_cost_seconds = effective_trace_cost_seconds(
-            decision=decision,
-            wall_clock_seconds=decision_duration_seconds,
-        )
-        session.last_decision = decision
-        validate_decision(decision.final_action, control_mode=current.control_mode)
+    validate_decision(decision.final_action, control_mode=current.control_mode)
     write_frame_trace(
         debug=debug,
         frame_turn=session.frame_turn_count,
@@ -246,14 +243,43 @@ def resolve_next_snapshot(session: GameLoopSession, *, debug: DebugBus) -> None:
     if current.control_mode.controllable:
         previous_evidence_observation = snapshot_observation(current.observation)
         session.real_step_count += 1
+        step_started_at = perf_counter()
         with runtime_timing.span(
             "game_loop.environment_step",
             turn_id=current.turn_id,
             step=current.observation.step,
         ):
-            next_observation = session.environment.step(decision.final_action)
+            try:
+                next_observation = session.environment.step(decision.final_action)
+            except Exception as exc:
+                debug.record_environment_step_event(
+                    run_id=session.config.run_id,
+                    game_id=session.game_id,
+                    turn_id=current.turn_id,
+                    step=current.observation.step,
+                    action=asdict(decision.final_action),
+                    status="error",
+                    duration_seconds=perf_counter() - step_started_at,
+                    remaining_actions=session.remaining_actions,
+                    metadata={
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    },
+                )
+                raise
         session.remaining_actions -= 1
         session.next_environment_observation = next_observation
+        debug.record_environment_step_event(
+            run_id=session.config.run_id,
+            game_id=session.game_id,
+            turn_id=current.turn_id,
+            step=current.observation.step,
+            action=asdict(decision.final_action),
+            status="success",
+            duration_seconds=perf_counter() - step_started_at,
+            remaining_actions=session.remaining_actions,
+            metadata={"next_observation_id": next_observation.id},
+        )
         debug.emit(
             EnvironmentStepRecorded(
                 action=decision.final_action,
@@ -374,31 +400,60 @@ def summarize_change_model(
     frame_context = current.to_frame_context()
     frame_observations = transition_frame_observations(session)
     started_at = perf_counter()
+    result: ChangeSummaryResult | None = None
     with runtime_timing.span(
         "game_loop.change_summary",
         turn_id=current.turn_id,
         step=current.observation.step,
     ):
         try:
-            return change_model.summarize(
-                frame_observations[0],
-                frame_observations[-1],
-                decision.final_action,
-                glossary_actions=frame_context.control_mode.allowed_actions,
-                frame_observations=frame_observations,
-            )
-        except Exception as exc:
-            return fallback_change_summary_result(
-                observations=frame_observations,
-                error=exc,
-                observation_text_config=model_observation_text_config(change_model),
-            )
+            try:
+                with model_call_context(
+                    run_id=frame_context.run_id,
+                    game_id=frame_context.game_id,
+                    turn_id=current.turn_id,
+                    role="change",
+                    emit_event=(
+                        debug.record_model_call_event
+                        if debug is not None
+                        else None
+                    ),
+                ):
+                    result = change_model.summarize(
+                        frame_observations[0],
+                        frame_observations[-1],
+                        decision.final_action,
+                        glossary_actions=frame_context.control_mode.allowed_actions,
+                        frame_observations=frame_observations,
+                        previous_change_elements=_previous_change_elements(session),
+                    )
+                    return result
+            except Exception as exc:
+                if not is_change_model_failure(exc):
+                    raise
+                config = getattr(change_model, "config", None)
+                result = fallback_change_summary_result(
+                    observations=frame_observations,
+                    error=exc,
+                    frame_scale=getattr(config, "frame_scale", 4),
+                    size=getattr(config, "input_image_size", None),
+                    resample=getattr(config, "input_image_resample", "nearest"),
+                    crop_box_normalized=getattr(
+                        config,
+                        "input_image_crop_box_normalized",
+                        None,
+                    ),
+                )
+                return result
         finally:
             if debug is not None:
                 debug.emit(
                     ModelCallCompleted(
                         role="change",
                         duration_seconds=perf_counter() - started_at,
+                        repair_attempts=repair_attempts_from_metadata(result),
+                        game_id=frame_context.game_id,
+                        turn_id=current.turn_id,
                     )
                 )
 
@@ -433,11 +488,29 @@ def attach_change_summary(
         final_action=decision.final_action,
         next_observation=next_snapshot.observation,
         changed_pixel_count=result.changed_pixel_count,
-        change_summary=result.summary,
-        changed_cell_percent=result.changed_cell_percent,
+        change_summary=_change_summary_text_from_result(result),
+        change_elements=result.elements,
+        changed_pixel_percent=result.changed_pixel_percent,
         completed_levels=_completed_levels_after_transition(session),
         action_count=_current_level_action_count(session),
     )
+
+
+def _change_summary_text_from_result(result: ChangeSummaryResult) -> str:
+    if result.elements:
+        return change_summary_elements_text(result.elements)
+    if result.change_detected:
+        return "change summary unavailable"
+    return "no changes"
+
+
+def _previous_change_elements(session: GameLoopSession) -> tuple[Any, ...]:
+    for item in reversed(session.action_history):
+        if isinstance(item, (ActionHistoryResetMarker, ActionHistoryScoreAdvanceMarker)):
+            return ()
+        if isinstance(item, ActionHistoryEntry) and item.change_elements:
+            return item.change_elements
+    return ()
 
 
 def _completed_levels_after_transition(session: GameLoopSession) -> int:
@@ -485,6 +558,7 @@ def run_updaters(
                 environment_config.agent_updater_action_history_window
             ),
             agent_context_history=agent_context_history,
+            game_memory=session.game_memory,
             action_suppression_zero_changed_pixel_turns=(
                 environment_config.action_suppression_zero_changed_pixel_turns
             ),
@@ -523,6 +597,94 @@ def summarize_agent_context_history(
         context_window=session.environment_config.agent_context_history_window,
         turn_id=current.turn_id,
         debug=debug,
+    )
+
+
+def summarize_game_memory(
+    session: GameLoopSession,
+    *,
+    memory_model: GameMemoryModel,
+    debug: DebugBus,
+) -> None:
+    """Run the game-memory model for the latest real-action transition."""
+
+    current = require_current(session)
+    if current.control_mode is None:
+        raise RuntimeError("current frame snapshot is missing control mode")
+    if not current.control_mode.controllable:
+        return
+    if session.first_observation is None:
+        raise RuntimeError("game memory requires the first observation")
+    next_snapshot = require_next(session)
+    action_history = game_memory_action_history(session)
+    frame_context = current.to_frame_context()
+    started_at = perf_counter()
+    repair_attempts = 0
+    with runtime_timing.span(
+        "game_loop.game_memory",
+        turn_id=current.turn_id,
+        step=current.observation.step,
+    ):
+        try:
+            try:
+                with model_call_context(
+                    run_id=frame_context.run_id,
+                    game_id=frame_context.game_id,
+                    turn_id=current.turn_id,
+                    role="memory",
+                    emit_event=debug.record_model_call_event,
+                ):
+                    session.game_memory = memory_model.summarize_game_memory(
+                        GameMemoryInput(
+                            action_history=action_history,
+                            first_observation=session.first_observation,
+                            current_observation=next_snapshot.observation,
+                            metadata={
+                                "action_history_count": len(action_history),
+                            },
+                        )
+                    )
+                session.game_memory_updated_this_turn = True
+                repair_attempts = repair_attempts_from_metadata(session.game_memory)
+            except Exception as exc:
+                if not is_memory_model_failure(exc):
+                    raise
+                session.game_memory.metadata = {
+                    **session.game_memory.metadata,
+                    "fallback": "game_memory_error",
+                    "fallback_error_type": type(exc).__name__,
+                    "fallback_error": str(exc),
+                }
+                session.game_memory_updated_this_turn = False
+        finally:
+            debug.emit(
+                ModelCallCompleted(
+                    role="memory",
+                    duration_seconds=perf_counter() - started_at,
+                    repair_attempts=repair_attempts,
+                    game_id=frame_context.game_id,
+                    turn_id=current.turn_id,
+                )
+            )
+            debug.capture_model_inputs(frame_context, current.turn_id, memory_model)
+
+
+def game_memory_action_history(
+    session: GameLoopSession,
+) -> tuple[ActionHistoryItem, ...]:
+    """Return all same-run action history plus the pending latest transition."""
+
+    update_input = require_update_input(session)
+    if update_input.action_history_entry is None:
+        raise RuntimeError("game memory requires the latest action history entry")
+    return (
+        *session.action_history,
+        update_input.action_history_entry,
+        *(
+            (update_input.action_history_score_advance_marker,)
+            if update_input.action_history_score_advance_marker is not None
+            else ()
+        ),
     )
 
 
@@ -592,6 +754,7 @@ def clear_turn_outputs(session: GameLoopSession) -> None:
     session.next_environment_observation = None
     session.next_frame_buffer = ()
     session.transition_frame_observations = ()
+    session.game_memory_updated_this_turn = False
 
 
 def build_score_advance_marker(

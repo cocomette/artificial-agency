@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from face_of_agi.contracts import (
@@ -21,6 +21,7 @@ from face_of_agi.contracts import (
 )
 from face_of_agi.models.orchestrator_agent.config import OrchestratorAgentConfig
 from face_of_agi.models.orchestrator_agent.contracts import AgentToolRuntime
+from face_of_agi.models.memory import GameMemoryDocument
 from face_of_agi.models.orchestrator_agent.tooling import (
     AgentOutputError,
     build_decision_result,
@@ -29,6 +30,8 @@ from face_of_agi.models.orchestrator_agent.tooling import (
     parse_action,
     parse_final_action,
 )
+from face_of_agi.models.providers.scheduler import current_model_call_context
+from face_of_agi.models.providers.vision import resolve_model_vision_profile
 
 
 @dataclass(slots=True)
@@ -42,6 +45,9 @@ class AgentTurnRequest:
     recent_action_history: tuple[ActionHistoryItem, ...] = ()
     recent_action_history_available: bool = True
     action_outcome_evidence: ActionOutcomeEvidence | None = None
+    game_memory: GameMemoryDocument = field(
+        default_factory=GameMemoryDocument.not_available
+    )
 
 
 @dataclass(slots=True)
@@ -125,6 +131,11 @@ class OrchestratorAgentAdapter:
         self.config = config or OrchestratorAgentConfig()
         self.provider = provider
         self.last_provider_requests: list[Any] = []
+        self.vision_profile = resolve_model_vision_profile(
+            backend=self.provider.backend,
+            model=self.provider.model,
+        )
+        self.coordinate_space = self.vision_profile.coordinate_space
 
     def decide(
         self,
@@ -138,6 +149,7 @@ class OrchestratorAgentAdapter:
         first_observation_ref: ObservationRef | None = None,
         recent_action_history_available: bool = True,
         action_outcome_evidence: ActionOutcomeEvidence | None = None,
+        game_memory: GameMemoryDocument | None = None,
     ) -> DecisionResult:
         """Run the provider-neutral X loop until one final action is submitted."""
 
@@ -153,6 +165,7 @@ class OrchestratorAgentAdapter:
             recent_action_history=recent_action_history,
             recent_action_history_available=recent_action_history_available,
             action_outcome_evidence=action_outcome_evidence,
+            game_memory=game_memory or GameMemoryDocument.not_available(),
         )
         self.provider.begin(request)
 
@@ -225,10 +238,17 @@ class OrchestratorAgentAdapter:
                     final_action = parse_final_action(
                         response.final_output,
                         action_space,
-                        observation_text_config=getattr(
+                        coordinate_space=self.coordinate_space,
+                        crop_box_normalized=getattr(
                             self.config,
-                            "observation_text",
+                            "input_image_crop_box_normalized",
                             None,
+                        ),
+                        current_observation=current_observation,
+                        action6_targeting_mode=getattr(
+                            self.config,
+                            "action6_targeting_mode",
+                            "coordinates",
                         ),
                     )
                 except Exception as exc:
@@ -253,6 +273,10 @@ class OrchestratorAgentAdapter:
                         f"attempt(s): {exc}"
                     ) from exc
                 current_repair_count += 1
+                self._emit_repair_attempt(
+                    validation_error=str(exc),
+                    attempt=current_repair_count,
+                )
                 self.provider.append_repair(
                     validation_error=str(exc),
                     action_space=action_space,
@@ -286,13 +310,13 @@ class OrchestratorAgentAdapter:
     ) -> int:
         if tool_runtime is None:
             raise AgentOutputError("model requested tools but no tool runtime exists")
-        if not tool_specs:
-            raise AgentOutputError("model requested tools but no tools are available")
         if tool_call_count + len(provider_calls) > self.config.max_tool_calls:
             raise AgentOutputError(
                 "model exceeded Agent X tool-call budget "
                 f"({self.config.max_tool_calls})"
             )
+        if not tool_specs:
+            raise AgentOutputError("model requested tools but no tools are available")
 
         available_names = {spec.name for spec in tool_specs}
         for provider_call in provider_calls:
@@ -341,9 +365,10 @@ class OrchestratorAgentAdapter:
             action = parse_action(
                 args.get("action"),
                 action_space,
-                observation_text_config=getattr(
+                coordinate_space=self.coordinate_space,
+                crop_box_normalized=getattr(
                     self.config,
-                    "observation_text",
+                    "input_image_crop_box_normalized",
                     None,
                 ),
             )
@@ -391,3 +416,23 @@ class OrchestratorAgentAdapter:
             self.last_provider_requests.append(deepcopy(request))
         except Exception:
             self.last_provider_requests.append(request)
+
+    def _emit_repair_attempt(self, *, validation_error: str, attempt: int) -> None:
+        context = current_model_call_context()
+        if context is None or context.emit_event is None:
+            return
+        context.emit_event(
+            run_id=context.run_id,
+            game_id=context.game_id,
+            turn_id=context.turn_id,
+            role=context.role,
+            provider=self.provider.backend,
+            model=self.provider.model,
+            event="repair_attempt",
+            status="started",
+            metadata={
+                "attempt": attempt,
+                "validation_error_type": validation_error.split(":", 1)[0],
+                "validation_error_preview": validation_error[:500],
+            },
+        )

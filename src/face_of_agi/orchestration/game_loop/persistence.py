@@ -34,19 +34,18 @@ def persist_turn(
         turn_id=current.turn_id,
         step=current.observation.step,
     ):
-        try:
-            persist_turn_shell(
-                frame_context=current.to_frame_context(),
-                turn_id=current.turn_id,
-                decision=decision,
-                update_input=update_input,
-                state_record_ids=session.state_record_ids,
-                state_memory=state_memory,
-                contexts=contexts,
-                debug=debug,
-            )
-        except Exception:
-            pass
+        persist_turn_shell(
+            frame_context=current.to_frame_context(),
+            turn_id=current.turn_id,
+            decision=decision,
+            update_input=update_input,
+            state_record_ids=session.state_record_ids,
+            state_memory=state_memory,
+            contexts=contexts,
+            game_memory=session.game_memory,
+            game_memory_updated_this_turn=session.game_memory_updated_this_turn,
+            debug=debug,
+        )
 
 
 def persist_turn_shell(
@@ -58,6 +57,8 @@ def persist_turn_shell(
     state_record_ids: list[int],
     state_memory: StateMemory | None,
     contexts: ContextDocuments,
+    game_memory: Any,
+    game_memory_updated_this_turn: bool,
     debug: DebugBus,
 ) -> None:
     """Complete the prewritten M row for one frame turn."""
@@ -75,6 +76,12 @@ def persist_turn_shell(
         contexts=contexts,
         agent_trace=decision.trace,
         turn_metrics=update_input.turn_metrics,
+        game_memory=game_memory,
+        game_memory_updated_this_turn=game_memory_updated_this_turn,
+        action_history_entry=update_input.action_history_entry,
+        action_history_score_advance_marker=(
+            update_input.action_history_score_advance_marker
+        ),
     )
     state_record_ids.append(state.id)
     debug.emit(MStatePersisted(record_id=state.id, turn_id=turn_id))

@@ -106,6 +106,31 @@ class UpdaterProviderOutputCaptured:
 class ModelCallCompleted:
     role: str
     duration_seconds: float
+    repair_attempts: int = 0
+    game_id: str | None = None
+    turn_id: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ModelCallEventRecorded:
+    role: str
+    provider: str
+    model: str | None
+    event: str
+    status: str
+    game_id: str | None = None
+    turn_id: int | None = None
+    duration_seconds: float | None = None
+    queue_wait_seconds: float | None = None
+    timeout_seconds: float | None = None
+    metadata: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class EnvironmentStepEventRecorded:
+    status: str
+    duration_seconds: float
+    remaining_actions: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +173,8 @@ DebugEvent: TypeAlias = (
     | UpdaterInputCaptured
     | UpdaterProviderOutputCaptured
     | ModelCallCompleted
+    | ModelCallEventRecorded
+    | EnvironmentStepEventRecorded
     | MStatePersisted
     | FrameTurnCompleted
     | RunStopped

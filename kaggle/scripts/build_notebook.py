@@ -80,7 +80,7 @@ VLLM_TORCH_DEPENDENCY_PACKAGES = (
     "ninja",
     "numpy>=1.23.5",
     "nvidia-cudnn-frontend>=1.13.0",
-    "nvidia-cutlass-dsl==4.6.0.dev0",
+    "nvidia-cutlass-dsl>=4.4.2",
     "nvidia-ml-py",
     "packaging>=24.2",
     "psutil",
@@ -173,7 +173,7 @@ def _install_cell() -> dict:
                 kaggle_competition_input({COMPETITION_SLUG!r}) / "arc_agi_3_wheels"
             )
 
-            def pip_install(packages, *, no_deps=False):
+            def pip_install(packages, *, no_deps=False, pre=False):
                 command = [
                     sys.executable,
                     "-m",
@@ -187,6 +187,8 @@ def _install_cell() -> dict:
                 ]
                 if no_deps:
                     command.append("--no-deps")
+                if pre:
+                    command.append("--pre")
                 subprocess.check_call(command + list(packages))
 
             def wheel_for(distribution, version=None):
@@ -239,8 +241,8 @@ def _install_cell() -> dict:
                 return requirements
 
             pip_install({RUNTIME_PACKAGES!r})
-            pip_install({VLLM_TORCH_DEPENDENCY_PACKAGES!r})
-            pip_install(vllm_dependency_requirements())
+            pip_install({VLLM_TORCH_DEPENDENCY_PACKAGES!r}, pre=True)
+            pip_install(vllm_dependency_requirements(), pre=True)
             pip_install({VLLM_STACK_PACKAGES!r}, no_deps=True)
             """
         ).replace("__KAGGLE_INPUT_HELPERS__", _kaggle_input_helpers())

@@ -36,12 +36,26 @@ class ModelRoleConfig:
 class ModelRuntimeConfig:
     """Runtime model backend config for agent and tool roles."""
 
-    observation_text: dict[str, Any] = field(default_factory=dict)
     shared_vlm: ModelRoleConfig = field(default_factory=ModelRoleConfig)
+    scheduler: "ModelSchedulerConfig" = field(
+        default_factory=lambda: ModelSchedulerConfig()
+    )
     agent: ModelRoleConfig = field(default_factory=ModelRoleConfig)
     change: ModelRoleConfig = field(default_factory=ModelRoleConfig)
     historizer: ModelRoleConfig = field(default_factory=ModelRoleConfig)
+    memory: ModelRoleConfig = field(default_factory=ModelRoleConfig)
     updater: "UpdaterRuntimeConfig | None" = None
+
+
+@dataclass(slots=True)
+class ModelSchedulerConfig:
+    """Shared model-call scheduler controls."""
+
+    enabled: bool = False
+    max_concurrent_calls: int = 8
+    max_concurrent_calls_per_game: int = 1
+    queue_policy: str = "fifo"
+    queue_timeout_seconds: float | None = None
 
 
 @dataclass(slots=True)
@@ -198,11 +212,12 @@ def _load_model_runtime_config(value: Any) -> ModelRuntimeConfig:
 
     _reject_removed_model_keys(value)
     return ModelRuntimeConfig(
-        observation_text=_load_observation_text_config(value.get("observation_text")),
         shared_vlm=_load_model_role_config(value.get("shared_vlm")),
+        scheduler=_load_model_scheduler_config(value.get("scheduler")),
         agent=_load_model_role_config(value.get("agent")),
         change=_load_required_model_role_config(value, "change"),
         historizer=_load_model_role_config(value.get("historizer")),
+        memory=_load_required_model_role_config(value, "memory"),
         updater=_load_updater_runtime_config(value.get("updater")),
     )
 
@@ -275,14 +290,32 @@ def _reject_removed_updater_keys(value: dict[str, Any]) -> None:
         raise ValueError(f"{names} config has been removed")
 
 
-def _load_observation_text_config(value: Any) -> dict[str, Any]:
-    """Load shared text observation serializer options."""
+def _load_model_scheduler_config(value: Any) -> ModelSchedulerConfig:
+    """Load optional shared model-call scheduler config."""
 
     if value is None:
-        return {}
+        return ModelSchedulerConfig()
     if not isinstance(value, dict):
-        raise ValueError("models.observation_text config must be a mapping")
-    return dict(value)
+        raise ValueError("models.scheduler config must be a mapping")
+    queue_policy = str(value.get("queue_policy", "fifo")).strip()
+    if queue_policy != "fifo":
+        raise ValueError("models.scheduler.queue_policy currently supports only 'fifo'")
+    return ModelSchedulerConfig(
+        enabled=_optional_bool(value.get("enabled"), default=False),
+        max_concurrent_calls=_required_positive_int(
+            value.get("max_concurrent_calls", 8),
+            key="models.scheduler.max_concurrent_calls",
+        ),
+        max_concurrent_calls_per_game=_required_positive_int(
+            value.get("max_concurrent_calls_per_game", 1),
+            key="models.scheduler.max_concurrent_calls_per_game",
+        ),
+        queue_policy=queue_policy,
+        queue_timeout_seconds=_optional_positive_float(
+            value.get("queue_timeout_seconds"),
+            key="models.scheduler.queue_timeout_seconds",
+        ),
+    )
 
 
 def _load_model_role_config(value: Any) -> ModelRoleConfig:
@@ -462,6 +495,26 @@ def _optional_positive_int(value: Any, *, key: str) -> int | None:
     parsed = int(value)
     if parsed < 1:
         raise ValueError(f"{key} must be at least 1")
+    return parsed
+
+
+def _required_positive_int(value: Any, *, key: str) -> int:
+    """Normalize one required positive integer config value."""
+
+    parsed = int(value)
+    if parsed < 1:
+        raise ValueError(f"{key} must be at least 1")
+    return parsed
+
+
+def _optional_positive_float(value: Any, *, key: str) -> float | None:
+    """Normalize one optional positive float config value."""
+
+    if value is None:
+        return None
+    parsed = float(value)
+    if parsed <= 0:
+        raise ValueError(f"{key} must be positive or null")
     return parsed
 
 

@@ -40,12 +40,14 @@ from face_of_agi.debug.events import (
     AgentFrameworkInputCaptured,
     AgentProviderRequestsCaptured,
     DebugEvent,
+    EnvironmentStepEventRecorded,
     EnvironmentStepRecorded,
     FrameDecisionRecorded,
     FrameTurnCompleted,
     FrameTurnStarted,
     MStatePersisted,
     ModelCallCompleted,
+    ModelCallEventRecorded,
     RunStarted,
     RunStopped,
     ToolModelInputCaptured,
@@ -213,7 +215,14 @@ class DebugTrace:
             self.updater_provider_output(role=event.role, adapter=event.adapter)
         elif isinstance(event, MStatePersisted):
             self.persisted_state(record_id=event.record_id, turn_id=event.turn_id)
-        elif isinstance(event, ModelCallCompleted):
+        elif isinstance(
+            event,
+            (
+                ModelCallCompleted,
+                ModelCallEventRecorded,
+                EnvironmentStepEventRecorded,
+            ),
+        ):
             return
         elif isinstance(event, FrameTurnCompleted):
             return
@@ -642,13 +651,21 @@ def _action_history_payload(item: ActionHistoryItem) -> dict[str, Any]:
         "action": _action_payload(item.action),
         "controllable": item.controllable,
         "changed_pixel_count": item.changed_pixel_count,
-        "changed_cell_percent": item.changed_cell_percent,
+        "changed_pixel_percent": item.changed_pixel_percent,
         "completed_levels": item.completed_levels,
         "action_count": item.action_count,
         "skipped_intermediate_animation_frame_count": (
             item.skipped_intermediate_animation_frame_count
         ),
         "change_summary": item.change_summary,
+        "change_elements": [
+            {
+                "element_name": element.element_name,
+                "element_description": element.element_description,
+                "element_mutation": element.element_mutation,
+            }
+            for element in item.change_elements
+        ],
     }
 
 
@@ -668,12 +685,10 @@ def _tool_result_summary(result: ToolResult | None) -> dict[str, Any] | None:
 
 
 def _format_action(action: ActionSpec) -> str:
-    suffix = ""
-    if action.target is not None and action.target.strip():
-        suffix = f" target={action.target.strip()!r}"
     if action.data:
-        return f"{action.name} {action.data}{suffix}"
-    return action.name + suffix
+        target = f" target={action.target!r}" if action.target else ""
+        return f"{action.name} {action.data}{target}"
+    return action.name
 
 
 def _display_scalar(value: Any) -> str:

@@ -83,6 +83,7 @@ class Orchestrator:
                 agent_context_historizer=(
                     self.models.agent_context_historizer_model
                 ),
+                game_memory_model=self.models.require_game_memory_model(),
                 updater_tasks=self.models.require_updater_tasks(),
                 tool_runtime_factory=self._build_agent_tool_runtime,
                 debug=active_debug,

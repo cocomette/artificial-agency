@@ -1,3 +1,3 @@
-"""Compatibility wrapper for the renamed dashboard workshop helpers."""
+"""Compatibility exports for the renamed dashboard workshop helpers."""
 
-from debug.dashboard.workshop import *  # noqa: F401,F403
+from debug.dashboard.workshop import *  # noqa: F403

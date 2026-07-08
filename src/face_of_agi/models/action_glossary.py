@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, Literal
+from typing import Literal
 
 from face_of_agi.contracts import ActionSpec
-from face_of_agi.models.action_coordinates import (
-    action6_coordinate_range_phrase,
-)
 
 ActionGlossaryMode = Literal[
     "agent_decision",
@@ -32,24 +29,21 @@ _BASE_ACTION_DESCRIPTIONS = {
 
 _ACTION6_DESCRIPTIONS = {
     "agent_decision": (
-        "coordinate action. For a new decision, output integer `x` and `y` "
-        "from the visible serialized crop, inclusive range {range} on each "
-        "axis. These are original ARC grid coordinates with `x` increasing "
-        "right and `y` increasing down. Also output a non-empty `target` "
-        "string naming the visible object, cell, or region those coordinates "
-        "target."
+        "coordinate action. For a new decision, output `x` and `y` in "
+        "normalized visual coordinates from 0 to 1000, with `(0,0)` at the "
+        "top-left, `x` increasing right, and `y` increasing down. Also output "
+        "a concise `target` string naming the visible object or area."
     ),
     "agent_update": (
         "coordinate action. Model-facing action-history `ACTION6` data is "
-        "rendered as ARC 64x64 grid coordinates. When writing future policy "
-        "for the agent, use visible cropped coordinates {range} on each axis "
-        "or visible cropped regions, and describe the intended target."
+        "rendered as the target string selected for that coordinate. When "
+        "writing future policy for the agent, use normalized visual 0..1000 "
+        "coordinates or visual regions."
     ),
     "committed_action": (
         "coordinate action mapped to the game grid. Submitted and historical "
-        "`ACTION6` data uses original ARC grid coordinates. New model-facing "
-        "ACTION6 decisions should choose visible cropped coordinates {range} "
-        "on each axis and include a target description."
+        "`ACTION6` data uses ARC 64x64 grid coordinates, with each axis as an "
+        "integer from 0 to 63."
     ),
 }
 
@@ -58,23 +52,20 @@ def action_glossary_text(
     actions: Sequence[ActionSpec],
     *,
     mode: ActionGlossaryMode,
-    observation_text_config: Any = None,
 ) -> str:
     """Render a Markdown action glossary for exactly the supplied actions."""
 
     names = action_glossary_names(actions)
-    lines = ["## Action glossary", ""]
-    lines.extend(
+    lines = [
+        "## Action glossary",
+        "",
         (
-            f"- `{name}`: "
-            + action_description(
-                name,
-                mode=mode,
-                observation_text_config=observation_text_config,
-            )
-        )
-        for name in names
-    )
+            "This glossary is a helper for interpreting playable actions; "
+            "observed facts from frames and transition history are authoritative."
+        ),
+        "",
+    ]
+    lines.extend(f"- `{name}`: {action_description(name, mode=mode)}" for name in names)
     return "\n".join(lines)
 
 
@@ -83,15 +74,10 @@ def append_action_glossary(
     actions: Sequence[ActionSpec],
     *,
     mode: ActionGlossaryMode,
-    observation_text_config: Any = None,
 ) -> str:
     """Append a dynamic action glossary to instruction text."""
 
-    return instructions.strip() + "\n\n" + action_glossary_text(
-        actions,
-        mode=mode,
-        observation_text_config=observation_text_config,
-    )
+    return instructions.strip() + "\n\n" + action_glossary_text(actions, mode=mode)
 
 
 def action_glossary_names(actions: Sequence[ActionSpec]) -> tuple[str, ...]:
@@ -110,18 +96,11 @@ def action_glossary_names(actions: Sequence[ActionSpec]) -> tuple[str, ...]:
     return tuple(names)
 
 
-def action_description(
-    name: str,
-    *,
-    mode: ActionGlossaryMode,
-    observation_text_config: Any = None,
-) -> str:
+def action_description(name: str, *, mode: ActionGlossaryMode) -> str:
     """Return the prompt-facing description for one known action name."""
 
     if name == "ACTION6":
-        return _ACTION6_DESCRIPTIONS[mode].format(
-            range=action6_coordinate_range_phrase(observation_text_config)
-        )
+        return _ACTION6_DESCRIPTIONS[mode]
     try:
         return _BASE_ACTION_DESCRIPTIONS[name]
     except KeyError as exc:

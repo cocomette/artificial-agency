@@ -6,6 +6,7 @@ import argparse
 from dataclasses import fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
+import threading
 from typing import Any, TextIO
 
 from face_of_agi.contracts import (
@@ -17,6 +18,7 @@ from face_of_agi.contracts import (
 from face_of_agi.debug.sinks import LiveTurnMonitor
 from face_of_agi.environment import ArcEnvironmentAdapter, load_environment_config
 from face_of_agi.environment.config import (
+    ModelSchedulerConfig,
     ModelRoleConfig,
     UpdaterRuntimeConfig,
     load_game_catalog,
@@ -25,33 +27,57 @@ from face_of_agi.environment.config import (
 from face_of_agi.memory import ExperimentalMemory, SQLiteDatabase, StateMemory
 from face_of_agi.models import (
     ChangeSummaryAdapter,
+    DisabledGameMemoryAdapter,
     ModelRegistry,
+    OllamaChangeSummaryConfig,
+    OllamaGameMemoryConfig,
+    OllamaHistorizerConfig,
+    OllamaOrchestratorAgentConfig,
+    OpenAIChangeSummaryConfig,
+    OpenAIGameMemoryConfig,
+    OpenAIHistorizerConfig,
+    OpenAIOrchestratorAgentConfig,
+    OpenAIUpdaterConfig,
+    OllamaUpdaterConfig,
     OrchestratorAgentConfig,
+    UpdaterConfig,
     UpdaterTaskRegistry,
     VLLMChangeSummaryConfig,
+    VLLMGameMemoryConfig,
     VLLMHistorizerConfig,
     VLLMOrchestratorAgentConfig,
     VLLMUpdaterConfig,
 )
 from face_of_agi.models.orchestrator_agent.providers import (
+    OllamaOrchestratorAgentAdapter,
+    OpenAIOrchestratorAgentAdapter,
     VLLMOrchestratorAgentAdapter,
 )
 from face_of_agi.models.historizer.providers import (
+    OllamaHistorizerAdapter,
+    OpenAIHistorizerAdapter,
     VLLMHistorizerAdapter,
 )
-from face_of_agi.models.updater.providers import VLLMUpdaterAdapter
+from face_of_agi.models.memory.providers import (
+    OllamaGameMemoryAdapter,
+    OpenAIGameMemoryAdapter,
+    VLLMGameMemoryAdapter,
+)
+from face_of_agi.models.updater.providers import (
+    ConfigurableUpdaterAdapter,
+    HuggingFaceUpdaterAdapter,
+    OllamaUpdaterAdapter,
+    OpenAIUpdaterAdapter,
+    VLLMUpdaterAdapter,
+)
+from face_of_agi.models.providers.scheduler import ModelCallScheduler
 from face_of_agi.orchestration import Orchestrator
 from face_of_agi.runtime.loop import RuntimeLoop
 from face_of_agi.runtime.parallel import ParallelGameRunSpec, ParallelRuntimeLoop
 
 DEFAULT_DATABASE_PATH = Path("runs/memory.sqlite")
-_ROLE_CONFIG_KEYS_NOT_PROVIDER_OPTIONS = {
-    "input_image_detail",
-    "input_image_size",
-    "input_image_resample",
-    "image_mime_type",
-    "frame_scale",
-}
+_SCHEDULERS_LOCK = threading.Lock()
+_SCHEDULERS: dict[tuple[int, int], ModelCallScheduler] = {}
 
 
 def main() -> None:
@@ -119,8 +145,9 @@ def main() -> None:
         agent_config=environment_config.models.agent,
         change_config=environment_config.models.change,
         historizer_config=environment_config.models.historizer,
+        memory_config=environment_config.models.memory,
         shared_vlm_config=environment_config.models.shared_vlm,
-        observation_text_config=environment_config.models.observation_text,
+        scheduler_config=environment_config.models.scheduler,
         updater_config=environment_config.models.updater,
     )
     contexts = None
@@ -248,8 +275,9 @@ def _run_parallel_game(
         agent_config=environment_config.models.agent,
         change_config=environment_config.models.change,
         historizer_config=environment_config.models.historizer,
+        memory_config=environment_config.models.memory,
         shared_vlm_config=environment_config.models.shared_vlm,
-        observation_text_config=environment_config.models.observation_text,
+        scheduler_config=environment_config.models.scheduler,
         updater_config=environment_config.models.updater,
     )
     runtime = RuntimeLoop(
@@ -420,8 +448,9 @@ def _build_orchestrator(
     agent_config: ModelRoleConfig | None = None,
     change_config: ModelRoleConfig | None = None,
     historizer_config: ModelRoleConfig | None = None,
+    memory_config: ModelRoleConfig | None = None,
     shared_vlm_config: ModelRoleConfig | None = None,
-    observation_text_config: dict[str, Any] | None = None,
+    scheduler_config: ModelSchedulerConfig | None = None,
     updater_config: UpdaterRuntimeConfig | None = None,
     contexts: ContextDocuments | None = None,
     models: ModelRegistry | None = None,
@@ -437,8 +466,9 @@ def _build_orchestrator(
             agent_config=agent_config or ModelRoleConfig(),
             change_config=change_config or ModelRoleConfig(),
             historizer_config=historizer_config or ModelRoleConfig(),
+            memory_config=memory_config or ModelRoleConfig(),
             shared_vlm_config=shared_vlm_config or ModelRoleConfig(),
-            observation_text_config=observation_text_config,
+            scheduler_config=scheduler_config or ModelSchedulerConfig(),
             updater_config=updater_config,
         ),
         contexts=contexts,
@@ -451,77 +481,136 @@ def _build_model_registry(
     agent_config: ModelRoleConfig,
     change_config: ModelRoleConfig,
     historizer_config: ModelRoleConfig | None = None,
+    memory_config: ModelRoleConfig | None = None,
     shared_vlm_config: ModelRoleConfig | None = None,
-    observation_text_config: dict[str, Any] | None = None,
+    scheduler_config: ModelSchedulerConfig | None = None,
     updater_config: UpdaterRuntimeConfig | None = None,
 ) -> ModelRegistry:
     """Build model role adapters from starter YAML config."""
 
     shared_vlm_config = shared_vlm_config or ModelRoleConfig()
+    scheduler = _shared_model_call_scheduler(scheduler_config)
+    shared_ollama_client = _shared_ollama_client(shared_vlm_config)
     change_role_config = _with_shared_vlm_role_config(
         change_config,
         shared_vlm_config,
+        scheduler=scheduler,
+        scheduler_config=scheduler_config,
     )
     historizer_role_config = _with_shared_vlm_role_config(
         historizer_config or ModelRoleConfig(),
         shared_vlm_config,
+        scheduler=scheduler,
+        scheduler_config=scheduler_config,
     )
-    observation_text_config = observation_text_config or {}
+    memory_role_config = _with_shared_vlm_role_config(
+        memory_config or ModelRoleConfig(),
+        shared_vlm_config,
+        scheduler=scheduler,
+        scheduler_config=scheduler_config,
+    )
     return ModelRegistry(
         orchestrator_agent=_build_agent(
-            _with_observation_text_config(
-                _with_shared_vlm_role_config(agent_config, shared_vlm_config),
-                observation_text_config,
+            _with_shared_vlm_role_config(
+                agent_config,
+                shared_vlm_config,
+                scheduler=scheduler,
+                scheduler_config=scheduler_config,
             ),
+            ollama_client=shared_ollama_client,
         ),
         change_summary_model=_build_change_summary_model(
-            _with_observation_text_config(change_role_config, observation_text_config),
+            change_role_config,
+            ollama_client=shared_ollama_client,
         ),
         agent_context_historizer_model=_build_historizer_model(
             historizer_role_config,
+            ollama_client=shared_ollama_client,
+        ),
+        game_memory_model=_build_game_memory_model(
+            memory_role_config,
+            ollama_client=shared_ollama_client,
         ),
         updater_tasks=_build_updater_tasks(
-            _with_observation_text_updater_config(
-                _with_shared_vlm_updater_config(updater_config, shared_vlm_config),
-                observation_text_config,
+            _with_shared_vlm_updater_config(
+                updater_config,
+                shared_vlm_config,
+                scheduler=scheduler,
+                scheduler_config=scheduler_config,
             ),
+            ollama_client=shared_ollama_client,
         ),
     )
 
 
 def _build_change_summary_model(
     config: ModelRoleConfig,
+    *,
+    ollama_client: object | None = None,
 ) -> object | None:
     """Build the selected transition change summary adapter."""
 
     if config.backend is None or config.backend == "":
         raise ValueError("models.change.backend is required")
     backend = config.backend.lower()
+    if backend == "openai":
+        _require_model("change", backend, config)
+        return ChangeSummaryAdapter(
+            OpenAIChangeSummaryConfig(
+                **_config_kwargs(config, OpenAIChangeSummaryConfig)
+            )
+        )
+    if backend == "ollama":
+        _require_model("change", backend, config)
+        return ChangeSummaryAdapter(
+            OllamaChangeSummaryConfig(
+                **_config_kwargs(config, OllamaChangeSummaryConfig)
+            ),
+            client=ollama_client,
+        )
     if backend == "vllm":
         _require_role_model("models.change", backend, config)
-        _reject_removed_role_options(
-            config,
-            role_path="models.change",
-            removed={
-                "max_evidence_frames": "max_frames_per_call",
-            },
-        )
         return ChangeSummaryAdapter(
             VLLMChangeSummaryConfig(
                 **_config_kwargs(config, VLLMChangeSummaryConfig)
             )
         )
-    raise ValueError(f"unsupported change backend: {config.backend}; use vllm")
+    if backend in {"huggingface", "huggingface-diffusers", "diffusers"}:
+        raise NotImplementedError(
+            "Hugging Face change summary provider is not implemented yet"
+        )
+    if backend == "configurable":
+        raise NotImplementedError(
+            "Configurable change summary provider is not implemented yet"
+        )
+    raise ValueError(f"unknown change backend: {config.backend}")
 
 
 def _build_historizer_model(
     config: ModelRoleConfig,
+    *,
+    ollama_client: object | None = None,
 ) -> object | None:
     """Build the selected agent context historizer adapter."""
 
     if config.backend is None or config.backend == "":
         return None
     backend = config.backend.lower()
+    if backend == "openai":
+        _require_model("historizer", backend, config)
+        return OpenAIHistorizerAdapter(
+            OpenAIHistorizerConfig(
+                **_config_kwargs(config, OpenAIHistorizerConfig)
+            )
+        )
+    if backend == "ollama":
+        _require_model("historizer", backend, config)
+        return OllamaHistorizerAdapter(
+            OllamaHistorizerConfig(
+                **_config_kwargs(config, OllamaHistorizerConfig)
+            ),
+            client=ollama_client,
+        )
     if backend == "vllm":
         _require_role_model("models.historizer", backend, config)
         return VLLMHistorizerAdapter(
@@ -529,17 +618,85 @@ def _build_historizer_model(
                 **_config_kwargs(config, VLLMHistorizerConfig)
             )
         )
-    raise ValueError(f"unsupported historizer backend: {config.backend}; use vllm")
+    if backend in {"huggingface", "huggingface-diffusers", "diffusers"}:
+        raise NotImplementedError(
+            "Hugging Face historizer provider is not implemented yet"
+        )
+    if backend == "configurable":
+        raise NotImplementedError(
+            "Configurable historizer provider is not implemented yet"
+        )
+    raise ValueError(f"unknown historizer backend: {config.backend}")
+
+
+def _build_game_memory_model(
+    config: ModelRoleConfig,
+    *,
+    ollama_client: object | None = None,
+) -> object | None:
+    """Build the selected game memory adapter."""
+
+    if config.backend is None or config.backend == "":
+        raise ValueError("models.memory.backend is required")
+    backend = config.backend.lower()
+    if backend in {"none", "off", "disabled", "false"}:
+        return DisabledGameMemoryAdapter()
+    if backend == "openai":
+        _require_model("memory", backend, config)
+        return OpenAIGameMemoryAdapter(
+            OpenAIGameMemoryConfig(
+                **_config_kwargs(config, OpenAIGameMemoryConfig)
+            )
+        )
+    if backend == "ollama":
+        _require_model("memory", backend, config)
+        return OllamaGameMemoryAdapter(
+            OllamaGameMemoryConfig(
+                **_config_kwargs(config, OllamaGameMemoryConfig)
+            ),
+            client=ollama_client,
+        )
+    if backend == "vllm":
+        _require_role_model("models.memory", backend, config)
+        return VLLMGameMemoryAdapter(
+            VLLMGameMemoryConfig(
+                **_config_kwargs(config, VLLMGameMemoryConfig)
+            )
+        )
+    if backend in {"huggingface", "huggingface-diffusers", "diffusers"}:
+        raise NotImplementedError(
+            "Hugging Face game memory provider is not implemented yet"
+        )
+    if backend == "configurable":
+        raise NotImplementedError(
+            "Configurable game memory provider is not implemented yet"
+        )
+    raise ValueError(f"unknown memory backend: {config.backend}")
 
 
 def _build_agent(
     config: ModelRoleConfig,
+    *,
+    ollama_client: object | None = None,
 ) -> object | None:
     """Build the selected X agent adapter."""
 
     if config.backend is None or config.backend == "":
         raise ValueError("models.agent.backend is required")
     backend = config.backend.lower()
+    if backend == "openai":
+        return OpenAIOrchestratorAgentAdapter(
+            OpenAIOrchestratorAgentConfig(
+                **_config_kwargs(config, OpenAIOrchestratorAgentConfig)
+            )
+        )
+    if backend == "ollama":
+        return OllamaOrchestratorAgentAdapter(
+            OllamaOrchestratorAgentConfig(
+                **_config_kwargs(config, OllamaOrchestratorAgentConfig)
+            ),
+            client=ollama_client,
+        )
     if backend == "vllm":
         _require_role_model("models.agent", backend, config)
         return VLLMOrchestratorAgentAdapter(
@@ -547,11 +704,17 @@ def _build_agent(
                 **_config_kwargs(config, VLLMOrchestratorAgentConfig)
             )
         )
-    raise ValueError(f"unsupported agent backend: {config.backend}; use vllm")
+    if backend in {"huggingface", "huggingface-diffusers"}:
+        raise NotImplementedError("Hugging Face Agent X provider is not implemented yet")
+    if backend == "configurable":
+        raise NotImplementedError("Configurable Agent X provider is not implemented yet")
+    raise ValueError(f"unknown agent backend: {config.backend}")
 
 
 def _build_updater_tasks(
     config: UpdaterRuntimeConfig | None,
+    *,
+    ollama_client: object | None = None,
 ) -> UpdaterTaskRegistry:
     """Build configured updater P task adapters."""
 
@@ -561,10 +724,12 @@ def _build_updater_tasks(
         agent_game_updater=_build_updater_task(
             "agent",
             config.agent,
+            ollama_client=ollama_client,
         ),
         general_updater=_build_updater_task(
             "general",
             config.general,
+            ollama_client=ollama_client,
         ),
     )
 
@@ -572,21 +737,39 @@ def _build_updater_tasks(
 def _build_updater_task(
     task_name: str,
     config: ModelRoleConfig,
+    *,
+    ollama_client: object | None = None,
 ) -> object | None:
     """Build one selected updater P task adapter."""
 
     if config.backend is None or config.backend == "":
         raise ValueError(f"models.updater.{task_name}.backend is required")
     backend = config.backend.lower()
+    updater_config = UpdaterConfig(**_config_kwargs(config, UpdaterConfig))
+    if backend == "openai":
+        _require_prompt_updater_task(task_name, backend)
+        _require_model(f"updater.{task_name}", backend, config)
+        return OpenAIUpdaterAdapter(
+            OpenAIUpdaterConfig(**_config_kwargs(config, OpenAIUpdaterConfig))
+        )
+    if backend == "ollama":
+        _require_prompt_updater_task(task_name, backend)
+        _require_model(f"updater.{task_name}", backend, config)
+        return OllamaUpdaterAdapter(
+            OllamaUpdaterConfig(**_config_kwargs(config, OllamaUpdaterConfig)),
+            client=ollama_client,
+        )
     if backend == "vllm":
         _require_prompt_updater_task(task_name, backend)
         _require_updater_model(task_name, backend, config)
         return VLLMUpdaterAdapter(
             VLLMUpdaterConfig(**_config_kwargs(config, VLLMUpdaterConfig))
         )
-    raise ValueError(
-        f"unsupported updater.{task_name} backend: {config.backend}; use vllm"
-    )
+    if backend in {"huggingface", "huggingface-diffusers"}:
+        return HuggingFaceUpdaterAdapter(updater_config)
+    if backend == "configurable":
+        return ConfigurableUpdaterAdapter(updater_config)
+    raise ValueError(f"unknown updater backend: {config.backend}")
 
 
 def _require_updater_task_config(
@@ -610,6 +793,19 @@ def _require_prompt_updater_task(task_name: str, backend: str) -> None:
         )
 
 
+def _require_model(
+    config_name: str,
+    backend: str,
+    config: ModelRoleConfig,
+) -> None:
+    """Require explicit model names for real model providers."""
+
+    if not config.model:
+        raise ValueError(
+            f"models.{config_name}.model is required for backend {backend}"
+        )
+
+
 def _require_updater_model(
     task_name: str,
     backend: str,
@@ -630,31 +826,53 @@ def _require_role_model(role_path: str, backend: str, config: ModelRoleConfig) -
         raise ValueError(f"{role_path}.model is required for backend {backend}")
 
 
-def _reject_removed_role_options(
-    config: ModelRoleConfig,
-    *,
-    role_path: str,
-    removed: dict[str, str],
-) -> None:
-    """Fail clearly when a role uses renamed runtime option keys."""
+def _shared_ollama_client(config: ModelRoleConfig) -> object | None:
+    """Return one shared Ollama client for local VLM roles when configured."""
 
-    for old_key, new_key in removed.items():
-        if old_key in config.options:
-            raise ValueError(f"{role_path}.{old_key} has been removed; use {new_key}")
+    if (config.backend or "").lower() != "ollama":
+        return None
+    try:
+        import ollama
+    except ImportError:
+        return None
+
+    host = config.options.get("host")
+    if host:
+        return ollama.Client(host=host)
+    return ollama
 
 
 def _with_shared_vlm_role_config(
     config: ModelRoleConfig,
     shared: ModelRoleConfig,
+    *,
+    scheduler: ModelCallScheduler | None = None,
+    scheduler_config: ModelSchedulerConfig | None = None,
 ) -> ModelRoleConfig:
     """Apply shared local VLM defaults to matching local role configs."""
 
     backend = (config.backend or "").lower()
-    if backend != "vllm":
+    if backend not in {"ollama", "vllm"}:
         return config
     if backend != (shared.backend or "").lower():
         return config
-    shared_options = _shared_vllm_runtime_options(shared)
+    shared_options = (
+        _shared_ollama_runtime_options(shared)
+        if backend == "ollama"
+        else _shared_vllm_runtime_options(shared)
+    )
+
+    options = _deep_merge_dicts(
+        shared_options,
+        config.options,
+    )
+    if backend == "vllm" and scheduler is not None:
+        options = _with_scheduler_options(
+            options,
+            role_options=config.options,
+            scheduler=scheduler,
+            scheduler_config=scheduler_config,
+        )
 
     return ModelRoleConfig(
         backend=config.backend,
@@ -669,78 +887,129 @@ def _with_shared_vlm_role_config(
             if config.repair_attempts is not None
             else shared.repair_attempts
         ),
-        options=_deep_merge_dicts(
-            shared_options,
-            config.options,
-        ),
+        options=options,
     )
 
 
 def _with_shared_vlm_updater_config(
     config: UpdaterRuntimeConfig | None,
     shared: ModelRoleConfig,
+    *,
+    scheduler: ModelCallScheduler | None = None,
+    scheduler_config: ModelSchedulerConfig | None = None,
 ) -> UpdaterRuntimeConfig | None:
     """Apply shared local VLM defaults to matching updater task configs."""
 
     if config is None:
         return None
     return UpdaterRuntimeConfig(
-        agent=_with_shared_vlm_role_config(config.agent, shared),
-        general=_with_shared_vlm_role_config(config.general, shared),
+        agent=_with_shared_vlm_role_config(
+            config.agent,
+            shared,
+            scheduler=scheduler,
+            scheduler_config=scheduler_config,
+        ),
+        general=_with_shared_vlm_role_config(
+            config.general,
+            shared,
+            scheduler=scheduler,
+            scheduler_config=scheduler_config,
+        ),
     )
+
+
+def _shared_ollama_runtime_options(config: ModelRoleConfig) -> dict[str, Any]:
+    """Return shared Ollama behavior options without changing role prompts."""
+
+    recognized = {"host", "think", "keep_alive", "options"}
+    options = {
+        key: value
+        for key, value in config.options.items()
+        if key in recognized
+    }
+    generation_options = {
+        key: value
+        for key, value in config.options.items()
+        if key not in recognized
+    }
+    if generation_options:
+        existing_options = options.get("options")
+        if isinstance(existing_options, dict):
+            options["options"] = _deep_merge_dicts(
+                existing_options,
+                generation_options,
+            )
+        elif "options" not in options:
+            options["options"] = generation_options
+    return options
 
 
 def _shared_vllm_runtime_options(config: ModelRoleConfig) -> dict[str, Any]:
     """Return shared vLLM behavior options without changing role prompts."""
 
-    server_keys = {"server", "server_args"}
-    options = {
+    modal_server_keys = {"server", "server_args"}
+    return {
         key: value
         for key, value in config.options.items()
-        if key not in server_keys
+        if key not in modal_server_keys
     }
-    server_options = config.options.get("server")
-    if (
-        "max_context_tokens" not in options
-        and isinstance(server_options, dict)
-        and server_options.get("max_model_len") is not None
-    ):
-        options["max_context_tokens"] = server_options["max_model_len"]
-    return options
 
 
-def _with_observation_text_config(
-    config: ModelRoleConfig,
-    observation_text_config: dict[str, Any],
-) -> ModelRoleConfig:
-    """Apply shared observation text options unless the role overrides them."""
+def _shared_model_call_scheduler(
+    config: ModelSchedulerConfig | None,
+) -> ModelCallScheduler | None:
+    """Return the process-wide scheduler for one scheduler config."""
 
-    if not observation_text_config or "observation_text" in config.options:
-        return config
-    return ModelRoleConfig(
-        backend=config.backend,
-        model=config.model,
-        max_tool_calls=config.max_tool_calls,
-        repair_attempts=config.repair_attempts,
-        options={
-            **config.options,
-            "observation_text": dict(observation_text_config),
-        },
-    )
-
-
-def _with_observation_text_updater_config(
-    config: UpdaterRuntimeConfig | None,
-    observation_text_config: dict[str, Any],
-) -> UpdaterRuntimeConfig | None:
-    """Apply shared observation text options to updater task configs."""
-
-    if config is None:
+    if config is None or not config.enabled:
         return None
-    return UpdaterRuntimeConfig(
-        agent=_with_observation_text_config(config.agent, observation_text_config),
-        general=_with_observation_text_config(config.general, observation_text_config),
-    )
+    key = (config.max_concurrent_calls, config.max_concurrent_calls_per_game)
+    with _SCHEDULERS_LOCK:
+        scheduler = _SCHEDULERS.get(key)
+        if scheduler is None:
+            scheduler = ModelCallScheduler(
+                max_concurrent_calls=config.max_concurrent_calls,
+                max_concurrent_calls_per_game=(
+                    config.max_concurrent_calls_per_game
+                ),
+            )
+            _SCHEDULERS[key] = scheduler
+        return scheduler
+
+
+def _with_scheduler_options(
+    options: dict[str, Any],
+    *,
+    role_options: dict[str, Any],
+    scheduler: ModelCallScheduler,
+    scheduler_config: ModelSchedulerConfig | None,
+) -> dict[str, Any]:
+    """Attach scheduler runtime controls to one vLLM role config."""
+
+    merged = dict(options)
+    merged["scheduler"] = scheduler
+    if scheduler_config is not None:
+        merged["scheduler_queue_timeout_seconds"] = (
+            scheduler_config.queue_timeout_seconds
+            if scheduler_config.queue_timeout_seconds is not None
+            else _request_timeout_from_reasoning_budget(merged)
+        )
+    if "timeout" not in role_options:
+        merged["timeout"] = _request_timeout_from_reasoning_budget(merged)
+    return merged
+
+
+def _request_timeout_from_reasoning_budget(options: dict[str, Any]) -> float:
+    """Return clamp(90, 300, 60 + thinking_token_budget / 16)."""
+
+    budget = _float_or_zero(options.get("thinking_token_budget"))
+    return max(90.0, min(300.0, 60.0 + budget / 16.0))
+
+
+def _float_or_zero(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _deep_merge_dicts(
@@ -765,6 +1034,7 @@ def _config_kwargs(config: ModelRoleConfig, config_type: type) -> dict[str, Any]
     allowed = {field.name for field in fields(config_type)}
     kwargs: dict[str, Any] = {}
     provider_options: dict[str, Any] = {}
+    runtime_only_keys = {"scheduler", "scheduler_queue_timeout_seconds"}
     explicit_options = config.options.get("options")
     if "options" in allowed and isinstance(explicit_options, dict):
         provider_options = dict(explicit_options)
@@ -776,7 +1046,7 @@ def _config_kwargs(config: ModelRoleConfig, config_type: type) -> dict[str, Any]
             continue
         if key in allowed:
             kwargs[key] = value
-        elif "options" in allowed and key not in _ROLE_CONFIG_KEYS_NOT_PROVIDER_OPTIONS:
+        elif "options" in allowed and key not in runtime_only_keys:
             provider_options[key] = value
 
     if "options" in allowed and provider_options:

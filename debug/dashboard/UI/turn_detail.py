@@ -93,12 +93,14 @@ def _render_turn_heading(state: dict[str, Any]) -> None:
 def _render_overview(state: dict[str, Any]) -> None:
     metadata = _dict(state.get("metadata"))
     control_mode = _dict(metadata.get("control_mode"))
+    catchup = _dict(metadata.get("known_state_simulation_catchup"))
 
-    cols = st.columns(4)
+    cols = st.columns(5)
     cols[0].metric("Action", action_label(state.get("chosen_action")))
     cols[1].metric("Control", str(control_mode.get("reason", "-")))
     cols[2].metric("Frame", f"{state['frame_index'] + 1}/{state['frame_count']}")
     cols[3].metric("Controllable", str(bool(control_mode.get("controllable", False))))
+    cols[4].metric("Simulated", str(bool(metadata.get("simulated", False))))
 
     left, right = st.columns([1, 2])
     with left:
@@ -114,6 +116,8 @@ def _render_overview(state: dict[str, Any]) -> None:
         st.json(
             [action_label(action) for action in control_mode.get("allowed_actions") or []]
         )
+        if catchup:
+            _render_simulation_catchup(catchup)
 
 
 def _render_raw(
@@ -128,6 +132,50 @@ def _render_raw(
             }
         )
     )
+
+
+def _render_simulation_catchup(catchup: dict[str, Any]) -> None:
+    st.write("Simulation catch-up")
+    cols = st.columns(4)
+    cols[0].metric("Status", _catchup_status(catchup))
+    cols[1].metric("Catch-up actions", str(catchup.get("catchup_action_count", 0)))
+    cols[2].metric(
+        "Saved env actions",
+        str(catchup.get("saved_environment_action_count", 0)),
+    )
+    cols[3].metric("Exit action", str(catchup.get("exit_action") or "-"))
+
+    st.dataframe(
+        [
+            {
+                "catchup_actions": _action_sequence_label(
+                    catchup.get("catchup_actions")
+                ),
+                "simulated_actions": _action_sequence_label(
+                    catchup.get("simulated_actions")
+                ),
+                "expected_frame_hash": catchup.get("expected_frame_hash"),
+                "actual_frame_hash": catchup.get("actual_frame_hash"),
+                "catchup_source": catchup.get("catchup_source"),
+                "exit_reason": catchup.get("exit_reason"),
+                "abort_reason": catchup.get("abort_reason") or "",
+            }
+        ],
+        hide_index=True,
+        width="stretch",
+    )
+
+
+def _catchup_status(catchup: dict[str, Any]) -> str:
+    if bool(catchup.get("aborted", False)):
+        return "aborted"
+    return "matched" if bool(catchup.get("successful", False)) else "mismatch"
+
+
+def _action_sequence_label(value: Any) -> str:
+    if not isinstance(value, (list, tuple)):
+        return ""
+    return ", ".join(str(item) for item in value)
 
 
 def _dict(value: Any) -> dict[str, Any]:

@@ -1,43 +1,64 @@
-Compare the serialized observation frames and their attached cropped images.
+Compare the attached observation frame array.
 
-The first serialized frame is the previous observation. The final serialized
-frame is the current observation. Any serialized frames between them are
-retained animation frames from the same action transition. Use the `ACTION`
-block as the action that caused the transition.
-Each serialized frame has a matching attached cropped image covering the same
-ARC cells. Use images for visual shape and color scanning, and use the
-serialized rows/components/deltas as authoritative evidence for exact symbols,
-coordinates, changed-cell counts, and chronology.
+The first image is the previous observation. The final image is the current
+observation. Any images between them are retained animation frames from the same
+action transition. Use the `ACTION` block as the action that caused the
+transition.
 
-Use `changed_cell_count` as the authoritative count of cropped model-visible
-ARC cells that differ between the first and final serialized observations. It
-is a net first-to-final comparison, not a count across every intermediate frame.
+Use `changed_pixel_count` as the authoritative count of model-visible pixels
+that differ between the first and final attached images. It is a net
+first-to-final comparison, not a count across every intermediate frame.
 Use `any_adjacent_frame_changed` as the authoritative boolean for whether any
-adjacent serialized frame pair changed inside the cropped model-visible area.
-Your returned `change_detected` must match `any_adjacent_frame_changed`
-exactly. `any_adjacent_frame_changed` can be true even when
-`changed_cell_count` is zero, because intermediate animation frames may change
-and then return to the initial appearance.
-Component IDs such as `sA.1` are frame-local labels; do not treat matching IDs
-across frames as persistent object identity unless the rows and component facts
-independently support that continuity.
+adjacent attached frame pair changed inside the model-visible area. Your
+returned `change_detected` must match `any_adjacent_frame_changed` exactly.
+`any_adjacent_frame_changed` can be true even when `changed_pixel_count` is
+zero, because intermediate animation frames may change and then return to the
+initial appearance.
 
-If `changed_cell_count` is greater than zero, never say that nothing changed.
-If `changed_cell_count` is zero and more than two frames are serialized, inspect
-the intermediate frames anyway. In that case, visible transient animation may
-have happened and then returned to the initial appearance; summarize that
-transient change instead of saying "no changes." Only say that no visible
-playfield change occurred when `any_adjacent_frame_changed` is false and the
-playfield has no meaningful visible change across all serialized frames.
+If `changed_pixel_count` is greater than zero, never say that nothing changed.
+If `changed_pixel_count` is zero and more than two images are attached, inspect
+the intermediate images anyway. In that case, visible transient animation may
+have happened and then returned to the initial appearance; describe those
+transient element mutations. Only return `change_detected: false` when
+`any_adjacent_frame_changed` is false and all attached images are visually
+identical.
 
-Return exactly one JSON object with a `summary` string and a `change_detected`
-boolean.
+Reuse `Previous change elements` names as much as possible when the same visual
+element is still present, so element names stay consistent across turns. Do not
+mention previous elements that are not visible anywhere in the attached frames.
+Mention newly visible elements.
 
-The summary must be one or two concise sentences describing ALL visible playfield
-changes across the serialized frames. If no playfield changed, say that no
-visible playfield change occurred. Do not use metaphorical nor analogical
-descriptions. Stick to exact, simple symbol-first facts such as shape, symbol
-colors, positions, layout, background, and orientations. Refer to cells as
-`symbol 0` through `symbol F` or as `A-cells`, `4-cells`, etc. You may add the
-glossary color name when useful, such as `symbol A light-cyan cells`, but keep
-the symbol as the primary identifier.
+Follow this process:
+
+1. Check `Previous change elements`, prune elements that are not present on the
+   first image, and add important new elements visible on the first image.
+2. For each attached frame in order, update each visible element with movement,
+   rotation, transformation, color/layout change, appearance, disappearance, or
+   other visible mutation.
+3. Compact the result into `elements`: one object per element visible at least
+   once in the attached images.
+
+For ACTION6 transitions, the action `data` is rendered in model-visible
+normalized 0..1000 coordinates, and `target` names the object or area that was
+selected. Describe the targeted object or area as it appears in the first image
+before describing the transition. Use the target area and coordinate together as
+action context, but visual facts from the attached frames are more important
+than the action label.
+
+Return exactly one JSON object:
+
+{"elements":[{"element_name":"","element_description":"","element_mutation":""}],"change_detected":false}
+
+Rules for `elements`:
+
+- `element_name`: short stable name for the visible element. Every name in this
+  response must be unique. If two similar elements need the same base name,
+  suffix them as `base_name_0`, `base_name_1`, and so on.
+- `element_description`: concise visual description of the element.
+- `element_mutation`: chronological description of how the element changed
+  across the attached frames. Leave this as an empty string when it stayed still
+  with no visible change. Never write "no visible changes" here.
+
+Do not use metaphorical nor analogical descriptions. Stick to exact, simple
+visual facts such as shape, colors, patterns, positions, layout, background, and
+orientations.
