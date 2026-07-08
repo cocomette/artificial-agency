@@ -7,9 +7,8 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from face_of_agi.contracts import (
-    ActionHistoryItem,
-    ActionOutcomeEvidence,
     ActionSpec,
+    ActionHistoryEntry,
     AgentTrace,
     DecisionResult,
     ExperimentToolInvocationResult,
@@ -18,25 +17,10 @@ from face_of_agi.contracts import (
     RoleContext,
     ToolCall,
     ToolResult,
+    VisualCoordinateSpace,
 )
-from face_of_agi.frames import to_memory_jsonable
-from face_of_agi.models.color_glossary import append_arc_color_glossary
-from face_of_agi.models.action_coordinates import (
-    action6_coordinate_bounds,
-    action6_coordinate_range_phrase,
-    action6_coordinate_range_text,
-    action6_data_from_visible_crop,
-)
-from face_of_agi.models.action_glossary import append_action_glossary
-from face_of_agi.models.action_history import (
-    grouped_action_history_text,
-    model_facing_action_text,
-)
+from face_of_agi.frames import observation_to_pil_image, to_memory_jsonable
 from face_of_agi.models.orchestrator_agent.contracts import AgentToolRuntime
-from face_of_agi.models.observation_text import (
-    ObservationTextConfig,
-    serialize_observation,
-)
 
 INSTRUCTION_PATH = Path(__file__).parent / "instructions" / "system_prompt.md"
 
@@ -51,71 +35,95 @@ def load_agent_instructions() -> str:
     return INSTRUCTION_PATH.read_text(encoding="utf-8").strip()
 
 
-def build_agent_instructions(
-    *,
-    glossary_actions: Sequence[ActionSpec],
-    observation_text_config: ObservationTextConfig | dict[str, Any] | None = None,
-) -> str:
-    """Return X instructions with the current raw action glossary."""
+def build_agent_instructions(context: RoleContext) -> str:
+    """Return fixed X instructions plus the mutable Agent X context."""
 
-    return append_arc_color_glossary(
-        append_action_glossary(
-            load_agent_instructions(),
-            glossary_actions,
-            mode="agent_decision",
-            observation_text_config=observation_text_config,
-        )
+    base = load_agent_instructions()
+    agent_context = context.composed().strip()
+    if not agent_context:
+        return base
+    return "\n\n".join(
+        [
+            base,
+            "AGENT_CONTEXT:",
+            agent_context,
+        ]
     )
 
 
 def build_decision_prompt(
     *,
-    context: RoleContext,
+    first_observation: Observation,
     current_observation: Observation,
     action_space: Sequence[ActionSpec],
-    recent_action_history: Sequence[ActionHistoryItem] = (),
-    recent_action_history_available: bool = True,
-    action_outcome_evidence: ActionOutcomeEvidence | None = None,
-    observation_text_config: ObservationTextConfig | None = None,
+    recent_action_history: Sequence[ActionHistoryEntry] = (),
+    world_game_context: str = "",
+    goal_game_context: str = "",
 ) -> str:
-    """Build the provider-neutral Markdown text sent to X."""
+    """Build the provider-neutral text sent beside X observation images."""
 
-    parts = [
-        "## Agent context\n\n" + _text_or_none(context.composed()),
-        "## Current observation\n\n"
-        + serialize_observation(
-            current_observation,
-            config=observation_text_config,
-            label="current_observation",
-            include_header_metadata=False,
-        ).text,
-        "## Allowed actions\n\n"
-        + _allowed_actions_text(
-            action_space,
-            observation_text_config=observation_text_config,
+    prompt_payload = {
+        "world_game_context": world_game_context,
+        "goal_game_context": goal_game_context,
+        "frames": frame_label_payloads(
+            first_observation=first_observation,
+            current_observation=current_observation,
         ),
-    ]
-    suppression_evidence = _action_suppression_evidence_text(
-        action_outcome_evidence
-    )
-    if suppression_evidence:
-        parts.append("## Action suppression evidence\n\n" + suppression_evidence)
-    parts.append(
-        "## Recent actions\n\n"
-        + _recent_actions_text(
-            recent_action_history,
-            available=recent_action_history_available,
-            observation_text_config=observation_text_config,
+        "allowed_actions": [action_payload(action) for action in action_space],
+        "recent_action_history": [
+            action_history_payload(entry) for entry in recent_action_history
+        ],
+    }
+    return json.dumps(prompt_payload, indent=2, sort_keys=True)
+
+
+def observation_images(
+    *,
+    first_observation: Observation,
+    current_observation: Observation,
+    frame_scale: int,
+) -> tuple[Any, ...]:
+    """Return history-anchor and current observation images for X."""
+
+    return tuple(
+        observation_to_pil_image(observation, frame_scale=frame_scale)
+        for _, observation in _ordered_observation_roles(
+            first_observation=first_observation,
+            current_observation=current_observation,
         )
     )
-    return "\n\n".join(parts)
 
 
-def final_action_schema(
-    action_space: Sequence[ActionSpec],
+def _ordered_observation_roles(
     *,
-    observation_text_config: ObservationTextConfig | dict[str, Any] | None = None,
-) -> dict[str, Any]:
+    first_observation: Observation,
+    current_observation: Observation,
+) -> tuple[tuple[str, Observation], ...]:
+    """Return history-anchor/current roles, with current last."""
+
+    return (
+        ("history_anchor", first_observation),
+        ("current", current_observation),
+    )
+
+
+def frame_label_payloads(
+    *,
+    first_observation: Observation,
+    current_observation: Observation,
+) -> list[dict[str, str]]:
+    """Return model-facing frame labels aligned with attached image order."""
+
+    return [
+        {"label": role}
+        for role, _ in _ordered_observation_roles(
+            first_observation=first_observation,
+            current_observation=current_observation,
+        )
+    ]
+
+
+def final_action_schema(action_space: Sequence[ActionSpec]) -> dict[str, Any]:
     """Return the structured final-action schema for one X frame turn."""
 
     simple_actions = [action for action in action_space if not action.is_complex()]
@@ -126,7 +134,6 @@ def final_action_schema(
             "action": _action_output_schema(
                 simple_actions=simple_actions,
                 complex_actions=complex_actions,
-                observation_text_config=observation_text_config,
             ),
         },
         "required": ["action"],
@@ -138,7 +145,6 @@ def _action_output_schema(
     *,
     simple_actions: Sequence[ActionSpec],
     complex_actions: Sequence[ActionSpec],
-    observation_text_config: ObservationTextConfig | dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Return the final action branch schema for simple/complex ARC actions."""
 
@@ -155,7 +161,6 @@ def _action_output_schema(
             _action_object_schema(
                 action_ids=[action.name for action in complex_actions],
                 include_data=True,
-                observation_text_config=observation_text_config,
             )
         )
     if len(branches) == 1:
@@ -167,7 +172,6 @@ def _action_object_schema(
     *,
     action_ids: Sequence[str],
     include_data: bool,
-    observation_text_config: ObservationTextConfig | dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     properties: dict[str, Any] = {
         "action_id": {
@@ -177,30 +181,36 @@ def _action_object_schema(
     }
     required = ["action_id"]
     if include_data:
-        minimum, maximum = action6_coordinate_bounds(observation_text_config)
         properties["data"] = {
             "type": "object",
             "properties": {
-                "x": {"type": "number", "minimum": minimum, "maximum": maximum},
-                "y": {"type": "number", "minimum": minimum, "maximum": maximum},
+                "x": {"type": "number"},
+                "y": {"type": "number"},
             },
             "required": ["x", "y"],
             "additionalProperties": False,
         }
-        properties["target"] = {
-            "type": "string",
-            "minLength": 1,
-            "description": (
-                "Concise text description of the visible object, cell, or "
-                "region targeted by these ACTION6 coordinates."
-            ),
-        }
-        required.extend(["data", "target"])
+        required.append("data")
     return {
         "type": "object",
         "properties": properties,
         "required": required,
         "additionalProperties": False,
+    }
+
+
+def openai_final_action_text_format(
+    action_space: Sequence[ActionSpec],
+) -> dict[str, Any]:
+    """Return OpenAI Responses structured-output config for final X action."""
+
+    return {
+        "format": {
+            "type": "json_schema",
+            "name": "agent_final_action",
+            "strict": True,
+            "schema": final_action_schema(action_space),
+        }
     }
 
 
@@ -210,12 +220,10 @@ def final_action_repair_prompt(
     validation_error: str,
     invalid_text: str | None,
     attempt: int,
-    observation_text_config: ObservationTextConfig | dict[str, Any] | None = None,
 ) -> str:
     """Return a provider-neutral final-action repair request."""
 
     allowed = ", ".join(action.name for action in action_space)
-    action6_range = action6_coordinate_range_phrase(observation_text_config)
     repair_parts = [
         f"Repair attempt {attempt}: the previous Agent X output was invalid.",
         "Validation error:\n" + validation_error,
@@ -224,15 +232,8 @@ def final_action_repair_prompt(
         repair_parts.append("Invalid output:\n" + invalid_text)
     repair_parts.extend(
         [
-            "Return only corrected final action JSON for one allowed final action. "
-            "The top-level JSON must contain exactly one field named `action`. "
-            "The `action` field value must be an object, never a string. "
-            "The action object must contain `action_id`; simple actions must not "
-            "include `data`; ACTION6 must include a `data` object with integer "
-            f"`x` and `y` visible cropped coordinates from {action6_range}. "
-            "ACTION6 must also include a non-empty top-level `target` string "
-            "describing the object, cell, or region targeted by those coordinates. "
-            "Do not include prose.",
+            "Return only corrected final action JSON matching this schema:\n"
+            + json.dumps(final_action_schema(action_space), indent=2, sort_keys=True),
             f"Allowed final actions: {allowed}.",
         ]
     )
@@ -242,18 +243,19 @@ def final_action_repair_prompt(
 def build_decision_result(
     *,
     final_action: ActionSpec,
+    first_observation: Observation,
     current_observation: Observation,
-    first_observation_ref: ObservationRef | None,
     tool_calls: list[ToolCall],
     tool_results: list[ToolResult],
     metadata: dict[str, Any],
 ) -> DecisionResult:
     """Build the provider-neutral decision output for X."""
 
+    first_ref = ObservationRef(memory="state", id=first_observation.id)
     current_ref = ObservationRef(memory="state", id=current_observation.id)
     trace = AgentTrace(
         step=current_observation.step,
-        first_observation_ref=first_observation_ref or current_ref,
+        first_observation_ref=first_ref,
         current_observation_ref=current_ref,
         final_action=final_action,
         tool_calls=tool_calls,
@@ -266,8 +268,7 @@ def build_decision_result(
 def parse_final_action(
     arguments: Any,
     action_space: Sequence[ActionSpec],
-    *,
-    observation_text_config: ObservationTextConfig | dict[str, Any] | None = None,
+    coordinate_space: VisualCoordinateSpace = "normalized_1000",
 ) -> ActionSpec:
     """Parse the terminal structured final-action payload."""
 
@@ -275,7 +276,7 @@ def parse_final_action(
     return parse_action(
         args.get("action"),
         action_space,
-        observation_text_config=observation_text_config,
+        coordinate_space=coordinate_space,
     )
 
 
@@ -300,7 +301,7 @@ def parse_action(
     value: Any,
     action_space: Sequence[ActionSpec],
     *,
-    observation_text_config: ObservationTextConfig | dict[str, Any] | None = None,
+    coordinate_space: VisualCoordinateSpace = "normalized_1000",
 ) -> ActionSpec:
     """Parse and validate a provider action against the current action space."""
 
@@ -315,24 +316,18 @@ def parse_action(
     data = value.get("data")
     if data is not None and not isinstance(data, dict):
         raise AgentOutputError("action.data must be an object when provided")
-    target = value.get("target")
-    if target is not None and not isinstance(target, str):
-        raise AgentOutputError("action.target must be a string when provided")
 
     if matched.is_complex():
         if data is None:
             raise AgentOutputError("complex actions require action.data")
-        data = _visible_crop_action_data(
+        data = _normalized_action_data(
             data,
-            observation_text_config=observation_text_config,
+            coordinate_space=coordinate_space,
         )
-        target = _action_target(target)
     elif data is not None:
         raise AgentOutputError("simple actions must not include action.data")
-    elif target is not None:
-        raise AgentOutputError("simple actions must not include action.target")
 
-    return ActionSpec(action_id=matched.action_id, data=data, target=target)
+    return ActionSpec(action_id=matched.action_id, data=data)
 
 
 def tool_result_feedback(invocation: ExperimentToolInvocationResult) -> dict[str, Any]:
@@ -340,8 +335,32 @@ def tool_result_feedback(invocation: ExperimentToolInvocationResult) -> dict[str
 
     return {
         "tool": invocation.tool_result.tool,
-        "output": to_memory_jsonable(invocation.tool_result.output),
+        "predicted_description": to_memory_jsonable(
+            invocation.tool_result.predicted_description
+        ),
         "explanation": invocation.tool_result.explanation,
+    }
+
+
+def action_payload(action: ActionSpec) -> dict[str, Any]:
+    """Return a JSON-friendly action description."""
+
+    payload: dict[str, Any] = {
+        "action_id": action.name,
+        "data": action.data,
+        "requires_data": action.is_complex(),
+    }
+    if action.is_complex():
+        payload["required_data"] = ["x", "y"]
+    return payload
+
+
+def action_history_payload(entry: ActionHistoryEntry) -> dict[str, Any]:
+    """Return the prior action visible to X in recent history."""
+
+    return {
+        "action": action_payload(entry.action),
+        "controllable": entry.controllable,
     }
 
 
@@ -354,7 +373,7 @@ def object_get(value: Any, key: str, default: Any = None) -> Any:
 
 
 def function_call_name_and_arguments(call: Any) -> tuple[str, Any]:
-    """Read one provider function call."""
+    """Read one Ollama-style function call."""
 
     function = object_get(call, "function", {})
     name = object_get(function, "name")
@@ -362,105 +381,6 @@ def function_call_name_and_arguments(call: Any) -> tuple[str, Any]:
     if not name:
         raise AgentOutputError("tool call did not include a function name")
     return str(name), arguments
-
-
-def _text_or_none(value: str | None) -> str:
-    if value is None:
-        return "none"
-    text = value.strip()
-    return text if text else "none"
-
-
-def _allowed_actions_text(
-    action_space: Sequence[ActionSpec],
-    *,
-    observation_text_config: ObservationTextConfig | dict[str, Any] | None = None,
-) -> str:
-    if not action_space:
-        return "none"
-    lines = [
-        (
-            "These are the only actions you may choose this turn. The action "
-            "glossary may include raw game actions that are not allowed in "
-            "this turn."
-        )
-    ]
-    lines.extend(
-        f"- {_action_text(action, observation_text_config=observation_text_config)}"
-        for action in action_space
-    )
-    return "\n".join(lines)
-
-
-def _recent_actions_text(
-    history: Sequence[ActionHistoryItem],
-    *,
-    available: bool,
-    observation_text_config: ObservationTextConfig | dict[str, Any] | None = None,
-) -> str:
-    if not available:
-        return "not available"
-    if not history:
-        return "none"
-    action6_range = action6_coordinate_range_text(observation_text_config)
-    lines = [
-        (
-            "Numbered oldest-to-newest. Controllable action rows may include "
-            "nested animation_after rows; GAME_RESET rows mark environment "
-            "resets between action groups, and SCORE_ADVANCE rows mark score "
-            "or progress increases. The [latest] marker identifies the "
-            "transition, reset, or score marker that produced the current "
-            "frame. ACTION6 data shown in recent actions is rendered as ARC "
-            "grid coordinates. New ACTION6 outputs must use visible cropped "
-            f"coordinates {action6_range} on both axes and include a target "
-            "description."
-        )
-    ]
-    return grouped_action_history_text(
-        history,
-        action_text=model_facing_action_text,
-        numbered=True,
-        latest_description=lines[0],
-    )
-
-
-def _action_suppression_evidence_text(
-    evidence: ActionOutcomeEvidence | None,
-) -> str:
-    if evidence is None:
-        return ""
-    lines: list[str] = []
-    if evidence.suppressed_actions:
-        lines.append(f"- suppression_threshold: {evidence.suppression_threshold}")
-        lines.append(
-            "- suppressed_action_choices: " + ", ".join(evidence.suppressed_actions)
-        )
-        if evidence.suppression_reason:
-            lines.append("- suppression_reason: " + evidence.suppression_reason)
-    elif evidence.suppression_disabled_reason:
-        lines.append(f"- suppression_threshold: {evidence.suppression_threshold}")
-        lines.append(
-            "- suppression_disabled_reason: "
-            + evidence.suppression_disabled_reason
-        )
-    return "\n".join(lines)
-
-
-def _action_text(
-    action: ActionSpec,
-    *,
-    observation_text_config: ObservationTextConfig | dict[str, Any] | None = None,
-) -> str:
-    if action.is_complex() and not action.data:
-        return (
-            f"{action.name}(x,y "
-            f"{action6_coordinate_range_text(observation_text_config)},target)"
-        )
-    if action.name == "ACTION6":
-        return model_facing_action_text(action)
-    if action.data:
-        return f"{action.name} {json.dumps(action.data, sort_keys=True)}"
-    return action.name
 
 
 def _match_allowed_action(
@@ -474,21 +394,32 @@ def _match_allowed_action(
     raise AgentOutputError(f"action {action_id!r} is not allowed; allowed: {allowed}")
 
 
-def _visible_crop_action_data(
+def _normalized_action_data(
     data: dict[str, Any],
     *,
-    observation_text_config: ObservationTextConfig | dict[str, Any] | None,
+    coordinate_space: VisualCoordinateSpace,
 ) -> dict[str, int]:
-    try:
-        return action6_data_from_visible_crop(
-            data,
-            observation_text_config=observation_text_config,
+    normalized: dict[str, int] = {}
+    for key in ("x", "y"):
+        if key not in data:
+            raise AgentOutputError(f"complex action.data.{key} is required")
+        value = data[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise AgentOutputError(f"complex action.data.{key} must be numeric")
+        numeric = float(value)
+        if coordinate_space == "normalized_1000":
+            if not 0 <= numeric <= 1000:
+                raise AgentOutputError(
+                    f"complex action.data.{key} must be in normalized 0..1000"
+                )
+            normalized[key] = _clamp_arc_coordinate(round(numeric * 64 / 1000))
+            continue
+        raise AgentOutputError(
+            "pixel visual coordinates cannot be converted to ARC coordinates "
+            "without an image size; use a normalized_1000 model profile"
         )
-    except ValueError as exc:
-        raise AgentOutputError(str(exc)) from exc
+    return normalized
 
 
-def _action_target(target: str | None) -> str:
-    if target is None or not target.strip():
-        raise AgentOutputError("ACTION6 requires non-empty action.target")
-    return target.strip()
+def _clamp_arc_coordinate(value: int) -> int:
+    return max(0, min(value, 63))

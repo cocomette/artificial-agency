@@ -24,9 +24,8 @@ calls.
 The updater does not own a separate memory store and does not write directly
 to SQLite.
 
-Reward/update quantities are persisted by orchestration with the committed
-frame-turn state. They remain inputs to updater `P`; updater backends do not
-compute or mutate the reward packet.
+Turn metrics are persisted by orchestration with the committed frame-turn
+state. Updater backends do not compute or mutate those runtime facts.
 
 ## Scope Rule
 

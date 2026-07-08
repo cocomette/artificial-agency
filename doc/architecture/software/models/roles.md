@@ -2,107 +2,110 @@
 
 ## Orchestrator Agent `X`
 
-`X` is the decision-making agent. It receives the current agent context,
-serialized observation text plus a cropped observation image, transition
-evidence, recent action history, and current ARC action space. It returns one
-final `ActionSpec` and an
-`AgentTrace`.
-
-The vLLM adapter sends OpenAI-compatible multimodal Chat Completions messages.
-Observation payloads contain an `ObservationText` string generated from native
-ARC grids plus a PNG data-URL image cropped to the same configured bounds.
-Role instructions include the canonical ARC symbol color glossary.
-
-ACTION6 history data uses original ARC grid coordinates. Model-facing guidance
-and validation require new ACTION6 decisions to use visible cropped
-coordinates, matching the active serialized crop in `ObservationText`
-(`x/y=3..60` for the default `crop_cells=3`), plus a non-empty target
-description.
+`X` is the decision-making agent. It receives its own mutable agent context in
+the provider instruction/system content, and receives world/goal game
+contexts, observations, action history, and action space in the turn payload.
+It returns one final real action as structured output from the shared Agent X
+step loop.
 
 ### Tool Runtime Framework
 
-The provider-neutral agent contract still has a controlled tool runtime shape,
-but the current vLLM-only runtime does not wire real world or goal providers.
-The starter configs keep `max_tool_calls: 0`.
+The `AgentToolRuntime` and provider tool-loop code remain available for future
+agent tools. Provider requests receive tool specs only when orchestration
+explicitly exposes them.
 
-`X` does not read memory, write SQLite, or call model adapters directly.
-Orchestration builds the frame-turn input, calls `X`, validates the returned
-action, and owns persistence.
+The current default loop is:
+
+1. Orchestration builds the frame-turn input for `X`: agent context in the
+   instruction/system message, plus world game context, goal game context,
+   `history_anchor` frame, current frame, bounded recent action history, and
+   action space in the turn payload.
+2. The shared Agent X loop calls the provider with the same turn input, any
+   available tool specs, and the final structured action schema.
+3. If the provider returns tool calls, orchestration executes them, appends
+   tool feedback, and the same loop continues until the tool-call budget is
+   exhausted or a final output is returned.
+4. If the provider returns final structured output without tool calls, the
+   shared adapter validates the final action and builds `DecisionResult` plus
+   `AgentTrace`.
+
+OpenAI and Ollama use the same provider-neutral Agent X loop. That loop owns
+repair attempts, final-action parsing, dormant tool-call budget config, and
+`AgentTrace` construction. Provider adapters translate only the normalized turn
+request, tool specs, and final structured action schema.
 
 Output:
 
 - final `ActionSpec`
 - full `AgentTrace`
 
-## Transition Change Summary
+## World Prediction Model `S`
 
-The change model receives previous and current observations as `ObservationText`
-strings plus cropped images for every serialized evidence frame in the current
-call. It summarizes visible changes, returns structured change fields, and uses
-cropped ARC-grid changed-cell counts for authoritative evidence.
+`S` predicts how the environment may change from the current frame and action.
+Its game-specific context is updated by `P`, then fed back into later `S`
+predictions and Agent `X` decisions.
 
-For frame bundles and transition prompts, component-level deltas are generated
-directly from adjacent serialized frames. Large retained animation bundles are
-budgeted at the adapter boundary with balanced overlapping text chunks. There
-is no object matching heuristic;
-component IDs are frame-local labels, and omitted component sections suppress
-component-ID delta lines.
-
-When chunking produces multiple change-summary calls, a final reducer may
-reconcile ordered partial summaries. The reducer sees deterministic
-changed-cell metrics, action context, selected row-only keyframes drawn from
-first/final/chunk-boundary frames, and cropped images for those selected
-keyframes, then returns the same `summary` plus `change_detected` schema.
-Reducer `change_detected` is validated against the full deterministic evidence,
-and repair exhaustion falls back to the chronological deterministic merge.
+The role adapter receives the framework input, provider code translates it into
+the shared description provider request shape, and the role returns a
+provider-neutral `PredictionResult` carrying `predicted_description`.
 
 Output:
 
-- transition summary text
-- changed-cell evidence and structured fields used by orchestration/updaters
+- `PredictionResult` containing a predicted description and optional explanation
 
-## Agent Context Historizer
+## Goal Prediction Model `G`
 
-The historizer summarizes recent agent context revisions before the updater
-builds the next context. It is a text-only vLLM role and does not receive
-frames directly.
+`G` reasons about objective hypotheses, progress, and goal-relevant outcomes
+from the current frame and goal context. Its game-specific context is updated
+by `P`, then fed back into later `G` predictions and Agent `X` decisions.
+Unlike `S`, it is not action-conditioned in the current contract.
 
 Output:
 
-- structured summary of recent agent context evolution
+- `PredictionResult` containing a goal-relevant predicted description or explanation
 
 ## Updater `P`
 
-`P` runs after observed transitions. In the frame-unrolled game loop, animation
-frame transitions compare the current frame to the next buffered frame, while
-controllable final-frame transitions compare the selected action against the
-first frame returned by the next real environment step.
+`P` runs after an observed transition. In the frame-unrolled game loop, that
+means after each frame decision: animation-frame transitions compare the
+current frame to the next buffered frame, while controllable final-frame
+transitions compare the selected action against the first frame returned by
+the next real environment step. World and goal game-context updates run for
+both cases; animation-frame updates use the synthetic `NONE` action and the
+S/G predictions for that frame.
 
-The implemented updater slots are:
-
-| Slot | Updates |
-| --- | --- |
-| `agent` | Agent game context `L^X`. |
-| `general` | Agent general context `K^X` at end of run. |
-
-Agent game updater prompts include observation serialization plus a cropped
-current-frame image where frame context is needed. Agent game updater
-instructions use the active visible crop for future ACTION6 policy guidance.
-The updater does not own persistence. Its
-outputs return to orchestration, which applies them to live working context
-documents and persists the resulting state into `M`.
+`P` is wired as four updater tasks. Three role-specific game tasks update
+`L^S`, `L^G`, and `L^X` during frame/game-loop transitions. One shared
+general task updates role-specific `K` contexts at end-of-run and is invoked
+separately for world, goal, and agent. Orchestration owns this timing and
+chooses which task is called. Runtime config must declare each updater slot
+explicitly; each slot chooses OpenAI or Ollama with an explicit model. The
+shared general updater uses one backend/model configuration and role-specific
+instruction prompts for world, goal, and agent `K` updates.
 
 Output:
 
-- updated `L^X` during frame/game-loop updates
-- updated `K^X` at end of run through the shared general updater task
+- updated `L^S`, `L^G`, and `L^X` during frame/game-loop updates
+- updated `K^S`, `K^G`, and `K^X` at end-of-run through the shared general
+  updater task
+
+The updater does not own persistence. Its outputs return to orchestration,
+which applies them to the live working `ContextDocuments` and persists the
+resulting state into `M`. Future updater backends may revise text prompts,
+trigger loss-based updates, or coordinate LoRA-style model updates while
+preserving this boundary.
 
 ## Model Adapter Rule
 
-Adapters translate between role contracts and vLLM Chat Completions calls.
+Adapters translate between provider-specific calls and shared model contracts.
 They do not own the runtime loop, environment stepping, or SQLite persistence.
 They also do not read memory directly; memory access is mediated by
 orchestration.
 
-Provider-specific adapters live in `providers/` folders under each model role.
-Shared vLLM transport utilities live in `models/providers/vllm.py`.
+Provider-specific adapters live either under a role or under a shared
+capability when multiple roles use the same concrete output contract. World and
+goal share the `models/description` capability. Shared provider utilities that
+are reused across roles live in `models/providers/`. The shared provider layer
+is only the final provider-call boundary: role adapters build prompts,
+conversations, and model-role results; shared provider helpers build/send
+provider requests and normalize raw provider responses.

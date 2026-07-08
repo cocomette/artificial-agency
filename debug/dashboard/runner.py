@@ -11,7 +11,7 @@ import subprocess
 import threading
 import time
 
-from debug.playback import PlaybackRequest
+from debug.dashboard.modal_snapshot import volume_relative_path
 
 DEV_COMMAND_PREFIX = (
     "uv",
@@ -30,12 +30,17 @@ CLEAN_DB_COMMAND_PREFIX = (
     "-m",
     "face_of_agi.runtime.shell",
 )
+MODAL_RUN_COMMAND_PREFIX = (
+    "uv",
+    "run",
+    "--with",
+    "modal",
+    "modal",
+    "run",
+    "src/face_of_agi/runtime/modal_app.py",
+)
 GAME_CATALOG_PATH = Path("src/face_of_agi/environment/local_games.json")
 RUNTIME_RUNNER_KEY = "runtime_runner"
-RUNNER_PLAYBACK_REQUEST_KEY = "runner_playback_request"
-SCHEMA_RESET_REQUIRED_TEXT = (
-    "does not match the current memory schema; reset this disposable local database"
-)
 
 
 @dataclass(frozen=True)
@@ -58,7 +63,6 @@ def build_run_command(
     database_path: str | Path,
     *,
     keep_all_m_states: bool = True,
-    playback_request: PlaybackRequest | None = None,
 ) -> list[str]:
     """Build the dev-profile runtime command used by the dashboard runner."""
 
@@ -69,28 +73,32 @@ def build_run_command(
         "--database",
         str(database_path),
     ]
-    if keep_all_m_states or playback_request is not None:
+    if keep_all_m_states:
         command.append("--debug-keep-all-m-states")
-    return _with_playback_args(command, playback_request)
+    return command
 
 
-def _with_playback_args(
-    command: list[str],
-    playback_request: PlaybackRequest | None,
+def build_modal_run_command(
+    config_path: str | Path,
+    *,
+    database_name: str = "memory.sqlite",
+    live_commit_seconds: int = 30,
+    timing: bool = False,
 ) -> list[str]:
-    """Append debug playback flags when the Runner has an armed request."""
+    """Build the Modal runtime command used by the dashboard runner."""
 
-    if playback_request is None:
-        return command
-    return [
-        *command,
-        "--playback-run-id",
-        playback_request.source_run_id,
-        "--playback-game-id",
-        playback_request.game_id,
-        "--playback-turn-id",
-        str(playback_request.turn_id),
+    command = [
+        *MODAL_RUN_COMMAND_PREFIX,
+        "--config",
+        str(config_path),
+        "--database-name",
+        volume_relative_path(database_name),
+        "--live-commit-seconds",
+        str(live_commit_seconds),
     ]
+    if timing:
+        command.append("--timing")
+    return command
 
 
 def build_list_games_command() -> list[str]:
@@ -125,38 +133,10 @@ def clean_memory_database(
     *,
     timeout_seconds: float = 30.0,
 ) -> CommandResult:
-    """Clear memory rows, resetting stale disposable SQLite files when needed."""
+    """Run the same runtime clean-db behavior exposed in README commands."""
 
     command = build_clean_db_command(database_path)
-    result = run_command(command, timeout_seconds=timeout_seconds)
-    if result.return_code == 0 or SCHEMA_RESET_REQUIRED_TEXT not in result.output:
-        return result
-
-    try:
-        reset_path = _reset_sqlite_database_files(database_path)
-    except OSError as exc:
-        output = (
-            result.output
-            + "\n[dashboard] failed to reset stale SQLite database file: "
-            + f"{exc}\n"
-        )
-        return CommandResult(
-            command=list(command),
-            return_code=result.return_code,
-            output=output,
-        )
-
-    retry = run_command(command, timeout_seconds=timeout_seconds)
-    output = (
-        "[dashboard] reset stale SQLite database schema at "
-        f"{_display_path(reset_path)}.\n"
-        + retry.output
-    )
-    return CommandResult(
-        command=list(command),
-        return_code=retry.return_code,
-        output=output,
-    )
+    return run_command(command, timeout_seconds=timeout_seconds)
 
 
 def run_command(
@@ -201,41 +181,6 @@ def _timeout_output(exc: subprocess.TimeoutExpired) -> str:
     if isinstance(output, bytes):
         return output.decode(errors="replace")
     return str(output)
-
-
-def _reset_sqlite_database_files(database_path: str | Path) -> Path:
-    """Remove a disposable SQLite database and its sidecar files."""
-
-    path = _database_file_path(database_path)
-    for candidate in _sqlite_database_files(path):
-        if not candidate.exists():
-            continue
-        if not candidate.is_file():
-            raise OSError(f"{candidate} is not a file")
-        candidate.unlink()
-    return path
-
-
-def _database_file_path(database_path: str | Path) -> Path:
-    path = Path(database_path)
-    if not path.is_absolute():
-        path = repo_root() / path
-    return path.resolve()
-
-
-def _sqlite_database_files(path: Path) -> tuple[Path, ...]:
-    return (
-        path,
-        path.with_name(f"{path.name}-wal"),
-        path.with_name(f"{path.name}-shm"),
-    )
-
-
-def _display_path(path: Path) -> str:
-    try:
-        return str(path.relative_to(repo_root()))
-    except ValueError:
-        return str(path)
 
 
 @dataclass

@@ -10,35 +10,47 @@
 
 ## Memory Contracts
 
-- `ObservationRef`: reference to a real state record in `M` or an experimental
-  record in `E`.
-- `MemoryRecord`: generic persisted record.
+- `ObservationRef`: reference used for observed state/update surfaces.
 - `MemoryDomain`: either `state` or `experimental`.
 
-## Agent Contracts
+## Tool And Agent Contracts
 
-- `ToolCall`: provider-neutral request shape retained for future tools. The
-  current runtime exposes no real tools.
-- `ToolResult`: provider-neutral tool output shape retained for future tools.
+- `PredictionCall`: orchestration-owned world/goal prediction request shape.
+- `DescriptionPrediction`: S/G prediction payload; a top-level array of areas
+  with `bbox_2d` coordinate arrays in `[x0, y0, x1, y1]` order and a concise
+  `description`.
+- `PredictionResult`: output from world/goal prediction roles;
+  it carries `predicted_description` and source metadata.
+- `ToolCall` / `ToolResult`: compatibility aliases for the Agent X tool-loop
+  and existing E schema.
 - `AgentTrace`: complete trace of an agent decision step.
-- `ActionHistoryEntry`: compact record of one prior frame-turn decision
-  exposed to later X prompts.
-- `AgentToolRuntime`: controlled per-turn tool boundary exposed to `X`; current
-  configs expose an empty tool list.
+- `ActionHistoryEntry`: compact prompt-facing record of one prior frame-turn
+  action and whether that turn was controllable.
+- `AgentToolRuntime`: controlled per-turn extension point exposed to `X`.
 - `DecisionResult`: final action plus trace.
+- `PostDecisionPredictions`: world and goal description predictions produced
+  by orchestration for updater evidence.
 
 ## Context And Update Contracts
 
 - `RoleContext`: game-agnostic plus game-specific text context for one role.
-- `ContextDocuments`: current agent context document.
-- `TurnMetrics`: frame-turn cost, trace timing, and score/progress metrics.
-- `UpdaterFrameTransitionInput`: observed transition, trace, action, metrics,
-  and action-history evidence for updater `P`.
+- `ContextDocuments`: current role contexts for world, goal, and agent.
+- `TurnMetrics`: frame-turn action cost, load-adjusted decision duration, and
+  score/progress metadata assembled by orchestration for persistence and update
+  boundaries.
+- `score_delta`: raw environment progress metadata when available.
+- `WorldGameContextUpdateInput` and `GoalGameContextUpdateInput`: updater
+  inputs for world or goal game-context updates. Their prompt updater surface is
+  the previous role context, the committed role-specific post-decision
+  description prediction, and attached previous/current observation frames; the
+  world updater also receives the selected real action or synthetic `NONE`
+  action.
 - `AgentGameContextUpdateInput`: updater input for agent game-context updates,
-  including previous/current observations, live `AgentTrace`, action history,
-  context history, and update quantities.
-- `GeneralKnowledgeUpdateInput`: agent general updater input for end-of-run
-  `K^X` updates.
+  including the previous agent context, previous and current observed frames,
+  live `AgentTrace`, committed description predictions, timing, and score
+  progress metadata.
+- `GeneralKnowledgeUpdateInput`: shared general updater input for one role's
+  end-of-run `K` update.
 
 ## Boundary Rule
 

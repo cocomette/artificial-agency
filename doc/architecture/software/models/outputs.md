@@ -5,42 +5,49 @@
 The orchestrator agent returns:
 
 - one final `ActionSpec`
-- `AgentTrace` with reasoning summary, optional tool call/result records, and
-  metadata
+- `AgentTrace` with reasoning summary and metadata
 
-The current runtime exposes no real tools to `X`, so normal traces contain no
-tool results. Provider-specific responses are normalized inside the Agent X
-model layer before orchestration sees the final `DecisionResult`.
+The shared Agent X loop treats provider tool calls and final structured action
+output as alternate results of the same model step: tool calls continue the
+loop, while final structured output with no tool calls ends it.
 
-## Change Summary
+Provider-specific responses are normalized inside the Agent X model layer
+before orchestration sees the final `DecisionResult`.
 
-The change model returns:
+World and goal predictions are consumed by updater/persistence and influence
+later X decisions through maintained context.
 
-- concise transition summary text
-- structured change fields
-- cropped changed-cell count
-- provider metadata
+## World Prediction Model `S`
 
-Orchestration uses this output to build compact action history and updater
-input.
+The world model returns:
 
-## Agent Context Historizer
+- `predicted_description` for the next visual state
+- source observation reference
+- candidate action
+- optional explanation and metadata
+- metadata for persistence with the frame turn in `M`
 
-The historizer returns a structured summary of recent agent context evolution
-over the fields `goals`, `game_mechanics`, `policy`, `history`, and `extras`.
+## Goal Prediction Model `G`
+
+The goal model returns:
+
+- `predicted_description` for the goal-relevant visual state
+- source observation reference
+- optional explanation and metadata
+- metadata for persistence with the frame turn in `M`
 
 ## Updater `P`
 
 The updater returns revised context documents for the orchestration-selected
-task.
-
-- agent game updater replaces `RoleContext.game`
-- agent general updater replaces `RoleContext.general`
-
+task. During frame/game-loop updates, role-specific updater tasks return
+game-specific `L` for world, goal, and agent roles. At end-of-run, one shared
+general updater task returns game-agnostic `K` through one invocation per
+role.
 Orchestration applies these outputs to its live `ContextDocuments` working
 state, then persists the resulting authoritative contexts into `M`.
 
 ## Output Rule
 
-Model outputs are data. Orchestration decides whether they are committed `M`
-history, active agent context, action history evidence, or updater input.
+Model outputs are data. Orchestration decides whether they are temporary `E`
+artifacts, committed `M` history, active agent context, reusable references, or
+updater input.

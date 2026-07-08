@@ -10,8 +10,10 @@ import streamlit as st
 
 from debug.dashboard.model_inputs import (
     MODEL_INPUT_SLOTS,
+    PredictionOverlay,
     ProviderOutput,
     SentImage,
+    prediction_overlay,
     provider_output,
     records_for_slot,
     sent_images,
@@ -19,11 +21,11 @@ from debug.dashboard.model_inputs import (
 )
 
 _SENT_IMAGE_COLUMNS = 2
-_SENT_IMAGE_PREVIEW_SIZE = (1024, 1024)
+_SENT_IMAGE_PREVIEW_SIZE = (256, 256)
 
 
 def render_model_inputs(records: list[dict[str, Any]]) -> None:
-    """Render model-call subtabs for raw provider inputs."""
+    """Render six model-call subtabs for raw provider inputs."""
 
     if not records:
         st.info("No model input debug records captured for this turn.")
@@ -85,12 +87,16 @@ def _render_sent_image(image: SentImage) -> None:
     if image.image is None:
         st.warning(f"{image.label}: {image.error or 'image unavailable'}")
         return
+    width, height = image.image.size
     preview_width, preview_height = _SENT_IMAGE_PREVIEW_SIZE
     preview = image.image.resize(
         _SENT_IMAGE_PREVIEW_SIZE,
         Image.Resampling.NEAREST,
     )
-    st.caption(f"{image.label} | preview {preview_width} x {preview_height} px")
+    st.caption(
+        f"{image.label} | source {width} x {height} px | "
+        f"preview {preview_width} x {preview_height} px"
+    )
     st.image(preview, width=preview_width)
 
 
@@ -100,14 +106,37 @@ def _render_provider_output(record: dict[str, Any], *, slot: str) -> None:
         if not output.available:
             st.info("No provider output captured for this record.")
             return
+        if slot in {"world", "goal"}:
+            _render_prediction_overlay(
+                prediction_overlay(record, display_size=_SENT_IMAGE_PREVIEW_SIZE)
+            )
         _render_provider_output_payload(output)
 
 
-def _render_provider_output_payload(output: ProviderOutput) -> None:
-    if output.thinking is not None:
-        st.write("Thinking trace")
-        st.code(output.thinking, language="text")
+def _render_prediction_overlay(overlay: PredictionOverlay) -> None:
+    if overlay.image is not None:
+        width, height = overlay.image.size
+        source_width, source_height = overlay.source_size or overlay.image.size
+        st.write("Predicted bounding boxes")
+        st.image(
+            overlay.image,
+            caption=(
+                "Overlay image: first decoded provider input image "
+                f"({overlay.source_label or 'input frame'}) | "
+                f"source {source_width} x {source_height} px | "
+                f"preview {width} x {height} px | "
+                f"{overlay.drawn_count}/{overlay.area_count} boxes"
+            ),
+            width=width,
+        )
 
+    if overlay.warnings:
+        with st.expander("BBox overlay warnings", expanded=False):
+            for warning in overlay.warnings:
+                st.warning(warning)
+
+
+def _render_provider_output_payload(output: ProviderOutput) -> None:
     if output.parsed_json is not None:
         st.write("Parsed output")
         st.json(output.parsed_json)
@@ -193,9 +222,6 @@ def _render_chat_message(index: int, message: Any) -> None:
         content = payload.get("content")
         if isinstance(content, str):
             st.code(content, language="text")
-        elif isinstance(content, list):
-            for content_index, part in enumerate(content, start=1):
-                _render_chat_content_part(content_index, part)
         elif content is not None:
             st.code(_json_text(content), language="json")
 
@@ -216,27 +242,6 @@ def _render_chat_message(index: int, message: Any) -> None:
             st.code(_json_text(extras), language="json")
 
 
-def _render_chat_content_part(index: int, part: Any) -> None:
-    payload = _dict(part)
-    part_type = str(payload.get("type") or f"part {index}")
-    if part_type == "text" and isinstance(payload.get("text"), str):
-        st.write(f"Content {index}: text")
-        st.code(payload["text"], language="text")
-        return
-
-    if part_type == "image_url":
-        st.write(f"Content {index}: image_url")
-        with st.expander("Image URL payload", expanded=False):
-            st.code(
-                _json_text(_display_image_url_payload(payload.get("image_url"))),
-                language="json",
-            )
-        return
-
-    st.write(f"Content {index}: {part_type}")
-    st.code(_json_text(part), language="json")
-
-
 def _record_title(record: dict[str, Any], *, index: int) -> str:
     phase = str(record.get("phase") or "request")
     attempt = int(record.get("attempt") or 0)
@@ -251,23 +256,6 @@ def _token_label(value: int | None) -> str:
 
 def _json_text(value: Any) -> str:
     return json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False)
-
-
-def _display_image_url_payload(value: Any) -> Any:
-    if isinstance(value, dict):
-        payload = dict(value)
-        payload["url"] = _data_url_summary(payload.get("url"))
-        return payload
-    return _data_url_summary(value)
-
-
-def _data_url_summary(value: Any) -> Any:
-    if not isinstance(value, str) or not value.startswith("data:"):
-        return value
-    prefix, separator, encoded = value.partition(",")
-    if not separator:
-        return value
-    return f"{prefix},<base64 {len(encoded)} chars>"
 
 
 def _dict(value: Any) -> dict[str, Any]:

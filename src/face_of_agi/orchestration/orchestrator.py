@@ -15,11 +15,11 @@ from face_of_agi.environment.adapter import EnvironmentAdapter
 from face_of_agi.environment.config import EnvironmentConfig
 from face_of_agi.memory import ExperimentalMemory, StateMemory
 from face_of_agi.models.adapters import ModelRegistry, OrchestratorAgentModel
-from face_of_agi.models.updater import UpdaterTaskRegistry
 from face_of_agi.debug.bus import DebugBus
 from face_of_agi.debug.sinks import DebugTrace
 from face_of_agi.orchestration.game_loop import (
     GameLoopStateMachine,
+    PostDecisionPredictionRunner,
 )
 from face_of_agi.orchestration.tool_runtime import OrchestrationAgentToolRuntime
 
@@ -79,11 +79,10 @@ class Orchestrator:
                 state_memory=self.state_memory,
                 contexts=self.contexts,
                 agent=self._require_orchestrator_agent(),
-                change_summary_model=self.models.require_change_summary_model(),
-                agent_context_historizer=(
-                    self.models.agent_context_historizer_model
-                ),
                 updater_tasks=self.models.require_updater_tasks(),
+                post_decision_prediction_runner=(
+                    self._build_post_decision_prediction_runner(active_debug)
+                ),
                 tool_runtime_factory=self._build_agent_tool_runtime,
                 debug=active_debug,
             ).run(
@@ -125,6 +124,18 @@ class Orchestrator:
             frame_context=frame_context,
             available_tool_names=self._available_tool_names(),
             tools_enabled=frame_context.control_mode.controllable,
+        )
+
+    def _build_post_decision_prediction_runner(
+        self,
+        debug: DebugBus | None = None,
+    ) -> PostDecisionPredictionRunner:
+        """Build the orchestration-owned committed prediction runner."""
+
+        return PostDecisionPredictionRunner(
+            world_model=self.models.world_prediction_model,
+            goal_model=self.models.goal_prediction_model,
+            debug=debug or self.debug,
         )
 
     def _available_tool_names(self) -> tuple[ToolName, ...]:

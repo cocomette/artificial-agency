@@ -7,7 +7,7 @@ import shlex
 
 import streamlit as st
 
-from debug.dashboard import workshop
+from debug.dashboard import test_workshop
 from debug.dashboard.runner import RuntimeRunner, format_command
 
 TEST_RUNNER_KEY = "test_workshop_runner"
@@ -23,9 +23,9 @@ RESULT_SELECTION_KEY = "test_workshop_result_selection"
 def render_test_workshop() -> None:
     """Render E2E runner controls and generic result artifacts."""
 
-    tests = workshop.list_e2e_tests()
+    tests = test_workshop.list_e2e_tests()
     if not tests:
-        st.error(f"No E2E scripts found in {workshop.DEFAULT_E2E_DIR}.")
+        st.error(f"No E2E scripts found in {test_workshop.DEFAULT_E2E_DIR}.")
         return
 
     st.header("Run Configuration")
@@ -56,7 +56,7 @@ def _build_command(selected_name: str) -> list[str] | None:
         return None
 
     try:
-        return workshop.build_e2e_command(selected_name, extra_args=extra_args)
+        return test_workshop.build_e2e_command(selected_name, extra_args=extra_args)
     except ValueError as exc:
         st.error(str(exc))
         return None
@@ -167,12 +167,12 @@ def _handle_run_completion(runner: RuntimeRunner | None, selected_name: str) -> 
 
 
 def _queue_default_result_selection(selected_name: str) -> None:
-    default_dir = workshop.default_result_dir_for_test(selected_name)
+    default_dir = test_workshop.default_result_dir_for_test(selected_name)
     st.session_state[PENDING_RESULT_SELECTION_KEY] = _relative_to_repo(default_dir)
 
 
 def _render_result_artifacts(selected_name: str) -> None:
-    result_dirs = workshop.list_result_dirs()
+    result_dirs = test_workshop.list_result_dirs()
     if not result_dirs:
         st.info("No E2E result folders found.")
         return
@@ -193,7 +193,7 @@ def _render_result_artifacts(selected_name: str) -> None:
         )
     )
     selected_dir = result_dirs[labels.index(selected_label)]
-    artifacts = workshop.collect_result_artifacts(selected_dir)
+    artifacts = test_workshop.collect_result_artifacts(selected_dir)
 
     cols = st.columns(2)
     cols[0].metric("Images", len(artifacts.images))
@@ -213,7 +213,7 @@ def _render_result_artifacts(selected_name: str) -> None:
 
 
 def _default_result_label(labels: list[str], selected_name: str) -> str:
-    default_dir = workshop.default_result_dir_for_test(selected_name)
+    default_dir = test_workshop.default_result_dir_for_test(selected_name)
     default_label = _relative_to_repo(default_dir)
     if default_label in labels:
         return default_label
@@ -223,11 +223,11 @@ def _default_result_label(labels: list[str], selected_name: str) -> str:
 def _expected_result_label(selected_name: str, command: list[str]) -> str:
     output_dir = _output_dir_from_command(command)
     if output_dir is None:
-        default_dir = workshop.default_result_dir_for_test(selected_name)
+        default_dir = test_workshop.default_result_dir_for_test(selected_name)
         return _relative_to_repo(default_dir)
     path = Path(output_dir)
     if not path.is_absolute():
-        path = workshop.repo_root() / path
+        path = test_workshop.repo_root() / path
     return _relative_to_repo(path)
 
 
@@ -256,6 +256,6 @@ def _rerun_app() -> None:
 
 def _relative_to_repo(path: Path) -> str:
     try:
-        return path.resolve().relative_to(workshop.repo_root()).as_posix()
+        return path.resolve().relative_to(test_workshop.repo_root()).as_posix()
     except ValueError:
         return str(path)

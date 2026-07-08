@@ -7,27 +7,36 @@ from pathlib import Path
 import streamlit as st
 
 from debug.dashboard import config_manager
+from debug.dashboard.modal_snapshot import (
+    ModalPullError,
+    ModalSnapshotConfig,
+    volume_relative_path,
+)
 from debug.dashboard.UI.config_editor import render_config_editor
 from debug.dashboard.runner import (
     CommandResult,
     GAME_CATALOG_PATH,
     RUNTIME_RUNNER_KEY,
-    RUNNER_PLAYBACK_REQUEST_KEY,
     RuntimeRunner,
+    build_modal_run_command,
     build_run_command,
     format_command,
     pull_game_list,
 )
-from debug.playback import PlaybackRequest
 
 RUNNER_KEY = RUNTIME_RUNNER_KEY
 RUNNER_CONFIG_KEY = "runner_config"
-RUNNER_SELECTED_CONFIG_KEY = "runner_selected_config"
 PENDING_CONFIG_KEY = "runner_pending_config"
 GAME_LIST_RESULT_KEY = "runner_game_list_result"
+MODAL_LIVE_COMMIT_SECONDS_KEY = "runner_modal_live_commit_seconds"
+MODAL_TIMING_KEY = "runner_modal_timing"
 
 
-def render_runner(database_path: str) -> None:
+def render_runner(
+    database_path: str,
+    *,
+    modal_snapshot: ModalSnapshotConfig | None = None,
+) -> None:
     """Render runtime process controls and live output."""
 
     _render_runner_header()
@@ -38,7 +47,11 @@ def render_runner(database_path: str) -> None:
         return
 
     config_names = [config_manager.config_label(path) for path in config_paths]
-    selected_name = _render_config_selector(config_names)
+    pending_name = st.session_state.pop(PENDING_CONFIG_KEY, None)
+    if pending_name in config_names:
+        st.session_state[RUNNER_CONFIG_KEY] = pending_name
+
+    selected_name = str(st.selectbox("Config", config_names, key=RUNNER_CONFIG_KEY))
     selected_path = config_manager.safe_config_path(selected_name)
     selected_config_path = _relative_to_repo(selected_path)
 
@@ -50,25 +63,44 @@ def render_runner(database_path: str) -> None:
         )
 
     keep_all_m_states = bool(st.checkbox("Keep all M states", value=True))
-    playback_request = _render_playback_request()
     command = build_run_command(
         selected_config_path,
         database_path,
         keep_all_m_states=keep_all_m_states,
-        playback_request=playback_request,
     )
+    modal_command = None
+    if modal_snapshot is not None:
+        try:
+            modal_command = _render_modal_run_options(
+                selected_config_path,
+                modal_snapshot,
+            )
+        except ModalPullError as exc:
+            st.error(str(exc))
 
     runner = _get_runner()
     if runner is not None:
         runner.poll()
 
     running = runner is not None and runner.is_running()
-    st.code(format_command(command), language="bash")
-    run_col, stop_col, clear_col = st.columns(3)
-    if run_col.button("RUN config", disabled=running):
-        runner = RuntimeRunner.start(command)
-        st.session_state[RUNNER_KEY] = runner
-        st.rerun()
+    if modal_command is None:
+        st.code(format_command(command), language="bash")
+        run_col, stop_col, clear_col = st.columns(3)
+        if run_col.button("RUN config", disabled=running):
+            runner = RuntimeRunner.start(command)
+            st.session_state[RUNNER_KEY] = runner
+            st.rerun()
+    else:
+        command_to_start = _render_commands(
+            command,
+            modal_command,
+            running=running,
+        )
+        if command_to_start is not None:
+            runner = RuntimeRunner.start(command_to_start)
+            st.session_state[RUNNER_KEY] = runner
+            st.rerun()
+        stop_col, clear_col = st.columns(2)
 
     if stop_col.button("Stop", disabled=not running):
         assert runner is not None
@@ -83,68 +115,52 @@ def render_runner(database_path: str) -> None:
     _render_runner_state(runner)
 
 
-def _render_config_selector(config_names: list[str]) -> str:
-    pending_name = st.session_state.pop(PENDING_CONFIG_KEY, None)
-    widget_name = st.session_state.get(RUNNER_CONFIG_KEY)
-
-    if pending_name in config_names:
-        st.session_state[RUNNER_CONFIG_KEY] = pending_name
-        selected_name = str(st.selectbox("Config", config_names, key=RUNNER_CONFIG_KEY))
-        st.session_state[RUNNER_SELECTED_CONFIG_KEY] = selected_name
-        return selected_name
-
-    if widget_name in config_names:
-        selected_name = str(st.selectbox("Config", config_names, key=RUNNER_CONFIG_KEY))
-        st.session_state[RUNNER_SELECTED_CONFIG_KEY] = selected_name
-        return selected_name
-
-    st.session_state.pop(RUNNER_CONFIG_KEY, None)
-    default_name = _resolve_config_selection(
-        config_names,
-        stored_name=st.session_state.get(RUNNER_SELECTED_CONFIG_KEY),
-        pending_name=None,
-    )
-
-    selected_name = str(
-        st.selectbox(
-            "Config",
-            config_names,
-            index=config_names.index(default_name),
-            key=RUNNER_CONFIG_KEY,
+def _render_modal_run_options(
+    selected_config_path: Path,
+    modal_snapshot: ModalSnapshotConfig,
+) -> list[str]:
+    with st.expander("Modal run options", expanded=False):
+        remote_database = volume_relative_path(modal_snapshot.remote_database)
+        st.text_input(
+            "Remote database name",
+            value=remote_database,
+            disabled=True,
         )
+        live_commit_seconds = int(
+            st.number_input(
+                "Live commit seconds",
+                min_value=0,
+                max_value=3600,
+                step=5,
+                value=30,
+                key=MODAL_LIVE_COMMIT_SECONDS_KEY,
+            )
+        )
+        timing = bool(st.checkbox("Write timing JSONL", key=MODAL_TIMING_KEY))
+    return build_modal_run_command(
+        selected_config_path,
+        database_name=remote_database,
+        live_commit_seconds=live_commit_seconds,
+        timing=timing,
     )
-    st.session_state[RUNNER_SELECTED_CONFIG_KEY] = selected_name
-    return selected_name
 
 
-def _resolve_config_selection(
-    config_names: list[str],
+def _render_commands(
+    local_command: list[str],
+    modal_command: list[str],
     *,
-    stored_name: object,
-    pending_name: object,
-) -> str:
-    if pending_name in config_names:
-        return str(pending_name)
-    if stored_name in config_names:
-        return str(stored_name)
-    return config_names[0]
-
-
-def _render_playback_request() -> PlaybackRequest | None:
-    request = st.session_state.get(RUNNER_PLAYBACK_REQUEST_KEY)
-    if not isinstance(request, PlaybackRequest):
-        return None
-
-    st.info(
-        "Playback armed: "
-        f"run `{request.source_run_id}`, game `{request.game_id}`, "
-        f"handoff turn `{request.turn_id}`. "
-        "The next run will replay prior turns before live control resumes."
-    )
-    if st.button("Clear playback request"):
-        st.session_state.pop(RUNNER_PLAYBACK_REQUEST_KEY, None)
-        st.rerun()
-    return request
+    running: bool,
+) -> list[str] | None:
+    modal_tab, local_tab = st.tabs(["Modal command", "Local command"])
+    with modal_tab:
+        st.code(format_command(modal_command), language="bash")
+        if st.button("RUN config", key="runner_run_modal", disabled=running):
+            return modal_command
+    with local_tab:
+        st.code(format_command(local_command), language="bash")
+        if st.button("RUN config", key="runner_run_local", disabled=running):
+            return local_command
+    return None
 
 
 def _render_runner_header() -> None:

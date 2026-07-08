@@ -21,7 +21,7 @@ def render_config_editor(
 ) -> None:
     """Render validation, save, and save-as controls for one config."""
 
-    if st.session_state.get(LOADED_KEY) != selected_name or _editor_state_missing():
+    if st.session_state.get(LOADED_KEY) != selected_name:
         st.session_state[TEXT_KEY] = config_manager.read_config(selected_path)
         st.session_state[LOADED_KEY] = selected_name
         st.session_state[SAVE_AS_KEY] = f"{selected_path.stem}_copy.yaml"
@@ -72,7 +72,3 @@ def render_config_editor(
             if saved_config_key is not None:
                 st.session_state[saved_config_key] = saved_label
             st.rerun()
-
-
-def _editor_state_missing() -> bool:
-    return TEXT_KEY not in st.session_state or SAVE_AS_KEY not in st.session_state

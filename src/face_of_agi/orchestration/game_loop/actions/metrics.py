@@ -30,6 +30,7 @@ def turn_metrics(
     *,
     actual_next_observation: Observation | None,
     trace_cost_seconds: float | None,
+    prior_levels_completed: int | None,
     cumulative_time_cost: float | None,
 ) -> TurnMetrics:
     """Build frame-turn metrics for persistence and updater boundaries."""
@@ -37,17 +38,24 @@ def turn_metrics(
     return TurnMetrics(
         time_cost=cumulative_time_cost,
         trace_cost=trace_cost_seconds,
-        cumulative_score=cumulative_score(actual_next_observation),
+        score_delta=score_delta(
+            prior_levels_completed=prior_levels_completed,
+            actual_next_observation=actual_next_observation,
+        ),
     )
 
 
-def cumulative_score(actual_next_observation: Observation | None) -> float | None:
-    """Return completed levels after the frame transition when available."""
+def score_delta(
+    *,
+    prior_levels_completed: int | None,
+    actual_next_observation: Observation | None,
+) -> float | None:
+    """Return completed-level delta if both sides expose score metadata."""
 
     next_levels_completed = levels_completed(actual_next_observation)
-    if next_levels_completed is None:
+    if prior_levels_completed is None or next_levels_completed is None:
         return None
-    return float(next_levels_completed)
+    return float(next_levels_completed - prior_levels_completed)
 
 
 def levels_completed(observation: Observation | None) -> int | None:
@@ -67,7 +75,7 @@ def levels_completed(observation: Observation | None) -> int | None:
 
 
 def _load_duration_seconds(value: Any) -> float:
-    """Sum load_duration nanoseconds from provider usage payloads."""
+    """Sum Ollama-style load_duration nanoseconds from provider usage payloads."""
 
     if isinstance(value, dict):
         return _nanoseconds_to_seconds(value.get("load_duration"))

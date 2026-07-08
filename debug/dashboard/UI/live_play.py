@@ -8,10 +8,19 @@ import streamlit as st
 
 from debug.dashboard.runner import RUNTIME_RUNNER_KEY, RuntimeRunner
 from debug.dashboard.memory_reader import (
+    filter_states,
     latest_state,
+    load_e_experiments,
     load_m_states,
+    load_model_input_debug_records,
+    matching_experiments,
+    matching_model_input_records,
 )
-from debug.dashboard.UI.turn_detail import render_turn_overview
+from debug.dashboard.UI.turn_detail import (
+    render_live_status,
+    render_recent_turns,
+    render_selected_turn,
+)
 
 LIVE_REFRESH_SECONDS = 2
 
@@ -62,6 +71,8 @@ def _render_live_body(
         if refresh_database is not None:
             refresh_database()
         states = load_m_states(database_path)
+        experiments = load_e_experiments(database_path)
+        model_input_records = load_model_input_debug_records(database_path)
     except Exception as exc:
         st.error(str(exc))
         return
@@ -75,7 +86,22 @@ def _render_live_body(
         st.info("No live turn is available yet.")
         return
 
-    render_turn_overview(selected_state)
+    current_run_id = str(selected_state["run_id"])
+    current_game_id = str(selected_state["game_id"])
+    visible_states = filter_states(
+        states,
+        run_id=current_run_id,
+        game_id=current_game_id,
+    )
+
+    st.header("Live State")
+    render_live_status(selected_state, experiments)
+    render_recent_turns(visible_states)
+    render_selected_turn(
+        selected_state,
+        matching_experiments(experiments, selected_state),
+        matching_model_input_records(model_input_records, selected_state),
+    )
 
 
 def _runtime_is_running() -> bool:

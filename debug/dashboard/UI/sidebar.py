@@ -3,18 +3,27 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
 
-from debug.dashboard.memory_reader import list_sqlite_database_files
+from debug.dashboard.modal_snapshot import (
+    ModalPullError,
+    ModalSnapshotConfig,
+    pull_modal_sqlite_snapshot,
+)
 from debug.dashboard.runner import clean_memory_database, format_command
 
 PAGE_KEY = "dashboard_page"
 DATABASE_KEY = "dashboard_database_path"
-DATABASE_FILE_KEY = "dashboard_database_file"
 CLEAR_RESULT_KEY = "dashboard_clear_memory_result"
-PAGES = ("Runner", "Test Workshop", "Live Play", "Offline Inspector", "Scoring")
+MODAL_LOCAL_DATABASE_KEY = "dashboard_modal_local_database_path"
+MODAL_PULL_STATUS_KEY = "dashboard_modal_pull_status"
+MODAL_REMOTE_DATABASE_KEY = "dashboard_modal_remote_database"
+MODAL_SNAPSHOT_KEY = "dashboard_modal_snapshot"
+MODAL_VOLUME_KEY = "dashboard_modal_volume"
+PAGES = ("Runner", "Test Workshop", "Live Play", "Offline Inspector")
 
 
 @dataclass(frozen=True)
@@ -32,7 +41,7 @@ class SidebarState:
     page: str
     inspection_database: str
     local_database: str
-    database_folder: str
+    modal_snapshot: ModalSnapshotConfig | None = None
 
 
 PAGE_METADATA = {
@@ -46,23 +55,31 @@ PAGE_METADATA = {
         "Offline Inspector",
         "Inspect historical SQLite turns.",
     ),
-    "Scoring": PageMetadata(
-        "Scoring",
-        "Compare memory runs with human baseline stats.",
-    ),
 }
 
 
 def render_sidebar(
     *,
     default_database: str,
+    modal_enabled: bool = False,
+    default_local_database: str | None = None,
+    default_modal_volume: str = "",
+    default_modal_database: str = "",
+    default_modal_snapshot: str = "",
 ) -> SidebarState:
     """Render common sidebar controls and return navigation state."""
 
     with st.sidebar:
         _ensure_page_state()
-        _ensure_database_state(default_database=default_database)
-        brand = "Debug Console"
+        _ensure_database_state(
+            default_database=default_database,
+            modal_enabled=modal_enabled,
+            default_local_database=default_local_database or default_database,
+            default_modal_volume=default_modal_volume,
+            default_modal_database=default_modal_database,
+            default_modal_snapshot=default_modal_snapshot,
+        )
+        brand = "Modal Debug Console" if modal_enabled else "Debug Console"
         st.markdown(
             f"""
             <div class="sidebar-brand">
@@ -84,25 +101,43 @@ def render_sidebar(
             f'<div class="sidebar-section-title">{page} Controls</div>',
             unsafe_allow_html=True,
         )
-        targets = _render_dynamic_controls(
+        local_database = _render_dynamic_controls(
             page,
             default_database,
+            modal_enabled=modal_enabled,
         )
-        local_database = targets.local_database
-        inspection_database = targets.inspection_database
-        database_folder = targets.database_folder
+        inspection_database = local_database
+        modal_snapshot = None
 
-        if page in {"Live Play", "Offline Inspector", "Scoring"} and st.button(
+        if modal_enabled:
+            st.markdown('<div class="sidebar-divider"></div>', unsafe_allow_html=True)
+            st.markdown(
+                '<div class="sidebar-section-title">Modal Snapshot</div>',
+                unsafe_allow_html=True,
+            )
+            modal_snapshot = _render_modal_snapshot_controls()
+            inspection_database = modal_snapshot.local_snapshot
+
+        if page in {"Live Play", "Offline Inspector"} and st.button(
             "Refresh memory view",
             use_container_width=True,
         ):
-            st.cache_data.clear()
-            st.rerun()
+            should_rerun = True
+            if modal_snapshot is not None:
+                try:
+                    pull_dashboard_modal_snapshot(modal_snapshot)
+                except ModalPullError as exc:
+                    st.error(str(exc))
+                    should_rerun = False
+            else:
+                st.cache_data.clear()
+            if should_rerun:
+                st.rerun()
     return SidebarState(
         page=page,
         inspection_database=inspection_database,
         local_database=local_database,
-        database_folder=database_folder,
+        modal_snapshot=modal_snapshot,
     )
 
 
@@ -115,17 +150,19 @@ def _ensure_page_state() -> None:
 def _ensure_database_state(
     *,
     default_database: str,
+    modal_enabled: bool,
+    default_local_database: str,
+    default_modal_volume: str,
+    default_modal_database: str,
+    default_modal_snapshot: str,
 ) -> None:
-    st.session_state.setdefault(DATABASE_KEY, default_database)
-
-
-@dataclass(frozen=True)
-class LocalTargets:
-    """Resolved local database folder plus concrete SQLite targets."""
-
-    database_folder: str
-    inspection_database: str
-    local_database: str
+    if modal_enabled:
+        st.session_state.setdefault(MODAL_LOCAL_DATABASE_KEY, default_local_database)
+        st.session_state.setdefault(MODAL_VOLUME_KEY, default_modal_volume)
+        st.session_state.setdefault(MODAL_REMOTE_DATABASE_KEY, default_modal_database)
+        st.session_state.setdefault(MODAL_SNAPSHOT_KEY, default_modal_snapshot)
+    else:
+        st.session_state.setdefault(DATABASE_KEY, default_database)
 
 
 def _render_navigation() -> None:
@@ -147,80 +184,109 @@ def _render_navigation() -> None:
 def _render_dynamic_controls(
     page: str,
     default_database: str,
-) -> LocalTargets:
+    *,
+    modal_enabled: bool,
+) -> str:
     if DATABASE_KEY not in st.session_state:
         st.session_state[DATABASE_KEY] = default_database
     if page == "Test Workshop":
         st.caption("E2E artifacts are read from `runs/`.")
         if st.button("Refresh test results", use_container_width=True):
             st.rerun()
-        return _current_targets()
+        return _current_local_database(modal_enabled)
 
-    database_folder = _render_database_folder_input()
-    local_database = _local_run_database(database_folder)
-    if page == "Runner":
-        st.caption("Local runs launched from this dashboard write to `memory.sqlite`.")
-        _render_clear_memory_control(local_database)
-        return LocalTargets(
-            database_folder=database_folder,
-            inspection_database=local_database,
-            local_database=local_database,
-        )
-    if page in {"Live Play", "Offline Inspector"}:
-        inspection_database = _render_database_file_selector(database_folder)
-        return LocalTargets(
-            database_folder=database_folder,
-            inspection_database=inspection_database,
-            local_database=local_database,
-        )
+    if modal_enabled:
+        if page == "Runner":
+            database_path = str(
+                st.text_input(
+                    "Local run database",
+                    key=MODAL_LOCAL_DATABASE_KEY,
+                )
+            )
+            st.caption("Local runs launched from this dashboard write here.")
+            _render_clear_memory_control(database_path)
+            return database_path
 
-    st.caption("Scoring reads all SQLite files directly inside this folder.")
-    return LocalTargets(
-        database_folder=database_folder,
-        inspection_database="",
-        local_database=local_database,
-    )
+        st.caption("Memory inspection reads the Modal snapshot below.")
+        return _current_local_database(modal_enabled)
 
-
-def _current_targets() -> LocalTargets:
-    database_folder = str(st.session_state[DATABASE_KEY])
-    local_database = _local_run_database(database_folder)
-    return LocalTargets(
-        database_folder=database_folder,
-        inspection_database=local_database,
-        local_database=local_database,
-    )
-
-
-def _render_database_folder_input() -> str:
-    return str(st.text_input("Memory database folder", key=DATABASE_KEY))
-
-
-def _render_database_file_selector(database_folder: str) -> str:
-    try:
-        database_files = list_sqlite_database_files(database_folder)
-    except (FileNotFoundError, NotADirectoryError) as exc:
-        st.warning(str(exc))
-        return ""
-    if not database_files:
-        st.warning(f"No SQLite memory files found in `{database_folder}`.")
-        return ""
-
-    options = [path.name for path in database_files]
-    if st.session_state.get(DATABASE_FILE_KEY) not in options:
-        st.session_state[DATABASE_FILE_KEY] = options[0]
-    selected_name = str(
-        st.selectbox(
+    database_path = str(
+        st.text_input(
             "Memory database",
-            options,
-            key=DATABASE_FILE_KEY,
+            key=DATABASE_KEY,
         )
     )
-    return str(Path(database_folder) / selected_name)
+    st.caption("Runtime and memory inspection target.")
+    _render_clear_memory_control(database_path)
+    return database_path
 
 
-def _local_run_database(database_folder: str) -> str:
-    return str(Path(database_folder) / "memory.sqlite")
+def _current_local_database(modal_enabled: bool) -> str:
+    key = MODAL_LOCAL_DATABASE_KEY if modal_enabled else DATABASE_KEY
+    return str(st.session_state[key])
+
+
+def _render_modal_snapshot_controls() -> ModalSnapshotConfig:
+    volume_name = str(st.text_input("Modal volume", key=MODAL_VOLUME_KEY))
+    remote_database = str(st.text_input("Remote database", key=MODAL_REMOTE_DATABASE_KEY))
+    local_snapshot = str(st.text_input("Local snapshot", key=MODAL_SNAPSHOT_KEY))
+    config = ModalSnapshotConfig(
+        volume_name=volume_name,
+        remote_database=remote_database,
+        local_snapshot=local_snapshot,
+    )
+    if st.button("Pull snapshot now", use_container_width=True):
+        try:
+            pull_dashboard_modal_snapshot(config)
+        except ModalPullError as exc:
+            st.error(str(exc))
+        else:
+            st.rerun()
+    _render_pull_status()
+    st.caption("Live Play pulls before each memory refresh.")
+    return config
+
+
+def pull_dashboard_modal_snapshot(config: ModalSnapshotConfig) -> None:
+    """Pull the configured Modal SQLite snapshot and update Streamlit state."""
+
+    local_path = Path(config.local_snapshot)
+    try:
+        pull_modal_sqlite_snapshot(
+            volume_name=config.volume_name,
+            remote_path=config.remote_database,
+            local_path=local_path,
+        )
+    except ModalPullError as exc:
+        _record_pull_status("error", str(exc))
+        if not local_path.exists():
+            raise
+        st.warning(f"Modal pull failed; showing the last local snapshot. {exc}")
+        return
+
+    st.cache_data.clear()
+    _record_pull_status("ok", f"Pulled {config.remote_database} to {local_path}.")
+
+
+def _record_pull_status(kind: str, message: str) -> None:
+    st.session_state[MODAL_PULL_STATUS_KEY] = {
+        "kind": kind,
+        "message": message,
+        "time": datetime.now().strftime("%H:%M:%S"),
+    }
+
+
+def _render_pull_status() -> None:
+    status = st.session_state.get(MODAL_PULL_STATUS_KEY)
+    if not isinstance(status, dict):
+        st.caption("No Modal snapshot has been pulled yet.")
+        return
+
+    message = f"{status.get('time', '--:--:--')} - {status.get('message', '')}"
+    if status.get("kind") == "ok":
+        st.success(message)
+    else:
+        st.error(message)
 
 
 def _render_clear_memory_control(database_path: str) -> None:
@@ -232,9 +298,7 @@ def _render_clear_memory_control(database_path: str) -> None:
 
     result = st.session_state.get(CLEAR_RESULT_KEY)
     if result is None:
-        st.caption(
-            "Clears rows with runtime clean-db; resets stale local SQLite files."
-        )
+        st.caption("Clears memory by running the runtime clean-db command.")
         return
 
     if result.return_code == 0:
@@ -247,9 +311,6 @@ def _render_clear_memory_control(database_path: str) -> None:
 @st.dialog("Clear Memory Database")
 def _confirm_clear_memory_dialog(database_path: str) -> None:
     st.write(f"Clear persisted memory rows from `{database_path}`?")
-    st.caption(
-        "Stale disposable SQLite files are reset when their schema is obsolete."
-    )
     confirm_col, cancel_col = st.columns(2)
     if confirm_col.button("Clear memory database", type="primary"):
         st.session_state[CLEAR_RESULT_KEY] = clean_memory_database(database_path)

@@ -2,7 +2,6 @@
 Output format: return exactly one top-level `updated_context` field whose value
 is the complete revised context string; do not return arrays,
 or nested objects.
-Example shape: {"updated_context":"<complete revised context text>"}
 
 You are given 2 texts:
 - 1 describing the agent strategy for a game

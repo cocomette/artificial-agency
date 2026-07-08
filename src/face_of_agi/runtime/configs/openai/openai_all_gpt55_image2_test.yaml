@@ -1,0 +1,70 @@
+# Hosted OpenAI quality-oriented test run for exercising the full game loop.
+# X, S, G, and all P updater slots use gpt-5.5 for text reasoning.
+# S and G use gpt-image-2 for OpenAI image editing.
+game_index: 3
+seed: 0
+operation_mode: offline
+game_catalog_path: src/face_of_agi/environment/local_games.json
+environments_dir: environment_files
+recordings_dir: recordings
+enable_visualization: true
+save_recording: false
+render_mode: human
+
+max_actions_per_level: 20
+use_learned_contexts: false
+experimental_memory_turn_buffer: 2
+action_history_window: 5
+
+debug_keep_all_m_states: true
+debug_trace: agent_decision
+debug_color: always
+
+models:
+  agent:
+    backend: openai
+    model: gpt-5.5
+    input_image_size: 1024x1024
+    input_image_resample: nearest
+    max_tool_calls: 0
+    repair_attempts: 1
+    reasoning:
+      effort: medium
+      summary: auto
+  world:
+    backend: openai
+    model: gpt-5.5
+    image_model: gpt-image-2
+    image_quality: low
+    image_size: 1024x1024
+    reasoning:
+      effort: medium
+  goal:
+    backend: openai
+    model: gpt-5.5
+    image_model: gpt-image-2
+    image_quality: low
+    image_size: 1024x1024
+    reasoning:
+      effort: medium
+  updater:
+    world:
+      backend: openai
+      model: gpt-5.5
+      reasoning:
+        effort: medium
+    goal:
+      backend: openai
+      model: gpt-5.5
+      reasoning:
+        effort: medium
+    agent:
+      backend: openai
+      model: gpt-5.5
+      reasoning:
+        effort: medium
+    general:
+      backend: openai
+      model: gpt-5.5
+      reasoning:
+        effort: medium

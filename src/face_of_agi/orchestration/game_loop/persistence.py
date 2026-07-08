@@ -34,19 +34,16 @@ def persist_turn(
         turn_id=current.turn_id,
         step=current.observation.step,
     ):
-        try:
-            persist_turn_shell(
-                frame_context=current.to_frame_context(),
-                turn_id=current.turn_id,
-                decision=decision,
-                update_input=update_input,
-                state_record_ids=session.state_record_ids,
-                state_memory=state_memory,
-                contexts=contexts,
-                debug=debug,
-            )
-        except Exception:
-            pass
+        persist_turn_shell(
+            frame_context=current.to_frame_context(),
+            turn_id=current.turn_id,
+            decision=decision,
+            update_input=update_input,
+            state_record_ids=session.state_record_ids,
+            state_memory=state_memory,
+            contexts=contexts,
+            debug=debug,
+        )
 
 
 def persist_turn_shell(
@@ -74,6 +71,7 @@ def persist_turn_shell(
         chosen_action=decision.final_action,
         contexts=contexts,
         agent_trace=decision.trace,
+        post_decision_predictions=update_input.post_decision_predictions,
         turn_metrics=update_input.turn_metrics,
     )
     state_record_ids.append(state.id)

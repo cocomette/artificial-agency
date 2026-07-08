@@ -1,0 +1,56 @@
+run_name: gemma4-e2b-update2-lora-r64
+dry_run: false
+frame_history_n: 4
+palette_size: 16
+frame_size: 64x64
+
+model:
+  backend: hf
+  model_id: google/gemma-4-E2B-it
+  device: auto
+  dtype: bf16
+  attn_implementation: sdpa
+  image_size: 256x256
+  action_selection: sample
+  temperature: 0.8
+  lora:
+    enabled: true
+    r: 64
+    alpha: 128
+    dropout: 0.05
+    save_every: 10
+
+environment:
+  game_id: ls20-9607627b
+  game_index: 3
+  max_turns: 50
+  seed: 0
+  operation_mode: offline
+  environments_dir: environment_files
+  recordings_dir: recordings
+  save_recording: false
+
+rewards:
+  score_weight: 10.0
+  learning_progress_weight: 10.0
+  action_cost: 0.02
+  time_cost_weight: 0.001
+  update_cost: 0.01
+
+update:
+  learning_rate: 0.0001
+  update_steps: 2
+  gradient_clip_norm: 1.0
+  next_frame_loss_weight: 1.0
+  policy_loss_weight: 0.05
+  coord_loss_weight: 0.01
+  holdout_min_transitions: 1
+  learning_progress_horizon: 4
+  learning_progress_discount: 0.8
+  learning_progress_rate_beta: 0.5
+  reward_baseline_beta: 0.9
+  policy_warmup_turns: 3
+  policy_clip_epsilon: 0.2
+
+logging:
+  output_dir: runs/single_vlm_lora/gemma4_e2b_a10040_update2_lora_r64

@@ -7,7 +7,6 @@ from face_of_agi.debug.sinks import (
     CompositeDebugSink,
     DebugSink,
     DebugTrace,
-    LiveTurnMonitor,
     NullDebugSink,
 )
 
@@ -16,7 +15,6 @@ __all__ = [
     "DebugBus",
     "DebugSink",
     "DebugTrace",
-    "LiveTurnMonitor",
     "ModelInputDebugRecord",
     "NullDebugSink",
     "sanitize_for_debug",

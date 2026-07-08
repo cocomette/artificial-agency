@@ -8,13 +8,11 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from face_of_agi.contracts import (
-    ActionHistoryItem,
-    ActionOutcomeEvidence,
+    ActionHistoryEntry,
     ActionSpec,
     DecisionResult,
     ExperimentToolInvocationResult,
     Observation,
-    ObservationRef,
     RoleContext,
     ToolCall,
     ToolResult,
@@ -29,6 +27,7 @@ from face_of_agi.models.orchestrator_agent.tooling import (
     parse_action,
     parse_final_action,
 )
+from face_of_agi.models.providers.vision import resolve_model_vision_profile
 
 
 @dataclass(slots=True)
@@ -36,12 +35,12 @@ class AgentTurnRequest:
     """Provider-neutral input for one X provider conversation."""
 
     context: RoleContext
+    first_observation: Observation
     current_observation: Observation
     action_space: Sequence[ActionSpec]
-    glossary_actions: Sequence[ActionSpec]
-    recent_action_history: tuple[ActionHistoryItem, ...] = ()
-    recent_action_history_available: bool = True
-    action_outcome_evidence: ActionOutcomeEvidence | None = None
+    recent_action_history: tuple[ActionHistoryEntry, ...] = ()
+    world_game_context: str = ""
+    goal_game_context: str = ""
 
 
 @dataclass(slots=True)
@@ -125,19 +124,22 @@ class OrchestratorAgentAdapter:
         self.config = config or OrchestratorAgentConfig()
         self.provider = provider
         self.last_provider_requests: list[Any] = []
+        self.vision_profile = resolve_model_vision_profile(
+            backend=self.provider.backend,
+            model=self.provider.model,
+        )
+        self.coordinate_space = self.vision_profile.coordinate_space
 
     def decide(
         self,
         context: RoleContext,
+        first_observation: Observation,
         current_observation: Observation,
         action_space: Sequence[ActionSpec],
         tool_runtime: AgentToolRuntime | None = None,
-        recent_action_history: tuple[ActionHistoryItem, ...] = (),
-        *,
-        glossary_actions: Sequence[ActionSpec] | None = None,
-        first_observation_ref: ObservationRef | None = None,
-        recent_action_history_available: bool = True,
-        action_outcome_evidence: ActionOutcomeEvidence | None = None,
+        world_game_context: str = "",
+        goal_game_context: str = "",
+        recent_action_history: tuple[ActionHistoryEntry, ...] = (),
     ) -> DecisionResult:
         """Run the provider-neutral X loop until one final action is submitted."""
 
@@ -147,12 +149,12 @@ class OrchestratorAgentAdapter:
         self.last_provider_requests = []
         request = AgentTurnRequest(
             context=context,
+            world_game_context=world_game_context,
+            goal_game_context=goal_game_context,
+            first_observation=first_observation,
             current_observation=current_observation,
             action_space=action_space,
-            glossary_actions=glossary_actions or action_space,
             recent_action_history=recent_action_history,
-            recent_action_history_available=recent_action_history_available,
-            action_outcome_evidence=action_outcome_evidence,
         )
         self.provider.begin(request)
 
@@ -165,8 +167,8 @@ class OrchestratorAgentAdapter:
         tool_specs = self._agent_tool_specs(tool_runtime)
         return self._run_steps(
             action_space=action_space,
+            first_observation=first_observation,
             current_observation=current_observation,
-            first_observation_ref=first_observation_ref,
             tool_runtime=tool_runtime,
             tool_specs=tool_specs,
             tool_calls=tool_calls,
@@ -181,8 +183,8 @@ class OrchestratorAgentAdapter:
         self,
         *,
         action_space: Sequence[ActionSpec],
+        first_observation: Observation,
         current_observation: Observation,
-        first_observation_ref: ObservationRef | None,
         tool_runtime: AgentToolRuntime | None,
         tool_specs: tuple[AgentToolSpec, ...],
         tool_calls: list[ToolCall],
@@ -225,11 +227,7 @@ class OrchestratorAgentAdapter:
                     final_action = parse_final_action(
                         response.final_output,
                         action_space,
-                        observation_text_config=getattr(
-                            self.config,
-                            "observation_text",
-                            None,
-                        ),
+                        coordinate_space=self.coordinate_space,
                     )
                 except Exception as exc:
                     raise AgentOutputError(
@@ -237,8 +235,8 @@ class OrchestratorAgentAdapter:
                     ) from exc
                 return self._decision_result(
                     final_action=final_action,
+                    first_observation=first_observation,
                     current_observation=current_observation,
-                    first_observation_ref=first_observation_ref,
                     tool_calls=tool_calls,
                     tool_results=tool_results,
                     repair_count=current_repair_count,
@@ -341,11 +339,7 @@ class OrchestratorAgentAdapter:
             action = parse_action(
                 args.get("action"),
                 action_space,
-                observation_text_config=getattr(
-                    self.config,
-                    "observation_text",
-                    None,
-                ),
+                coordinate_space=self.coordinate_space,
             )
         return ToolCall(
             tool=provider_call.name,  # type: ignore[arg-type]
@@ -357,8 +351,8 @@ class OrchestratorAgentAdapter:
         self,
         *,
         final_action: ActionSpec,
+        first_observation: Observation,
         current_observation: Observation,
-        first_observation_ref: ObservationRef | None,
         tool_calls: list[ToolCall],
         tool_results: list[ToolResult],
         repair_count: int,
@@ -367,8 +361,8 @@ class OrchestratorAgentAdapter:
     ) -> DecisionResult:
         return build_decision_result(
             final_action=final_action,
+            first_observation=first_observation,
             current_observation=current_observation,
-            first_observation_ref=first_observation_ref,
             tool_calls=tool_calls,
             tool_results=tool_results,
             metadata={

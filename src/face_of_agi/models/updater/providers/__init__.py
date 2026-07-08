@@ -1,7 +1,17 @@
 """Provider adapters for updater P."""
 
-from face_of_agi.models.updater.providers.vllm import VLLMUpdaterAdapter
+from face_of_agi.models.updater.providers.configurable import (
+    ConfigurableUpdaterAdapter,
+)
+from face_of_agi.models.updater.providers.huggingface import (
+    HuggingFaceUpdaterAdapter,
+)
+from face_of_agi.models.updater.providers.ollama import OllamaUpdaterAdapter
+from face_of_agi.models.updater.providers.openai import OpenAIUpdaterAdapter
 
 __all__ = [
-    "VLLMUpdaterAdapter",
+    "ConfigurableUpdaterAdapter",
+    "HuggingFaceUpdaterAdapter",
+    "OllamaUpdaterAdapter",
+    "OpenAIUpdaterAdapter",
 ]

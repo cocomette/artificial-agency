@@ -13,6 +13,7 @@ from face_of_agi.contracts import (
     GameRunResult,
     Observation,
     ObservationRef,
+    PostDecisionPredictions,
     RoleContext,
     ToolCall,
     ToolName,
@@ -40,6 +41,9 @@ class FrameTurnStarted:
 @dataclass(frozen=True, slots=True)
 class AgentFrameworkInputCaptured:
     context: RoleContext
+    world_game_context: str
+    goal_game_context: str
+    first_observation: Observation
     current_observation: Observation
     action_space: Sequence[ActionSpec]
     recent_action_history: Sequence[Any]
@@ -84,6 +88,11 @@ class ToolResultRecorded:
 
 
 @dataclass(frozen=True, slots=True)
+class PostDecisionPredictionsRecorded:
+    predictions: PostDecisionPredictions
+
+
+@dataclass(frozen=True, slots=True)
 class EnvironmentStepRecorded:
     action: ActionSpec
     next_observation: Observation
@@ -103,31 +112,9 @@ class UpdaterProviderOutputCaptured:
 
 
 @dataclass(frozen=True, slots=True)
-class ModelCallCompleted:
-    role: str
-    duration_seconds: float
-
-
-@dataclass(frozen=True, slots=True)
 class MStatePersisted:
     record_id: int
     turn_id: int
-
-
-@dataclass(frozen=True, slots=True)
-class FrameTurnCompleted:
-    run_id: str
-    game_id: str
-    game_index: int | None
-    turn_id: int
-    env_step: int | None
-    frame_index: int
-    frame_count: int
-    controllable: bool
-    action: ActionSpec
-    turn_duration_seconds: float
-    completed_levels: int
-    remaining_actions: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,11 +131,10 @@ DebugEvent: TypeAlias = (
     | ToolModelInputCaptured
     | ToolProviderInputCaptured
     | ToolResultRecorded
+    | PostDecisionPredictionsRecorded
     | EnvironmentStepRecorded
     | UpdaterInputCaptured
     | UpdaterProviderOutputCaptured
-    | ModelCallCompleted
     | MStatePersisted
-    | FrameTurnCompleted
     | RunStopped
 )

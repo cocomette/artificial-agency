@@ -14,16 +14,19 @@ runtime result boundary.
 To persistent memory `M`:
 
 - initial and current observations
-- final real actions or synthetic `NONE` animation decisions
+- final real actions
 - agent traces
-- transition change summaries and action history entries
-- turn metrics and score/progress markers
-- agent context after updater output has been applied by orchestration
+- world and goal predictions
+- real next observations
+- transition timing
+- score/progress metadata
+- context documents after updater output has been applied by orchestration
 
 To experimental memory `E`:
 
-- no entries in the current vLLM-only runtime path
-- the domain remains available for provider-neutral future tool outputs
+- Agent X tool outputs, when tools are configured
+- source memory references for each tool input
+- reference ids for later tool calls in the same experimental tree
 
 ## Model Outputs
 
@@ -31,8 +34,9 @@ Orchestration calls model roles and receives their outputs, but it does not
 rewrite model semantics. It records outputs and passes the relevant results to
 the next target:
 
+- tool results and reference ids may be returned to `X` when tools are configured
 - final action is sent to the environment
-- change summaries and traces are passed to updater `P`
+- S/G predictions, trace, and transition data are passed to updater `P`
 - update results are applied to live working contexts and persisted in `M`
 
 ## Runtime Outputs
