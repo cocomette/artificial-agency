@@ -18,6 +18,8 @@ The repository is organized around experimental branches:
 - Each branch updates its own `README.md` and `doc/` folder according to the concept it describes.
 - When reading a branch, use that branch's documentation as the source of context.
 
+
+
 ## Repository Map
 
 - `src/face_of_agi/` - project source code
@@ -25,6 +27,8 @@ The repository is organized around experimental branches:
 - `debug/` - local debugging, inspection, and analysis tools with a debug dashboard app.
 - `tests/` - regression tests for supported mechanics
 - `kaggle/` - Kaggle notebook build and upload workflow
+
+
 
 ## Setup
 
@@ -34,6 +38,8 @@ Use Python 3.12 and `uv` from the repo root:
 uv sync --no-dev
 uv run --no-dev python -c "import face_of_agi"
 ```
+
+
 
 ## First Run
 
@@ -65,6 +71,8 @@ Clear memory database rows without starting ARC:
 uv run --no-dev python -m face_of_agi.runtime.shell --clean-db
 ```
 
+
+
 ## Debug Dashboard
 
 The local Streamlit dashboard was built to make runs inspectable while developing agents. It can launch saved runtime configs, edit YAML configs from the browser, inspect persisted SQLite memory turns, review saved runs, and replay agent behavior frame by frame.
@@ -78,14 +86,9 @@ The `--database` argument points to a folder of SQLite memory files. Dashboard-l
 
 The dashboard works with local runs as well as remote Modal and Kaggle runs through memory-file pulling.
 
-<p align="center">
-  <img src="doc/assets/readme/dashboard-memory-turns.png" alt="Dashboard memory turns view" width="49%">
-  <img src="doc/assets/readme/dashboard-scoring.png" alt="Dashboard scoring view" width="49%">
-</p>
 
-<p align="center">
-  <img src="doc/assets/readme/dashboard-model-io.png" alt="Dashboard model I/O view" width="100%">
-</p>
+
+
 
 ## Tests
 
@@ -101,12 +104,16 @@ Testing details live in `doc/test/test_suite.md` and `doc/test/end_to_end.md`.
 
 ## Reports And References
 
-We will add a project report to this repository summarizing the work, explored ideas, results, and lessons learned.
+The following project report summarizes the work, explored ideas, results, and lessons learned:
+[FACE-OF-AGI Report](https://github.com/cocomette/artificial-agency/blob/main/doc/public%20report.pdf)
+
 
 Useful starting points:
 
 - [ARC-AGI-3](https://arcprize.org/arc-agi/3)
 - [ARC Prize 2026 ARC-AGI-3 Kaggle Competition](https://www.kaggle.com/competitions/arc-prize-2026-arc-agi-3)
+
+
 
 ## License
 
